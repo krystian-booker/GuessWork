@@ -1,0 +1,87 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <opencv2/core/mat.hpp>
+
+#include "posest/Frame.h"
+#include "posest/IFrameConsumer.h"
+#include "posest/IFrameProducer.h"
+
+namespace posest {
+
+// Reusable base for any frame source.
+//
+// Owns: the capture thread, the subscriber list, the sequence counter, and the
+// timestamping discipline (steady_clock, stamped inside the base right after
+// captureOne() returns). Subclasses only implement captureOne() — they write
+// an image into the out Mat and return true, or return false to end the stream.
+class ProducerBase : public IFrameProducer {
+public:
+    explicit ProducerBase(std::string id);
+    ~ProducerBase() override;
+
+    ProducerBase(const ProducerBase&) = delete;
+    ProducerBase& operator=(const ProducerBase&) = delete;
+
+    const std::string& id() const override { return id_; }
+
+    // Must be called before start(). Safe to call multiple times.
+    void addConsumer(std::shared_ptr<IFrameConsumer> consumer) override;
+
+    void start() override;
+    void stop() override;
+
+    std::uint64_t producedCount() const { return produced_.load(); }
+
+protected:
+    // Produce one frame. Return true on success (frame will be fanned out),
+    // false to signal end-of-stream (capture loop exits).
+    //
+    // Timestamping contract:
+    //   - If the backend exposes a native capture timestamp (V4L2 buffer
+    //     timestamp, GenICam/PTP hardware stamp, vendor SDK metadata, etc.),
+    //     the subclass MUST convert it into the std::chrono::steady_clock
+    //     domain and assign it to out_capture_time. For V4L2 with
+    //     V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC this is a direct construction
+    //     from the kernel timespec; for cameras with their own epoch, do a
+    //     one-shot startup calibration (capture steady_clock::now() and the
+    //     camera tick together, store the offset) and apply it per-frame.
+    //   - If the subclass leaves out_capture_time as std::nullopt, the base
+    //     will fall back to stamping steady_clock::now() immediately after
+    //     captureOne() returns. This is the best userspace approximation
+    //     but is subject to scheduling jitter — real producers with access
+    //     to a hardware/kernel timestamp should always supply one.
+    //
+    // All consumers observe Frame::capture_time in the steady_clock domain,
+    // regardless of which backend produced it. This keeps cross-camera
+    // timestamp math well-defined (required for VIO/multi-camera fusion).
+    virtual bool captureOne(
+        cv::Mat& out,
+        std::optional<std::chrono::steady_clock::time_point>& out_capture_time) = 0;
+
+    // Hook for subclasses that want to check the running flag themselves
+    // (e.g. to break out of a blocking read). Base calls this in the loop.
+    bool isRunning() const { return running_.load(std::memory_order_acquire); }
+
+private:
+    void runLoop();
+
+    std::string id_;
+    std::vector<std::shared_ptr<IFrameConsumer>> consumers_;
+    std::mutex consumers_mu_;  // guards only addConsumer vs. runLoop's snapshot
+
+    std::thread worker_;
+    std::atomic<bool> running_{false};
+    std::atomic<std::uint64_t> produced_{0};
+    std::uint64_t next_sequence_{0};
+};
+
+}  // namespace posest

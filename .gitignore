@@ -39,3 +39,58 @@
 
 # debug information files
 *.dwo
+
+# CMake
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+_deps/
+compile_commands.json
+
+# Conan 2 (local project-layout output)
+CMakeUserPresets.json
+conan.lock
+graph_info.json
+conanbuildinfo.*
+conaninfo.txt
+
+# Coverage / profiling
+*.gcno
+*.gcda
+*.gcov
+coverage/
+lcov.info
+*.profraw
+*.profdata
+
+# IDEs and editors
+.vscode/
+.vs/
+.idea/
+*.code-workspace
+.cache/
+.clangd/
+.ccls-cache/
+.clang-tidy.cache
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python (for tooling scripts / virtualenvs if added)
+.venv/
+__pycache__/
+*.pyc
