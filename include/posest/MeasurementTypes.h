@@ -1,0 +1,82 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "posest/Timestamp.h"
+
+namespace posest {
+
+struct Vec2 {
+    double x{0.0};
+    double y{0.0};
+};
+
+struct Vec3 {
+    double x{0.0};
+    double y{0.0};
+    double z{0.0};
+};
+
+struct Pose2d {
+    double x_m{0.0};
+    double y_m{0.0};
+    double theta_rad{0.0};
+};
+
+struct Pose3d {
+    Vec3 translation_m;
+    Vec3 rotation_rpy_rad;
+};
+
+struct AprilTagDetection {
+    int tag_id{0};
+    std::array<Vec2, 4> image_corners_px{};
+    std::optional<Pose3d> camera_to_tag;
+    double ambiguity{0.0};
+    double reprojection_error_px{0.0};
+};
+
+struct AprilTagObservation {
+    std::string camera_id;
+    std::uint64_t frame_sequence{0};
+    Timestamp capture_time{};
+    std::vector<AprilTagDetection> detections;
+};
+
+struct VioMeasurement {
+    std::string camera_id;
+    Timestamp timestamp{};
+    Pose3d relative_motion;
+    std::array<double, 36> covariance{};
+    bool tracking_ok{false};
+    std::string backend_status;
+};
+
+struct ImuSample {
+    Timestamp timestamp{};
+    Vec3 accel_mps2;
+    Vec3 gyro_radps;
+    std::optional<double> temperature_c;
+    std::uint32_t status_flags{0};
+};
+
+struct WheelOdometrySample {
+    Timestamp timestamp{};
+    Pose2d chassis_delta;
+    std::vector<double> wheel_delta_m;
+    std::uint32_t status_flags{0};
+};
+
+struct FusedPoseEstimate {
+    Timestamp timestamp{};
+    Pose2d field_to_robot;
+    std::optional<Vec3> velocity;
+    std::array<double, 36> covariance{};
+    std::uint32_t status_flags{0};
+};
+
+}  // namespace posest

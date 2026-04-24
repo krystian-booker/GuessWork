@@ -1,0 +1,158 @@
+#include "posest/teensy/Protocol.h"
+
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <utility>
+
+namespace posest::teensy {
+
+namespace {
+
+constexpr std::size_t kHeaderSize = 10;
+constexpr std::size_t kCrcSize = 4;
+constexpr std::size_t kMaxPayloadSize = 4096;
+
+void appendU16(std::vector<std::uint8_t>& out, std::uint16_t value) {
+    out.push_back(static_cast<std::uint8_t>(value & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((value >> 8u) & 0xFFu));
+}
+
+void appendU32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+    for (int shift = 0; shift <= 24; shift += 8) {
+        out.push_back(static_cast<std::uint8_t>((value >> static_cast<unsigned>(shift)) & 0xFFu));
+    }
+}
+
+std::uint16_t readU16(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint16_t>(bytes[offset]) |
+           static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[offset + 1]) << 8u);
+}
+
+std::uint32_t readU32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8u) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16u) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24u);
+}
+
+}  // namespace
+
+std::uint32_t crc32(const std::uint8_t* data, std::size_t size) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            const std::uint32_t mask = 0u - (crc & 1u);
+            crc = (crc >> 1u) ^ (0xEDB88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
+std::vector<std::uint8_t> encodeFrame(const Frame& frame) {
+    std::vector<std::uint8_t> out;
+    out.reserve(kHeaderSize + frame.payload.size() + kCrcSize);
+    appendU16(out, kFrameMagic);
+    out.push_back(kProtocolVersion);
+    out.push_back(static_cast<std::uint8_t>(frame.type));
+    appendU32(out, frame.sequence);
+    appendU16(out, static_cast<std::uint16_t>(frame.payload.size()));
+    out.insert(out.end(), frame.payload.begin(), frame.payload.end());
+    appendU32(out, crc32(out.data(), out.size()));
+    return out;
+}
+
+std::optional<DecodeResult> decodeFrame(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < kHeaderSize + kCrcSize) {
+        return std::nullopt;
+    }
+    if (readU16(bytes, 0) != kFrameMagic || bytes[2] != kProtocolVersion) {
+        return std::nullopt;
+    }
+
+    const std::uint16_t payload_size = readU16(bytes, 8);
+    if (payload_size > kMaxPayloadSize) {
+        return std::nullopt;
+    }
+
+    const std::size_t total_size = kHeaderSize + payload_size + kCrcSize;
+    if (bytes.size() < total_size) {
+        return std::nullopt;
+    }
+
+    const std::uint32_t expected_crc = readU32(bytes, kHeaderSize + payload_size);
+    const std::uint32_t actual_crc = crc32(bytes.data(), kHeaderSize + payload_size);
+    if (expected_crc != actual_crc) {
+        return std::nullopt;
+    }
+
+    Frame frame;
+    frame.type = static_cast<MessageType>(bytes[3]);
+    frame.sequence = readU32(bytes, 4);
+    frame.payload.assign(bytes.begin() + static_cast<std::ptrdiff_t>(kHeaderSize),
+                         bytes.begin() + static_cast<std::ptrdiff_t>(kHeaderSize + payload_size));
+    return DecodeResult{std::move(frame), total_size};
+}
+
+std::vector<Frame> StreamDecoder::push(const std::uint8_t* data, std::size_t size) {
+    buffer_.insert(buffer_.end(), data, data + size);
+
+    std::vector<Frame> frames;
+    while (buffer_.size() >= kHeaderSize + kCrcSize) {
+        const std::array<std::uint8_t, 2> magic{
+            static_cast<std::uint8_t>(kFrameMagic & 0xFFu),
+            static_cast<std::uint8_t>((kFrameMagic >> 8u) & 0xFFu)};
+        auto magic_it = std::search(
+            buffer_.begin(), buffer_.end(), magic.begin(), magic.end());
+
+        if (magic_it == buffer_.end()) {
+            buffer_.clear();
+            break;
+        }
+        if (magic_it != buffer_.begin()) {
+            buffer_.erase(buffer_.begin(), magic_it);
+        }
+
+        if (buffer_.size() < kHeaderSize + kCrcSize) {
+            break;
+        }
+
+        const std::uint16_t payload_size = readU16(buffer_, 8);
+        if (payload_size > kMaxPayloadSize) {
+            buffer_.erase(buffer_.begin());
+            continue;
+        }
+
+        const std::size_t total_size = kHeaderSize + payload_size + kCrcSize;
+        if (buffer_.size() < total_size) {
+            break;
+        }
+
+        auto decoded = decodeFrame(buffer_);
+        if (!decoded) {
+            ++stats_.crc_failures;
+            buffer_.erase(buffer_.begin());
+            continue;
+        }
+
+        Frame frame = std::move(decoded->frame);
+        if (stats_.last_sequence &&
+            frame.sequence != static_cast<std::uint32_t>(*stats_.last_sequence + 1u)) {
+            ++stats_.sequence_gaps;
+        }
+        stats_.last_sequence = frame.sequence;
+        frames.push_back(std::move(frame));
+        buffer_.erase(buffer_.begin(),
+                      buffer_.begin() + static_cast<std::ptrdiff_t>(decoded->bytes_consumed));
+    }
+
+    return frames;
+}
+
+void StreamDecoder::clear() {
+    buffer_.clear();
+    stats_ = StreamStats{};
+}
+
+}  // namespace posest::teensy

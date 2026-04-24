@@ -19,6 +19,7 @@ add_library(posest_core
     src/core/LatestFrameSlot.cpp
     src/core/ProducerBase.cpp
     src/core/ConsumerBase.cpp
+    src/core/MeasurementBus.cpp
 )
 target_include_directories(posest_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -34,6 +35,33 @@ add_library(posest_camera
     src/camera/CameraProducer.cpp
 )
 target_link_libraries(posest_camera PUBLIC posest_core PRIVATE pugixml::pugixml)
+
+# --- posest_config: runtime config store contracts + SQLite schema
+add_library(posest_config
+    src/config/InMemoryConfigStore.cpp
+    src/config/SqliteSchema.cpp
+)
+target_link_libraries(posest_config PUBLIC posest_core posest_camera)
+
+# --- posest_runtime: graph wiring + web/control facade
+add_library(posest_runtime
+    src/runtime/RuntimeGraph.cpp
+    src/runtime/WebService.cpp
+)
+target_link_libraries(posest_runtime PUBLIC posest_core posest_camera posest_config)
+
+# --- posest_fusion: measurement ingestion + fusion output boundary
+add_library(posest_fusion
+    src/fusion/FusionService.cpp
+)
+target_link_libraries(posest_fusion PUBLIC posest_core)
+
+# --- posest_teensy: USB protocol codec + fusion output adapter
+add_library(posest_teensy
+    src/teensy/Protocol.cpp
+    src/teensy/TeensyService.cpp
+)
+target_link_libraries(posest_teensy PUBLIC posest_core posest_fusion posest_runtime)
 
 # --- posest_v4l2: V4L2 camera backend (Linux only)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -63,8 +91,22 @@ add_executable(posest_tests
     test/test_producer_base.cpp
     test/test_mock_pipeline.cpp
     test/test_camera_config.cpp
+    test/test_measurement_bus.cpp
+    test/test_runtime_graph.cpp
+    test/test_teensy_protocol.cpp
+    test/test_config_schema.cpp
+    test/test_fusion_service.cpp
 )
-target_link_libraries(posest_tests PRIVATE posest_mock posest_camera GTest::gtest GTest::gtest_main)
+target_link_libraries(posest_tests PRIVATE
+    posest_mock
+    posest_camera
+    posest_config
+    posest_runtime
+    posest_fusion
+    posest_teensy
+    GTest::gtest
+    GTest::gtest_main
+)
 
 if(TARGET posest_v4l2)
     target_sources(posest_tests PRIVATE test/test_v4l2_producer.cpp)
