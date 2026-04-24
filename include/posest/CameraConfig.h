@@ -22,6 +22,7 @@ struct CameraConfig {
     std::string id;
     std::string type;
     std::string device;
+    bool enabled = true;
     CameraFormatConfig format;
     std::vector<CameraControlEntry> controls;
 };

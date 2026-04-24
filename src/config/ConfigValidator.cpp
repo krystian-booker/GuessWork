@@ -1,0 +1,107 @@
+#include "posest/config/ConfigValidator.h"
+
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace posest::config {
+
+namespace {
+
+std::string trim(std::string value) {
+    const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    });
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }).base();
+    if (first >= last) {
+        return {};
+    }
+    return std::string(first, last);
+}
+
+bool isObjectShapedJson(const std::string& value) {
+    const std::string trimmed = trim(value);
+    return trimmed.empty() || (trimmed.front() == '{' && trimmed.back() == '}');
+}
+
+void require(bool condition, const std::string& message) {
+    if (!condition) {
+        throw std::invalid_argument("Invalid runtime config: " + message);
+    }
+}
+
+}  // namespace
+
+void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
+    std::unordered_map<std::string, bool> cameras_enabled;
+    for (const auto& camera : config.cameras) {
+        require(!camera.id.empty(), "camera id is empty");
+        require(cameras_enabled.emplace(camera.id, camera.enabled).second,
+                "duplicate camera id: " + camera.id);
+        require(!camera.type.empty(), "camera '" + camera.id + "' has empty type");
+        require(!camera.device.empty(), "camera '" + camera.id + "' has empty device");
+        require(camera.format.width > 0, "camera '" + camera.id + "' width must be > 0");
+        require(camera.format.height > 0, "camera '" + camera.id + "' height must be > 0");
+        require(camera.format.fps > 0.0, "camera '" + camera.id + "' fps must be > 0");
+        require(!camera.format.pixel_format.empty(),
+                "camera '" + camera.id + "' pixel format is empty");
+
+        std::unordered_set<std::string> controls;
+        for (const auto& control : camera.controls) {
+            require(!control.name.empty(), "camera '" + camera.id + "' has empty control name");
+            require(controls.insert(control.name).second,
+                    "camera '" + camera.id + "' has duplicate control: " + control.name);
+        }
+    }
+
+    std::unordered_map<std::string, bool> pipelines_enabled;
+    for (const auto& pipeline : config.pipelines) {
+        require(!pipeline.id.empty(), "pipeline id is empty");
+        require(pipelines_enabled.emplace(pipeline.id, pipeline.enabled).second,
+                "duplicate pipeline id: " + pipeline.id);
+        require(!pipeline.type.empty(), "pipeline '" + pipeline.id + "' has empty type");
+        require(isObjectShapedJson(pipeline.parameters_json),
+                "pipeline '" + pipeline.id + "' parameters_json must be empty or object-shaped");
+    }
+
+    std::unordered_set<std::string> bindings;
+    for (const auto& binding : config.bindings) {
+        require(!binding.camera_id.empty(), "binding has empty camera id");
+        require(!binding.pipeline_id.empty(), "binding has empty pipeline id");
+        const auto camera_it = cameras_enabled.find(binding.camera_id);
+        require(camera_it != cameras_enabled.end(),
+                "binding references unknown camera: " + binding.camera_id);
+        require(camera_it->second,
+                "binding references disabled camera: " + binding.camera_id);
+        const auto pipeline_it = pipelines_enabled.find(binding.pipeline_id);
+        require(pipeline_it != pipelines_enabled.end(),
+                "binding references unknown pipeline: " + binding.pipeline_id);
+        require(pipeline_it->second,
+                "binding references disabled pipeline: " + binding.pipeline_id);
+        require(bindings.insert(binding.camera_id + "\n" + binding.pipeline_id).second,
+                "duplicate binding: " + binding.camera_id + " -> " + binding.pipeline_id);
+    }
+
+    std::unordered_set<std::string> calibrations;
+    for (const auto& calibration : config.calibrations) {
+        require(!calibration.camera_id.empty(), "calibration has empty camera id");
+        require(cameras_enabled.find(calibration.camera_id) != cameras_enabled.end(),
+                "calibration references unknown camera: " + calibration.camera_id);
+        require(!calibration.file_path.empty(),
+                "calibration for camera '" + calibration.camera_id + "' has empty file path");
+        require(!calibration.version.empty(),
+                "calibration for camera '" + calibration.camera_id + "' has empty version");
+        require(calibrations.insert(calibration.camera_id + "\n" + calibration.version).second,
+                "duplicate calibration for camera/version: " + calibration.camera_id + "/" +
+                    calibration.version);
+    }
+
+    require(config.teensy.pose_publish_hz > 0.0, "Teensy pose publish rate must be > 0");
+}
+
+}  // namespace posest::config

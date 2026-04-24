@@ -1,18 +1,51 @@
 #include "posest/config/SqliteSchema.h"
 
+#include <stdexcept>
+#include <string>
+
+#include <sqlite3.h>
+
 namespace posest::config {
 
-const char* sqliteSchemaSql() {
+namespace {
+
+void exec(sqlite3* db, const char* sql) {
+    char* err = nullptr;
+    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
+        std::string msg = err ? err : "unknown SQLite error";
+        sqlite3_free(err);
+        throw std::runtime_error("SQLite schema migration failed: " + msg);
+    }
+}
+
+int userVersion(sqlite3* db) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error("Failed to read SQLite user_version");
+    }
+    const int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        throw std::runtime_error("SQLite user_version returned no row");
+    }
+    const int version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return version;
+}
+
+const char* migration1Sql() {
     return R"sql(
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS cameras (
     id TEXT PRIMARY KEY NOT NULL,
     backend_type TEXT NOT NULL,
     device TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
     width INTEGER NOT NULL,
     height INTEGER NOT NULL,
     fps REAL NOT NULL,
-    pixel_format TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1
+    pixel_format TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS camera_controls (
@@ -54,7 +87,30 @@ CREATE TABLE IF NOT EXISTS teensy_config (
     status_can_id INTEGER NOT NULL,
     pose_publish_hz REAL NOT NULL
 );
+
+PRAGMA user_version = 1;
+COMMIT;
 )sql";
+}
+
+}  // namespace
+
+int currentSchemaVersion() {
+    return 1;
+}
+
+void applyMigrations(sqlite3* db) {
+    if (!db) {
+        throw std::invalid_argument("applyMigrations called with null sqlite3 handle");
+    }
+
+    const int version = userVersion(db);
+    if (version > currentSchemaVersion()) {
+        throw std::runtime_error("SQLite config database schema is newer than this binary");
+    }
+    if (version == 0) {
+        exec(db, migration1Sql());
+    }
 }
 
 }  // namespace posest::config

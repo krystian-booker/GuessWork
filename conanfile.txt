@@ -1,7 +1,7 @@
 [requires]
 opencv/4.10.0
 gtest/1.14.0
-pugixml/1.14
+sqlite3/3.45.3
 
 [generators]
 CMakeDeps

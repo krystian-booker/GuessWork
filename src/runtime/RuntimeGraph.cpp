@@ -25,6 +25,9 @@ void RuntimeGraph::build() {
     }
 
     for (const auto& camera_cfg : config_.cameras) {
+        if (!camera_cfg.enabled) {
+            continue;
+        }
         if (camera_cfg.id.empty()) {
             throw std::runtime_error("Camera config has empty id");
         }

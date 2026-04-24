@@ -1,19 +1,218 @@
+#include <chrono>
+#include <filesystem>
 #include <string>
 
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 
+#include "posest/config/ConfigValidator.h"
 #include "posest/config/InMemoryConfigStore.h"
+#include "posest/config/SqliteConfigStore.h"
 #include "posest/config/SqliteSchema.h"
 
-TEST(ConfigSchema, ContainsRequiredRuntimeTables) {
-    const std::string schema = posest::config::sqliteSchemaSql();
+namespace {
 
-    EXPECT_NE(schema.find("CREATE TABLE IF NOT EXISTS cameras"), std::string::npos);
-    EXPECT_NE(schema.find("CREATE TABLE IF NOT EXISTS camera_controls"), std::string::npos);
-    EXPECT_NE(schema.find("CREATE TABLE IF NOT EXISTS pipelines"), std::string::npos);
-    EXPECT_NE(schema.find("CREATE TABLE IF NOT EXISTS camera_pipeline_bindings"), std::string::npos);
-    EXPECT_NE(schema.find("CREATE TABLE IF NOT EXISTS calibrations"), std::string::npos);
-    EXPECT_NE(schema.find("CREATE TABLE IF NOT EXISTS teensy_config"), std::string::npos);
+std::filesystem::path tempDbPath(const std::string& name) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::filesystem::temp_directory_path() /
+           ("posest_" + name + "_" + std::to_string(stamp) + ".db");
+}
+
+int readUserVersion(const std::filesystem::path& path) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(path.string().c_str(), &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        throw std::runtime_error("failed to open temp db");
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        throw std::runtime_error("failed to prepare user_version");
+    }
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        throw std::runtime_error("failed to step user_version");
+    }
+    const int version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return version;
+}
+
+posest::runtime::RuntimeConfig makeValidConfig() {
+    posest::runtime::RuntimeConfig config;
+
+    posest::CameraConfig cam0;
+    cam0.id = "cam0";
+    cam0.type = "v4l2";
+    cam0.device = "/dev/video0";
+    cam0.enabled = true;
+    cam0.format.width = 1280;
+    cam0.format.height = 720;
+    cam0.format.fps = 60.0;
+    cam0.format.pixel_format = "mjpeg";
+    cam0.controls.push_back({"exposure_absolute", 120});
+    cam0.controls.push_back({"gain", 20});
+    config.cameras.push_back(cam0);
+
+    posest::CameraConfig cam1;
+    cam1.id = "cam1";
+    cam1.type = "v4l2";
+    cam1.device = "/dev/video1";
+    cam1.enabled = false;
+    config.cameras.push_back(cam1);
+
+    posest::runtime::PipelineConfig tags;
+    tags.id = "tags";
+    tags.type = "apriltag";
+    tags.enabled = true;
+    tags.parameters_json = R"({"family":"tag36h11"})";
+    config.pipelines.push_back(tags);
+
+    posest::runtime::PipelineConfig vio;
+    vio.id = "vio";
+    vio.type = "vio";
+    vio.enabled = false;
+    vio.parameters_json = "{}";
+    config.pipelines.push_back(vio);
+
+    config.bindings.push_back({"cam0", "tags"});
+    config.calibrations.push_back({"cam0", "calib/cam0.json", "v1", "2026-04-24T00:00:00Z"});
+    config.teensy.serial_port = "/dev/ttyACM0";
+    config.teensy.fused_pose_can_id = 0x201;
+    config.teensy.status_can_id = 0x202;
+    config.teensy.pose_publish_hz = 50.0;
+
+    return config;
+}
+
+}  // namespace
+
+TEST(SqliteConfigStore, CreatesDatabaseAndAppliesSchemaVersion) {
+    const auto path = tempDbPath("schema");
+    std::filesystem::remove(path);
+
+    {
+        posest::config::SqliteConfigStore store(path);
+        EXPECT_TRUE(std::filesystem::exists(path));
+    }
+
+    EXPECT_EQ(readUserVersion(path), posest::config::currentSchemaVersion());
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, EmptyDatabaseLoadsDefaultRuntimeConfig) {
+    const auto path = tempDbPath("empty");
+    std::filesystem::remove(path);
+
+    posest::config::SqliteConfigStore store(path);
+    const auto config = store.loadRuntimeConfig();
+
+    EXPECT_TRUE(config.cameras.empty());
+    EXPECT_TRUE(config.pipelines.empty());
+    EXPECT_TRUE(config.bindings.empty());
+    EXPECT_TRUE(config.calibrations.empty());
+    EXPECT_DOUBLE_EQ(config.teensy.pose_publish_hz, 50.0);
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
+    const auto path = tempDbPath("roundtrip");
+    std::filesystem::remove(path);
+    const auto saved = makeValidConfig();
+
+    {
+        posest::config::SqliteConfigStore store(path);
+        store.saveRuntimeConfig(saved);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+
+    ASSERT_EQ(loaded.cameras.size(), 2u);
+    EXPECT_EQ(loaded.cameras[0].id, "cam0");
+    EXPECT_TRUE(loaded.cameras[0].enabled);
+    EXPECT_EQ(loaded.cameras[0].format.width, 1280);
+    ASSERT_EQ(loaded.cameras[0].controls.size(), 2u);
+    EXPECT_EQ(loaded.cameras[0].controls[0].name, "exposure_absolute");
+    EXPECT_EQ(loaded.cameras[1].id, "cam1");
+    EXPECT_FALSE(loaded.cameras[1].enabled);
+
+    ASSERT_EQ(loaded.pipelines.size(), 2u);
+    EXPECT_EQ(loaded.pipelines[0].id, "tags");
+    EXPECT_EQ(loaded.pipelines[0].parameters_json, R"({"family":"tag36h11"})");
+    EXPECT_FALSE(loaded.pipelines[1].enabled);
+
+    ASSERT_EQ(loaded.bindings.size(), 1u);
+    EXPECT_EQ(loaded.bindings[0].camera_id, "cam0");
+    EXPECT_EQ(loaded.bindings[0].pipeline_id, "tags");
+
+    ASSERT_EQ(loaded.calibrations.size(), 1u);
+    EXPECT_EQ(loaded.calibrations[0].file_path, "calib/cam0.json");
+    EXPECT_EQ(loaded.teensy.serial_port, "/dev/ttyACM0");
+    EXPECT_EQ(loaded.teensy.fused_pose_can_id, 0x201u);
+    EXPECT_EQ(loaded.teensy.status_can_id, 0x202u);
+
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, FailedValidationDoesNotOverwriteExistingData) {
+    const auto path = tempDbPath("atomic");
+    std::filesystem::remove(path);
+
+    posest::config::SqliteConfigStore store(path);
+    store.saveRuntimeConfig(makeValidConfig());
+
+    auto invalid = makeValidConfig();
+    invalid.cameras[0].id.clear();
+    EXPECT_THROW(store.saveRuntimeConfig(invalid), std::invalid_argument);
+
+    const auto loaded = store.loadRuntimeConfig();
+    ASSERT_EQ(loaded.cameras.size(), 2u);
+    EXPECT_EQ(loaded.cameras[0].id, "cam0");
+    std::filesystem::remove(path);
+}
+
+TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
+    auto config = makeValidConfig();
+
+    auto expect_invalid = [](posest::runtime::RuntimeConfig value) {
+        EXPECT_THROW(posest::config::validateRuntimeConfig(value), std::invalid_argument);
+    };
+
+    auto duplicate_camera = config;
+    duplicate_camera.cameras.push_back(duplicate_camera.cameras[0]);
+    expect_invalid(duplicate_camera);
+
+    auto invalid_format = config;
+    invalid_format.cameras[0].format.width = 0;
+    expect_invalid(invalid_format);
+
+    auto duplicate_control = config;
+    duplicate_control.cameras[0].controls.push_back({"gain", 99});
+    expect_invalid(duplicate_control);
+
+    auto bad_pipeline_json = config;
+    bad_pipeline_json.pipelines[0].parameters_json = "[]";
+    expect_invalid(bad_pipeline_json);
+
+    auto unknown_binding = config;
+    unknown_binding.bindings[0].pipeline_id = "missing";
+    expect_invalid(unknown_binding);
+
+    auto disabled_binding = config;
+    disabled_binding.bindings[0].camera_id = "cam1";
+    expect_invalid(disabled_binding);
+
+    auto bad_calibration = config;
+    bad_calibration.calibrations[0].file_path.clear();
+    expect_invalid(bad_calibration);
+
+    auto bad_teensy = config;
+    bad_teensy.teensy.pose_publish_hz = 0.0;
+    expect_invalid(bad_teensy);
 }
 
 TEST(ConfigStore, InMemoryRoundTripsRuntimeConfig) {

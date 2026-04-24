@@ -13,6 +13,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conver
 
 find_package(OpenCV REQUIRED)
 find_package(GTest REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 # --- posest_core: interfaces, Frame, LatestFrameSlot, ProducerBase, ConsumerBase
 add_library(posest_core
@@ -27,21 +28,20 @@ target_include_directories(posest_core PUBLIC
 target_link_libraries(posest_core PUBLIC opencv::opencv)
 target_compile_features(posest_core PUBLIC cxx_std_20)
 
-# --- posest_camera: generic camera abstractions + XML config
-find_package(pugixml REQUIRED)
-
+# --- posest_camera: generic camera abstractions
 add_library(posest_camera
-    src/camera/XmlCameraConfigSource.cpp
     src/camera/CameraProducer.cpp
 )
-target_link_libraries(posest_camera PUBLIC posest_core PRIVATE pugixml::pugixml)
+target_link_libraries(posest_camera PUBLIC posest_core)
 
 # --- posest_config: runtime config store contracts + SQLite schema
 add_library(posest_config
+    src/config/ConfigValidator.cpp
     src/config/InMemoryConfigStore.cpp
+    src/config/SqliteConfigStore.cpp
     src/config/SqliteSchema.cpp
 )
-target_link_libraries(posest_config PUBLIC posest_core posest_camera)
+target_link_libraries(posest_config PUBLIC posest_core posest_camera SQLite::SQLite3)
 
 # --- posest_runtime: graph wiring + web/control facade
 add_library(posest_runtime
@@ -78,19 +78,12 @@ add_library(posest_mock
 )
 target_link_libraries(posest_mock PUBLIC posest_core)
 
-# --- camera_config_tool (Linux only, needs V4L2 headers)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_executable(camera_config_tool app/camera_config_tool.cpp)
-    target_link_libraries(camera_config_tool PRIVATE posest_core)
-endif()
-
 # --- tests
 enable_testing()
 add_executable(posest_tests
     test/test_latest_frame_slot.cpp
     test/test_producer_base.cpp
     test/test_mock_pipeline.cpp
-    test/test_camera_config.cpp
     test/test_measurement_bus.cpp
     test/test_runtime_graph.cpp
     test/test_teensy_protocol.cpp
