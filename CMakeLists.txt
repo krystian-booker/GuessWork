@@ -14,6 +14,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conver
 find_package(OpenCV REQUIRED)
 find_package(GTest REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 # --- posest_core: interfaces, Frame, LatestFrameSlot, ProducerBase, ConsumerBase
 add_library(posest_core
@@ -42,6 +43,7 @@ add_library(posest_config
     src/config/SqliteSchema.cpp
 )
 target_link_libraries(posest_config PUBLIC posest_core posest_camera SQLite::SQLite3)
+target_link_libraries(posest_config PUBLIC nlohmann_json::nlohmann_json)
 
 # --- posest_runtime: graph wiring + web/control facade
 add_library(posest_runtime
@@ -71,6 +73,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(posest_v4l2 PUBLIC posest_camera)
 endif()
 
+# --- posest_daemon_lib: daemon lifecycle, production factories, health
+add_library(posest_daemon_lib
+    src/runtime/Daemon.cpp
+    src/runtime/ProductionFactories.cpp
+)
+target_link_libraries(posest_daemon_lib PUBLIC
+    posest_config
+    posest_runtime
+    posest_fusion
+    posest_teensy
+    nlohmann_json::nlohmann_json
+)
+if(TARGET posest_v4l2)
+    target_compile_definitions(posest_daemon_lib PRIVATE POSEST_HAS_V4L2)
+    target_link_libraries(posest_daemon_lib PUBLIC posest_v4l2)
+endif()
+
+# --- posest_daemon: single process runtime entrypoint
+add_executable(posest_daemon app/posest_daemon.cpp)
+target_link_libraries(posest_daemon PRIVATE posest_daemon_lib)
+
 # --- posest_mock: MockProducer / MockConsumer (used by tests)
 add_library(posest_mock
     src/mock/MockProducer.cpp
@@ -89,6 +112,7 @@ add_executable(posest_tests
     test/test_teensy_protocol.cpp
     test/test_config_schema.cpp
     test/test_fusion_service.cpp
+    test/test_daemon.cpp
 )
 target_link_libraries(posest_tests PRIVATE
     posest_mock
@@ -97,6 +121,7 @@ target_link_libraries(posest_tests PRIVATE
     posest_runtime
     posest_fusion
     posest_teensy
+    posest_daemon_lib
     GTest::gtest
     GTest::gtest_main
 )

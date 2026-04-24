@@ -7,26 +7,21 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <nlohmann/json.hpp>
+
 namespace posest::config {
 
 namespace {
 
-std::string trim(std::string value) {
-    const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
-        return std::isspace(c) != 0;
-    });
-    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
-        return std::isspace(c) != 0;
-    }).base();
-    if (first >= last) {
-        return {};
+bool isObjectJson(const std::string& value) {
+    if (value.empty()) {
+        return true;
     }
-    return std::string(first, last);
-}
-
-bool isObjectShapedJson(const std::string& value) {
-    const std::string trimmed = trim(value);
-    return trimmed.empty() || (trimmed.front() == '{' && trimmed.back() == '}');
+    try {
+        return nlohmann::json::parse(value).is_object();
+    } catch (const nlohmann::json::parse_error&) {
+        return false;
+    }
 }
 
 void require(bool condition, const std::string& message) {
@@ -65,8 +60,8 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
         require(pipelines_enabled.emplace(pipeline.id, pipeline.enabled).second,
                 "duplicate pipeline id: " + pipeline.id);
         require(!pipeline.type.empty(), "pipeline '" + pipeline.id + "' has empty type");
-        require(isObjectShapedJson(pipeline.parameters_json),
-                "pipeline '" + pipeline.id + "' parameters_json must be empty or object-shaped");
+        require(isObjectJson(pipeline.parameters_json),
+                "pipeline '" + pipeline.id + "' parameters_json must be empty or a JSON object");
     }
 
     std::unordered_set<std::string> bindings;

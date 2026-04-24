@@ -198,6 +198,10 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     bad_pipeline_json.pipelines[0].parameters_json = "[]";
     expect_invalid(bad_pipeline_json);
 
+    auto malformed_pipeline_json = config;
+    malformed_pipeline_json.pipelines[0].parameters_json = R"({"family":)";
+    expect_invalid(malformed_pipeline_json);
+
     auto unknown_binding = config;
     unknown_binding.bindings[0].pipeline_id = "missing";
     expect_invalid(unknown_binding);
