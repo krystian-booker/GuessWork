@@ -7,6 +7,7 @@
 #include "posest/MeasurementBus.h"
 #include "posest/runtime/IVisionPipeline.h"
 #include "posest/runtime/PipelineConfig.h"
+#include "posest/runtime/RuntimeConfig.h"
 
 namespace posest::runtime {
 
@@ -22,6 +23,13 @@ public:
     virtual std::shared_ptr<IVisionPipeline> createPipeline(
         const PipelineConfig& config,
         IMeasurementSink& measurement_sink) = 0;
+    virtual std::shared_ptr<IVisionPipeline> createPipeline(
+        const PipelineConfig& config,
+        IMeasurementSink& measurement_sink,
+        const RuntimeConfig& runtime_config) {
+        (void)runtime_config;
+        return createPipeline(config, measurement_sink);
+    }
 };
 
 }  // namespace posest::runtime

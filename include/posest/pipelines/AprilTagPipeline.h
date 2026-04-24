@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "posest/pipelines/VisionPipelineBase.h"
 #include "posest/runtime/PipelineConfig.h"
@@ -10,6 +11,13 @@ struct apriltag_detector;
 struct apriltag_family;
 
 namespace posest::pipelines {
+
+struct AprilTagCameraCalibration {
+    double fx{0.0};
+    double fy{0.0};
+    double cx{0.0};
+    double cy{0.0};
+};
 
 struct AprilTagPipelineConfig {
     std::string family = "tag36h11";
@@ -21,6 +29,8 @@ struct AprilTagPipelineConfig {
     bool debug = false;
     std::string calibration_version;
     std::string field_layout_id;
+    double tag_size_m{0.1651};
+    std::unordered_map<std::string, AprilTagCameraCalibration> camera_calibrations;
 };
 
 AprilTagPipelineConfig parseAprilTagPipelineConfig(

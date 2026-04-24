@@ -754,7 +754,9 @@ void DaemonController::loadAndBuild() {
         }
 
         measurement_bus_ = std::make_unique<MeasurementBus>(kMeasurementBusCapacity);
-        fusion_ = std::make_unique<fusion::FusionService>(*measurement_bus_);
+        fusion_ = std::make_unique<fusion::FusionService>(
+            *measurement_bus_,
+            fusion::buildFusionConfig(config_));
         teensy_ = std::make_shared<teensy::TeensyService>(
             config_.teensy, config_.camera_triggers, *measurement_bus_);
         fusion_->addOutputSink(teensy_);

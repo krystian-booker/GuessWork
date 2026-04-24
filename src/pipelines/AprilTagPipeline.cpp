@@ -1,10 +1,14 @@
 #include "posest/pipelines/AprilTagPipeline.h"
 
+#include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
 #include <apriltag/apriltag.h>
+#include <apriltag/apriltag_pose.h>
 #include <apriltag/common/image_types.h>
+#include <apriltag/common/matd.h>
 #include <apriltag/common/zarray.h>
 #include <apriltag/tag36h11.h>
 #include <nlohmann/json.hpp>
@@ -41,6 +45,68 @@ T jsonValueOr(const nlohmann::json& json, const char* key, T fallback) {
     return json.at(key).get<T>();
 }
 
+Vec3 rpyFromRotationMatrix(const matd_t* rotation) {
+    const double r00 = matd_get(rotation, 0, 0);
+    const double r10 = matd_get(rotation, 1, 0);
+    const double r20 = matd_get(rotation, 2, 0);
+    const double r21 = matd_get(rotation, 2, 1);
+    const double r22 = matd_get(rotation, 2, 2);
+    const double r11 = matd_get(rotation, 1, 1);
+    const double r12 = matd_get(rotation, 1, 2);
+
+    const double sy = std::sqrt(r00 * r00 + r10 * r10);
+    if (sy < 1e-9) {
+        return {
+            std::atan2(-r12, r11),
+            std::atan2(-r20, sy),
+            0.0,
+        };
+    }
+    return {
+        std::atan2(r21, r22),
+        std::atan2(-r20, sy),
+        std::atan2(r10, r00),
+    };
+}
+
+std::optional<Pose3d> estimateCameraToTag(
+    apriltag_detection_t* detection,
+    const AprilTagCameraCalibration& calibration,
+    double tag_size_m,
+    double& reprojection_error) {
+    apriltag_detection_info_t info{};
+    info.det = detection;
+    info.tagsize = tag_size_m;
+    info.fx = calibration.fx;
+    info.fy = calibration.fy;
+    info.cx = calibration.cx;
+    info.cy = calibration.cy;
+
+    apriltag_pose_t pose{};
+    reprojection_error = estimate_tag_pose(&info, &pose);
+    if (!pose.R || !pose.t) {
+        if (pose.R) {
+            matd_destroy(pose.R);
+        }
+        if (pose.t) {
+            matd_destroy(pose.t);
+        }
+        return std::nullopt;
+    }
+
+    Pose3d out;
+    out.translation_m = {
+        matd_get(pose.t, 0, 0),
+        matd_get(pose.t, 1, 0),
+        matd_get(pose.t, 2, 0),
+    };
+    out.rotation_rpy_rad = rpyFromRotationMatrix(pose.R);
+
+    matd_destroy(pose.R);
+    matd_destroy(pose.t);
+    return out;
+}
+
 }  // namespace
 
 AprilTagPipelineConfig parseAprilTagPipelineConfig(
@@ -66,6 +132,7 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
         jsonValueOr<std::string>(params, "calibration_version", config.calibration_version);
     config.field_layout_id =
         jsonValueOr<std::string>(params, "field_layout_id", config.field_layout_id);
+    config.tag_size_m = jsonValueOr<double>(params, "tag_size_m", config.tag_size_m);
 
     if (config.family != "tag36h11") {
         throw std::invalid_argument("Only AprilTag family tag36h11 is supported");
@@ -81,6 +148,9 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
     }
     if (config.decode_sharpening < 0.0) {
         throw std::invalid_argument("AprilTag decode_sharpening must be >= 0");
+    }
+    if (config.tag_size_m <= 0.0) {
+        throw std::invalid_argument("AprilTag tag_size_m must be > 0");
     }
 
     return config;
@@ -162,6 +232,14 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
         for (std::size_t corner = 0; corner < out.image_corners_px.size(); ++corner) {
             out.image_corners_px[corner].x = detection->p[corner][0];
             out.image_corners_px[corner].y = detection->p[corner][1];
+        }
+        const auto calibration_it = config_.camera_calibrations.find(frame.camera_id);
+        if (calibration_it != config_.camera_calibrations.end()) {
+            out.camera_to_tag = estimateCameraToTag(
+                detection,
+                calibration_it->second,
+                config_.tag_size_m,
+                out.reprojection_error_px);
         }
         observation.detections.push_back(out);
     }

@@ -49,7 +49,8 @@ void RuntimeGraph::build() {
         if (pipeline_cfg.id.empty()) {
             throw std::runtime_error("Pipeline config has empty id");
         }
-        auto pipeline = pipeline_factory_.createPipeline(pipeline_cfg, measurement_sink_);
+        auto pipeline = pipeline_factory_.createPipeline(
+            pipeline_cfg, measurement_sink_, config_);
         if (!pipeline) {
             throw std::runtime_error("Pipeline factory returned null for " + pipeline_cfg.id);
         }

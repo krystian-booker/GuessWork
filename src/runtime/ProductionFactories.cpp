@@ -1,6 +1,7 @@
 #include "posest/runtime/ProductionFactories.h"
 
 #include <stdexcept>
+#include <unordered_map>
 
 #include "posest/pipelines/AprilTagPipeline.h"
 #include "posest/pipelines/PlaceholderPipelines.h"
@@ -10,6 +11,32 @@
 #endif
 
 namespace posest::runtime {
+
+namespace {
+
+void applyCameraCalibrationContext(
+    const RuntimeConfig& runtime_config,
+    pipelines::AprilTagPipelineConfig& pipeline_config) {
+    std::unordered_map<std::string, std::string> active_versions;
+    for (const auto& calibration : runtime_config.calibrations) {
+        if (!calibration.active) {
+            continue;
+        }
+        if (!pipeline_config.calibration_version.empty() &&
+            calibration.version != pipeline_config.calibration_version) {
+            continue;
+        }
+        active_versions[calibration.camera_id] = calibration.version;
+        pipeline_config.camera_calibrations[calibration.camera_id] = {
+            calibration.fx,
+            calibration.fy,
+            calibration.cx,
+            calibration.cy,
+        };
+    }
+}
+
+}  // namespace
 
 std::shared_ptr<IFrameProducer> ProductionCameraFactory::createCamera(
     const CameraConfig& config) {
@@ -26,11 +53,20 @@ std::shared_ptr<IFrameProducer> ProductionCameraFactory::createCamera(
 std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(
     const PipelineConfig& config,
     IMeasurementSink& measurement_sink) {
+    return createPipeline(config, measurement_sink, RuntimeConfig{});
+}
+
+std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(
+    const PipelineConfig& config,
+    IMeasurementSink& measurement_sink,
+    const RuntimeConfig& runtime_config) {
     if (config.type == "apriltag") {
+        auto pipeline_config = pipelines::parseAprilTagPipelineConfig(config);
+        applyCameraCalibrationContext(runtime_config, pipeline_config);
         return std::make_shared<pipelines::AprilTagPipeline>(
             config.id,
             measurement_sink,
-            pipelines::parseAprilTagPipelineConfig(config));
+            std::move(pipeline_config));
     }
     if (config.type == "vio") {
         return std::make_shared<pipelines::PlaceholderVioPipeline>(

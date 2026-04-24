@@ -17,6 +17,15 @@ find_package(SQLite3 REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(apriltag REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(gtsam REQUIRED)
+
+if(TARGET gtsam::gtsam)
+    set(POSEST_GTSAM_TARGET gtsam::gtsam)
+elseif(TARGET gtsam)
+    set(POSEST_GTSAM_TARGET gtsam)
+else()
+    message(FATAL_ERROR "GTSAM package did not provide a known CMake target")
+endif()
 
 # --- posest_core: interfaces, Frame, LatestFrameSlot, ProducerBase, ConsumerBase
 add_library(posest_core
@@ -71,7 +80,7 @@ target_link_libraries(posest_calibration PUBLIC
 add_library(posest_fusion
     src/fusion/FusionService.cpp
 )
-target_link_libraries(posest_fusion PUBLIC posest_core)
+target_link_libraries(posest_fusion PUBLIC posest_core posest_runtime ${POSEST_GTSAM_TARGET})
 
 # --- posest_teensy: USB protocol codec + fusion output adapter
 add_library(posest_teensy

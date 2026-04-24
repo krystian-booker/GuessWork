@@ -139,12 +139,15 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_EQ(defaults.family, "tag36h11");
     EXPECT_EQ(defaults.nthreads, 1);
     EXPECT_DOUBLE_EQ(defaults.quad_decimate, 2.0);
+    EXPECT_DOUBLE_EQ(defaults.tag_size_m, 0.1651);
     EXPECT_TRUE(defaults.refine_edges);
 
-    config.parameters_json = R"({"nthreads":2,"quad_decimate":1.5,"debug":true})";
+    config.parameters_json =
+        R"({"nthreads":2,"quad_decimate":1.5,"debug":true,"tag_size_m":0.2})";
     const auto custom = posest::pipelines::parseAprilTagPipelineConfig(config);
     EXPECT_EQ(custom.nthreads, 2);
     EXPECT_DOUBLE_EQ(custom.quad_decimate, 1.5);
+    EXPECT_DOUBLE_EQ(custom.tag_size_m, 0.2);
     EXPECT_TRUE(custom.debug);
 
     config.parameters_json = R"({"family":"tagStandard41h12"})";
@@ -152,6 +155,9 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
 
     config.parameters_json = R"({"nthreads":"two"})";
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::exception);
+
+    config.parameters_json = R"({"tag_size_m":0.0})";
+    EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
 }
 
 TEST(AprilTagPipeline, BlankImagePublishesEmptyObservation) {
@@ -200,6 +206,37 @@ TEST(AprilTagPipeline, DetectsRenderedTag36h11) {
     EXPECT_FALSE(observation.detections[0].camera_to_tag.has_value());
 }
 
+TEST(AprilTagPipeline, PopulatesCameraToTagWhenCalibrationIsAvailable) {
+    posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
+    config.camera_calibrations.emplace(
+        "cam0",
+        posest::pipelines::AprilTagCameraCalibration{
+            .fx = 500.0,
+            .fy = 500.0,
+            .cx = 160.0,
+            .cy = 160.0,
+        });
+    posest::pipelines::AprilTagPipeline pipeline(
+        "tags",
+        bus,
+        config);
+
+    pipeline.start();
+    pipeline.deliver(makeFrame(makeRenderedTag36h11(0)));
+    auto measurement = bus.take();
+    pipeline.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    ASSERT_TRUE(std::holds_alternative<posest::AprilTagObservation>(*measurement));
+    const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
+    ASSERT_FALSE(observation.detections.empty());
+    ASSERT_TRUE(observation.detections[0].camera_to_tag.has_value());
+    EXPECT_GT(observation.detections[0].camera_to_tag->translation_m.z, 0.0);
+    EXPECT_GE(observation.detections[0].reprojection_error_px, 0.0);
+}
+
 TEST(Pipelines, ProductionPipelineFactoryCreatesConfiguredPipelines) {
     posest::MeasurementBus bus(4);
     posest::runtime::ProductionPipelineFactory factory;
@@ -229,6 +266,45 @@ TEST(Pipelines, ProductionPipelineFactoryCreatesConfiguredPipelines) {
     unknown.id = "unknown";
     unknown.type = "unknown";
     EXPECT_THROW(factory.createPipeline(unknown, bus), std::runtime_error);
+}
+
+TEST(Pipelines, ProductionPipelineFactoryPassesActiveCalibrationToAprilTagPipeline) {
+    posest::MeasurementBus bus(4);
+    posest::runtime::ProductionPipelineFactory factory;
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.calibrations.push_back({
+        .camera_id = "cam0",
+        .version = "v1",
+        .active = true,
+        .source_file_path = "cam0.yaml",
+        .created_at = "now",
+        .image_width = 320,
+        .image_height = 320,
+        .camera_model = "pinhole",
+        .distortion_model = "radtan",
+        .fx = 500.0,
+        .fy = 500.0,
+        .cx = 160.0,
+        .cy = 160.0,
+    });
+
+    posest::runtime::PipelineConfig tags;
+    tags.id = "tags";
+    tags.type = "apriltag";
+    tags.parameters_json = R"({"quad_decimate":1.0})";
+    auto apriltag = factory.createPipeline(tags, bus, runtime_config);
+    ASSERT_TRUE(apriltag);
+
+    apriltag->start();
+    apriltag->deliver(makeFrame(makeRenderedTag36h11(0)));
+    auto measurement = bus.take();
+    apriltag->stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    ASSERT_TRUE(std::holds_alternative<posest::AprilTagObservation>(*measurement));
+    const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
+    ASSERT_FALSE(observation.detections.empty());
+    EXPECT_TRUE(observation.detections[0].camera_to_tag.has_value());
 }
 
 TEST(Pipelines, RuntimeGraphFlowsCameraFramesToMeasurementBus) {

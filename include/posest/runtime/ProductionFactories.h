@@ -16,6 +16,10 @@ public:
     std::shared_ptr<IVisionPipeline> createPipeline(
         const PipelineConfig& config,
         IMeasurementSink& measurement_sink) override;
+    std::shared_ptr<IVisionPipeline> createPipeline(
+        const PipelineConfig& config,
+        IMeasurementSink& measurement_sink,
+        const RuntimeConfig& runtime_config) override;
 };
 
 }  // namespace posest::runtime

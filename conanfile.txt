@@ -5,6 +5,7 @@ sqlite3/3.45.3
 nlohmann_json/3.11.3
 apriltag/3.4.2
 yaml-cpp/0.8.0
+gtsam/4.2
 
 [generators]
 CMakeDeps
@@ -28,3 +29,4 @@ opencv/*:with_tiff=False
 opencv/*:with_quirc=False
 opencv/*:with_v4l=False
 opencv/*:with_wayland=False
+gtsam/*:with_TBB=False
