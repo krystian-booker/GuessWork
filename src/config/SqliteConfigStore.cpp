@@ -6,7 +6,9 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
 #include "posest/config/ConfigValidator.h"
@@ -142,6 +144,27 @@ std::uint32_t checkedUint32(sqlite3_int64 value, const char* field_name) {
     return static_cast<std::uint32_t>(value);
 }
 
+std::vector<double> parseDoubleArrayJson(const std::string& value, const char* field_name) {
+    const auto json = nlohmann::json::parse(value);
+    if (!json.is_array()) {
+        throw std::runtime_error(std::string("SQLite field is not a JSON array: ") + field_name);
+    }
+    std::vector<double> out;
+    out.reserve(json.size());
+    for (const auto& entry : json) {
+        if (!entry.is_number()) {
+            throw std::runtime_error(std::string("SQLite JSON array contains non-number: ") +
+                                     field_name);
+        }
+        out.push_back(entry.get<double>());
+    }
+    return out;
+}
+
+std::string doubleArrayToJson(const std::vector<double>& values) {
+    return nlohmann::json(values).dump();
+}
+
 }  // namespace
 
 SqliteConfigStore::SqliteConfigStore(std::filesystem::path db_path)
@@ -240,15 +263,99 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
     {
         Statement stmt(
             db_,
-            "SELECT camera_id, file_path, version, created_at FROM calibrations "
+            "SELECT camera_id, version, active, source_file_path, created_at, image_width, "
+            "image_height, camera_model, distortion_model, fx, fy, cx, cy, "
+            "distortion_coefficients_json FROM calibrations "
             "ORDER BY camera_id, version");
         while (stmt.stepRow()) {
-            config.calibrations.push_back({
-                stmt.columnText(0),
-                stmt.columnText(1),
-                stmt.columnText(2),
-                stmt.columnText(3),
-            });
+            runtime::CameraCalibrationConfig calibration;
+            calibration.camera_id = stmt.columnText(0);
+            calibration.version = stmt.columnText(1);
+            calibration.active = stmt.columnInt(2) != 0;
+            calibration.source_file_path = stmt.columnText(3);
+            calibration.created_at = stmt.columnText(4);
+            calibration.image_width = stmt.columnInt(5);
+            calibration.image_height = stmt.columnInt(6);
+            calibration.camera_model = stmt.columnText(7);
+            calibration.distortion_model = stmt.columnText(8);
+            calibration.fx = stmt.columnDouble(9);
+            calibration.fy = stmt.columnDouble(10);
+            calibration.cx = stmt.columnDouble(11);
+            calibration.cy = stmt.columnDouble(12);
+            calibration.distortion_coefficients =
+                parseDoubleArrayJson(stmt.columnText(13), "distortion_coefficients_json");
+            config.calibrations.push_back(std::move(calibration));
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT camera_id, version, tx_m, ty_m, tz_m, roll_rad, pitch_rad, yaw_rad "
+            "FROM camera_extrinsics ORDER BY camera_id, version");
+        while (stmt.stepRow()) {
+            runtime::CameraExtrinsicsConfig extrinsics;
+            extrinsics.camera_id = stmt.columnText(0);
+            extrinsics.version = stmt.columnText(1);
+            extrinsics.camera_to_robot.translation_m = {
+                stmt.columnDouble(2),
+                stmt.columnDouble(3),
+                stmt.columnDouble(4),
+            };
+            extrinsics.camera_to_robot.rotation_rpy_rad = {
+                stmt.columnDouble(5),
+                stmt.columnDouble(6),
+                stmt.columnDouble(7),
+            };
+            config.camera_extrinsics.push_back(extrinsics);
+        }
+    }
+
+    std::unordered_map<std::string, std::size_t> field_layout_index;
+    {
+        Statement stmt(
+            db_,
+            "SELECT id, name, source_file_path, field_length_m, field_width_m, active "
+            "FROM field_layouts ORDER BY id");
+        while (stmt.stepRow()) {
+            runtime::FieldLayoutConfig layout;
+            layout.id = stmt.columnText(0);
+            layout.name = stmt.columnText(1);
+            layout.source_file_path = stmt.columnText(2);
+            layout.field_length_m = stmt.columnDouble(3);
+            layout.field_width_m = stmt.columnDouble(4);
+            if (stmt.columnInt(5) != 0) {
+                config.active_field_layout_id = layout.id;
+            }
+            field_layout_index.emplace(layout.id, config.field_layouts.size());
+            config.field_layouts.push_back(std::move(layout));
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT layout_id, tag_id, tx_m, ty_m, tz_m, roll_rad, pitch_rad, yaw_rad "
+            "FROM field_tags ORDER BY layout_id, tag_id");
+        while (stmt.stepRow()) {
+            const std::string layout_id = stmt.columnText(0);
+            const auto it = field_layout_index.find(layout_id);
+            if (it == field_layout_index.end()) {
+                throw std::runtime_error("SQLite field_tags row references unknown layout");
+            }
+            runtime::FieldTagConfig tag;
+            tag.tag_id = stmt.columnInt(1);
+            tag.field_to_tag.translation_m = {
+                stmt.columnDouble(2),
+                stmt.columnDouble(3),
+                stmt.columnDouble(4),
+            };
+            tag.field_to_tag.rotation_rpy_rad = {
+                stmt.columnDouble(5),
+                stmt.columnDouble(6),
+                stmt.columnDouble(7),
+            };
+            config.field_layouts[it->second].tags.push_back(tag);
         }
     }
 
@@ -301,6 +408,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     Transaction tx(db_);
 
     exec(db_, "DELETE FROM camera_triggers");
+    exec(db_, "DELETE FROM field_tags");
+    exec(db_, "DELETE FROM field_layouts");
+    exec(db_, "DELETE FROM camera_extrinsics");
     exec(db_, "DELETE FROM calibrations");
     exec(db_, "DELETE FROM camera_pipeline_bindings");
     exec(db_, "DELETE FROM camera_controls");
@@ -362,13 +472,75 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     for (const auto& calibration : config.calibrations) {
         Statement insert(
             db_,
-            "INSERT INTO calibrations (camera_id, file_path, version, created_at) "
-            "VALUES (?, ?, ?, ?)");
+            "INSERT INTO calibrations "
+            "(camera_id, version, active, source_file_path, created_at, image_width, "
+            "image_height, camera_model, distortion_model, fx, fy, cx, cy, "
+            "distortion_coefficients_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, calibration.camera_id);
-        insert.bindText(2, calibration.file_path);
-        insert.bindText(3, calibration.version);
-        insert.bindText(4, calibration.created_at);
+        insert.bindText(2, calibration.version);
+        insert.bindInt(3, calibration.active ? 1 : 0);
+        insert.bindText(4, calibration.source_file_path);
+        insert.bindText(5, calibration.created_at);
+        insert.bindInt(6, calibration.image_width);
+        insert.bindInt(7, calibration.image_height);
+        insert.bindText(8, calibration.camera_model);
+        insert.bindText(9, calibration.distortion_model);
+        insert.bindDouble(10, calibration.fx);
+        insert.bindDouble(11, calibration.fy);
+        insert.bindDouble(12, calibration.cx);
+        insert.bindDouble(13, calibration.cy);
+        insert.bindText(14, doubleArrayToJson(calibration.distortion_coefficients));
         insert.stepDone();
+    }
+
+    for (const auto& extrinsics : config.camera_extrinsics) {
+        Statement insert(
+            db_,
+            "INSERT INTO camera_extrinsics "
+            "(camera_id, version, tx_m, ty_m, tz_m, roll_rad, pitch_rad, yaw_rad) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, extrinsics.camera_id);
+        insert.bindText(2, extrinsics.version);
+        insert.bindDouble(3, extrinsics.camera_to_robot.translation_m.x);
+        insert.bindDouble(4, extrinsics.camera_to_robot.translation_m.y);
+        insert.bindDouble(5, extrinsics.camera_to_robot.translation_m.z);
+        insert.bindDouble(6, extrinsics.camera_to_robot.rotation_rpy_rad.x);
+        insert.bindDouble(7, extrinsics.camera_to_robot.rotation_rpy_rad.y);
+        insert.bindDouble(8, extrinsics.camera_to_robot.rotation_rpy_rad.z);
+        insert.stepDone();
+    }
+
+    for (const auto& layout : config.field_layouts) {
+        Statement insert(
+            db_,
+            "INSERT INTO field_layouts "
+            "(id, name, source_file_path, field_length_m, field_width_m, active) "
+            "VALUES (?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, layout.id);
+        insert.bindText(2, layout.name);
+        insert.bindText(3, layout.source_file_path);
+        insert.bindDouble(4, layout.field_length_m);
+        insert.bindDouble(5, layout.field_width_m);
+        insert.bindInt(6, layout.id == config.active_field_layout_id ? 1 : 0);
+        insert.stepDone();
+
+        for (const auto& tag : layout.tags) {
+            Statement tag_insert(
+                db_,
+                "INSERT INTO field_tags "
+                "(layout_id, tag_id, tx_m, ty_m, tz_m, roll_rad, pitch_rad, yaw_rad) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            tag_insert.bindText(1, layout.id);
+            tag_insert.bindInt(2, tag.tag_id);
+            tag_insert.bindDouble(3, tag.field_to_tag.translation_m.x);
+            tag_insert.bindDouble(4, tag.field_to_tag.translation_m.y);
+            tag_insert.bindDouble(5, tag.field_to_tag.translation_m.z);
+            tag_insert.bindDouble(6, tag.field_to_tag.rotation_rpy_rad.x);
+            tag_insert.bindDouble(7, tag.field_to_tag.rotation_rpy_rad.y);
+            tag_insert.bindDouble(8, tag.field_to_tag.rotation_rpy_rad.z);
+            tag_insert.stepDone();
+        }
     }
 
     for (const auto& trigger : config.camera_triggers) {

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 
+#include "posest/MeasurementTypes.h"
 #include "posest/MeasurementBus.h"
 #include "posest/config/IConfigStore.h"
 #include "posest/fusion/FusionService.h"
@@ -29,11 +30,39 @@ enum class DaemonState {
     Failed,
 };
 
+enum class DaemonCommand {
+    Run,
+    CalibrateCamera,
+    ImportFieldLayout,
+};
+
+struct CalibrateCameraOptions {
+    std::string camera_id;
+    std::filesystem::path bag_path;
+    std::filesystem::path target_path;
+    std::string topic;
+    std::filesystem::path output_dir;
+    std::string version;
+    Pose3d camera_to_robot;
+    bool has_camera_to_robot{false};
+    std::string docker_image;
+};
+
+struct ImportFieldLayoutOptions {
+    std::string field_id;
+    std::string name;
+    std::filesystem::path file_path;
+    bool activate{false};
+};
+
 struct DaemonOptions {
+    DaemonCommand command{DaemonCommand::Run};
     std::filesystem::path config_path{"./posest.db"};
     bool health_once{false};
     bool help{false};
     std::optional<std::chrono::milliseconds> health_interval;
+    CalibrateCameraOptions calibrate_camera;
+    ImportFieldLayoutOptions import_field_layout;
 };
 
 struct DaemonHealth {
@@ -54,6 +83,8 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]);
 std::string daemonUsage(const char* argv0);
 const char* daemonStateName(DaemonState state);
 std::string healthToJson(const DaemonHealth& health);
+std::string buildKalibrDockerCommand(const CalibrateCameraOptions& options);
+void runConfigCommand(const DaemonOptions& options, config::IConfigStore& config_store);
 
 class ShutdownSignal final {
 public:

@@ -63,6 +63,71 @@ TEST(DaemonOptions, ParsesDefaultsAndOverrides) {
     EXPECT_EQ(*options.health_interval, 250ms);
 }
 
+TEST(DaemonOptions, ParsesCalibrationAndFieldImportCommands) {
+    const char* calibrate_args[] = {
+        "posest_daemon",
+        "calibrate-camera",
+        "--config",
+        "/tmp/robot.db",
+        "--camera-id",
+        "cam0",
+        "--bag",
+        "/data/calib.bag",
+        "--target",
+        "/data/target.yaml",
+        "--topic",
+        "/cam/image_raw",
+        "--output-dir",
+        "/tmp/kalibr",
+        "--version",
+        "v1",
+        "--camera-to-robot",
+        "0.1,0.2,0.3,0.0,0.1,0.2",
+        "--docker-image",
+        "kalibr:test",
+    };
+    const auto calibrate = posest::runtime::parseDaemonOptions(20, calibrate_args);
+    EXPECT_EQ(calibrate.command, posest::runtime::DaemonCommand::CalibrateCamera);
+    EXPECT_EQ(calibrate.calibrate_camera.camera_id, "cam0");
+    EXPECT_TRUE(calibrate.calibrate_camera.has_camera_to_robot);
+    EXPECT_DOUBLE_EQ(calibrate.calibrate_camera.camera_to_robot.translation_m.z, 0.3);
+
+    const char* field_args[] = {
+        "posest_daemon",
+        "import-field-layout",
+        "--config",
+        "/tmp/robot.db",
+        "--field-id",
+        "reefscape",
+        "--name",
+        "Reefscape",
+        "--file",
+        "/tmp/field.json",
+        "--activate",
+    };
+    const auto field = posest::runtime::parseDaemonOptions(11, field_args);
+    EXPECT_EQ(field.command, posest::runtime::DaemonCommand::ImportFieldLayout);
+    EXPECT_EQ(field.import_field_layout.field_id, "reefscape");
+    EXPECT_TRUE(field.import_field_layout.activate);
+}
+
+TEST(DaemonOptions, BuildsKalibrDockerCommandWithExpectedMounts) {
+    posest::runtime::CalibrateCameraOptions options;
+    options.bag_path = "/home/team/calib/cam.bag";
+    options.target_path = "/home/team/calib/target.yaml";
+    options.output_dir = "/home/team/out";
+    options.topic = "/cam/image_raw";
+    options.docker_image = "kalibr:test";
+
+    const auto command = posest::runtime::buildKalibrDockerCommand(options);
+    EXPECT_NE(command.find("docker run --rm"), std::string::npos);
+    EXPECT_NE(command.find("-v '/home/team/calib':/data:ro"), std::string::npos);
+    EXPECT_NE(command.find("-v '/home/team/out':/output"), std::string::npos);
+    EXPECT_NE(command.find("--bag '/data/cam.bag'"), std::string::npos);
+    EXPECT_NE(command.find("--target '/target/target.yaml'"), std::string::npos);
+    EXPECT_NE(command.find("--topics '/cam/image_raw'"), std::string::npos);
+}
+
 TEST(DaemonHealth, HealthOnceJsonContainsExpectedFieldsForEmptyDb) {
     const auto path = tempDbPath("health_once");
     std::filesystem::remove(path);

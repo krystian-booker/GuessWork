@@ -5,15 +5,46 @@
 #include <vector>
 
 #include "posest/CameraConfig.h"
+#include "posest/MeasurementTypes.h"
 #include "posest/runtime/PipelineConfig.h"
 
 namespace posest::runtime {
 
-struct CalibrationConfig {
+struct CameraCalibrationConfig {
     std::string camera_id;
-    std::string file_path;
     std::string version;
+    bool active{true};
+    std::string source_file_path;
     std::string created_at;
+    int image_width{0};
+    int image_height{0};
+    std::string camera_model;
+    std::string distortion_model;
+    double fx{0.0};
+    double fy{0.0};
+    double cx{0.0};
+    double cy{0.0};
+    std::vector<double> distortion_coefficients;
+};
+
+struct CameraExtrinsicsConfig {
+    std::string camera_id;
+    std::string version;
+    Pose3d camera_to_robot;
+};
+
+struct FieldTagConfig {
+    int tag_id{0};
+    Pose3d field_to_tag;
+};
+
+struct FieldLayoutConfig {
+    std::string id;
+    std::string name;
+    std::string source_file_path;
+    double field_length_m{0.0};
+    double field_width_m{0.0};
+    std::vector<FieldTagConfig> tags;
 };
 
 struct TeensyConfig {
@@ -39,7 +70,10 @@ struct RuntimeConfig {
     std::vector<CameraConfig> cameras;
     std::vector<PipelineConfig> pipelines;
     std::vector<CameraPipelineBinding> bindings;
-    std::vector<CalibrationConfig> calibrations;
+    std::vector<CameraCalibrationConfig> calibrations;
+    std::vector<CameraExtrinsicsConfig> camera_extrinsics;
+    std::vector<FieldLayoutConfig> field_layouts;
+    std::string active_field_layout_id;
     std::vector<CameraTriggerConfig> camera_triggers;
     TeensyConfig teensy;
 };

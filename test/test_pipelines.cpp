@@ -156,10 +156,12 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
 
 TEST(AprilTagPipeline, BlankImagePublishesEmptyObservation) {
     posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
     posest::pipelines::AprilTagPipeline pipeline(
         "tags",
         bus,
-        posest::pipelines::AprilTagPipelineConfig{.quad_decimate = 1.0});
+        config);
 
     pipeline.start();
     pipeline.deliver(makeFrame(cv::Mat(240, 320, CV_8UC1, cv::Scalar(255))));
@@ -174,10 +176,12 @@ TEST(AprilTagPipeline, BlankImagePublishesEmptyObservation) {
 
 TEST(AprilTagPipeline, DetectsRenderedTag36h11) {
     posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
     posest::pipelines::AprilTagPipeline pipeline(
         "tags",
         bus,
-        posest::pipelines::AprilTagPipelineConfig{.quad_decimate = 1.0});
+        config);
 
     pipeline.start();
     pipeline.deliver(makeFrame(makeRenderedTag36h11(0)));

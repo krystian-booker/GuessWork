@@ -19,6 +19,8 @@ struct AprilTagPipelineConfig {
     bool refine_edges = true;
     double decode_sharpening = 0.25;
     bool debug = false;
+    std::string calibration_version;
+    std::string field_layout_id;
 };
 
 AprilTagPipelineConfig parseAprilTagPipelineConfig(

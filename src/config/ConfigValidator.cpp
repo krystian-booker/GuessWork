@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -25,6 +26,16 @@ bool isObjectJson(const std::string& value) {
     } catch (const nlohmann::json::parse_error&) {
         return false;
     }
+}
+
+bool isFinite(double value) {
+    return std::isfinite(value);
+}
+
+bool isFinitePose(const Pose3d& pose) {
+    return isFinite(pose.translation_m.x) && isFinite(pose.translation_m.y) &&
+           isFinite(pose.translation_m.z) && isFinite(pose.rotation_rpy_rad.x) &&
+           isFinite(pose.rotation_rpy_rad.y) && isFinite(pose.rotation_rpy_rad.z);
 }
 
 void require(bool condition, const std::string& message) {
@@ -86,18 +97,97 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
     }
 
     std::unordered_set<std::string> calibrations;
+    std::unordered_set<std::string> active_calibration_cameras;
     for (const auto& calibration : config.calibrations) {
         require(!calibration.camera_id.empty(), "calibration has empty camera id");
         require(cameras_enabled.find(calibration.camera_id) != cameras_enabled.end(),
                 "calibration references unknown camera: " + calibration.camera_id);
-        require(!calibration.file_path.empty(),
-                "calibration for camera '" + calibration.camera_id + "' has empty file path");
+        require(!calibration.source_file_path.empty(),
+                "calibration for camera '" + calibration.camera_id + "' has empty source file path");
         require(!calibration.version.empty(),
                 "calibration for camera '" + calibration.camera_id + "' has empty version");
         require(calibrations.insert(calibration.camera_id + "\n" + calibration.version).second,
                 "duplicate calibration for camera/version: " + calibration.camera_id + "/" +
                     calibration.version);
+        require(calibration.image_width > 0,
+                "calibration for camera '" + calibration.camera_id + "' width must be > 0");
+        require(calibration.image_height > 0,
+                "calibration for camera '" + calibration.camera_id + "' height must be > 0");
+        require(!calibration.camera_model.empty(),
+                "calibration for camera '" + calibration.camera_id + "' has empty camera model");
+        require(!calibration.distortion_model.empty(),
+                "calibration for camera '" + calibration.camera_id + "' has empty distortion model");
+        require(calibration.fx > 0.0 && isFinite(calibration.fx),
+                "calibration for camera '" + calibration.camera_id + "' fx must be finite and > 0");
+        require(calibration.fy > 0.0 && isFinite(calibration.fy),
+                "calibration for camera '" + calibration.camera_id + "' fy must be finite and > 0");
+        require(isFinite(calibration.cx) && isFinite(calibration.cy),
+                "calibration for camera '" + calibration.camera_id + "' principal point must be finite");
+        require(std::all_of(
+                    calibration.distortion_coefficients.begin(),
+                    calibration.distortion_coefficients.end(),
+                    isFinite),
+                "calibration for camera '" + calibration.camera_id +
+                    "' has non-finite distortion coefficient");
+        if (calibration.active) {
+            require(active_calibration_cameras.insert(calibration.camera_id).second,
+                    "multiple active calibrations for camera: " + calibration.camera_id);
+        }
     }
+
+    std::unordered_set<std::string> extrinsics;
+    for (const auto& entry : config.camera_extrinsics) {
+        require(!entry.camera_id.empty(), "camera extrinsics has empty camera id");
+        require(!entry.version.empty(),
+                "camera extrinsics for camera '" + entry.camera_id + "' has empty version");
+        const std::string key = entry.camera_id + "\n" + entry.version;
+        require(calibrations.find(key) != calibrations.end(),
+                "camera extrinsics references unknown calibration: " + entry.camera_id + "/" +
+                    entry.version);
+        require(extrinsics.insert(key).second,
+                "duplicate camera extrinsics for camera/version: " + entry.camera_id + "/" +
+                    entry.version);
+        require(isFinitePose(entry.camera_to_robot),
+                "camera extrinsics for camera '" + entry.camera_id + "' has non-finite pose");
+    }
+    for (const auto& calibration : config.calibrations) {
+        if (calibration.active) {
+            const std::string key = calibration.camera_id + "\n" + calibration.version;
+            require(extrinsics.find(key) != extrinsics.end(),
+                    "active calibration missing camera-to-robot extrinsics: " +
+                        calibration.camera_id + "/" + calibration.version);
+        }
+    }
+
+    std::unordered_set<std::string> field_layout_ids;
+    bool saw_active_field_layout = config.active_field_layout_id.empty();
+    for (const auto& layout : config.field_layouts) {
+        require(!layout.id.empty(), "field layout id is empty");
+        require(field_layout_ids.insert(layout.id).second,
+                "duplicate field layout id: " + layout.id);
+        require(!layout.name.empty(), "field layout '" + layout.id + "' has empty name");
+        require(!layout.source_file_path.empty(),
+                "field layout '" + layout.id + "' has empty source file path");
+        require(layout.field_length_m > 0.0 && isFinite(layout.field_length_m),
+                "field layout '" + layout.id + "' length must be finite and > 0");
+        require(layout.field_width_m > 0.0 && isFinite(layout.field_width_m),
+                "field layout '" + layout.id + "' width must be finite and > 0");
+        std::unordered_set<int> tag_ids;
+        for (const auto& tag : layout.tags) {
+            require(tag.tag_id > 0,
+                    "field layout '" + layout.id + "' has invalid tag id");
+            require(tag_ids.insert(tag.tag_id).second,
+                    "field layout '" + layout.id + "' has duplicate tag id: " +
+                        std::to_string(tag.tag_id));
+            require(isFinitePose(tag.field_to_tag),
+                    "field layout '" + layout.id + "' has non-finite tag pose");
+        }
+        if (layout.id == config.active_field_layout_id) {
+            saw_active_field_layout = true;
+        }
+    }
+    require(saw_active_field_layout,
+            "active field layout references unknown layout: " + config.active_field_layout_id);
 
     std::unordered_set<std::string> trigger_cameras;
     std::unordered_set<std::int32_t> enabled_trigger_pins;

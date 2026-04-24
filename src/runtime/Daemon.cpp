@@ -1,13 +1,20 @@
 #include "posest/runtime/Daemon.h"
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 
 #include <nlohmann/json.hpp>
+
+#include "posest/config/CalibrationParsers.h"
 
 namespace posest::runtime {
 
@@ -31,6 +38,125 @@ std::chrono::milliseconds parseMilliseconds(const std::string& value) {
     return std::chrono::milliseconds(parsed);
 }
 
+std::string requireValue(int& index, int argc, const char* const argv[], const std::string& arg) {
+    if (index + 1 >= argc) {
+        throw std::invalid_argument(arg + " requires a value");
+    }
+    return argv[++index];
+}
+
+std::string shellQuote(const std::string& value) {
+    std::string out = "'";
+    for (const char ch : value) {
+        if (ch == '\'') {
+            out += "'\"'\"'";
+        } else {
+            out += ch;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+std::filesystem::path mountPath(const std::filesystem::path& path) {
+    const auto parent = path.parent_path();
+    return parent.empty() ? std::filesystem::current_path() : std::filesystem::absolute(parent);
+}
+
+std::string mountedFilePath(const char* mount_point, const std::filesystem::path& path) {
+    return std::string(mount_point) + "/" + path.filename().string();
+}
+
+std::string nowIsoUtc() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &time);
+#else
+    gmtime_r(&time, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return out.str();
+}
+
+std::filesystem::path findKalibrCamchain(const std::filesystem::path& output_dir) {
+    for (const auto& entry : std::filesystem::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto filename = entry.path().filename().string();
+        const auto extension = entry.path().extension().string();
+        if (filename.find("camchain") != std::string::npos &&
+            (extension == ".yaml" || extension == ".yml")) {
+            return entry.path();
+        }
+    }
+    throw std::runtime_error("Kalibr output did not contain a camchain YAML file");
+}
+
+void replaceCalibration(
+    RuntimeConfig& config,
+    CameraCalibrationConfig calibration,
+    CameraExtrinsicsConfig extrinsics) {
+    bool camera_found = false;
+    for (const auto& camera : config.cameras) {
+        if (camera.id == calibration.camera_id) {
+            camera_found = true;
+            break;
+        }
+    }
+    if (!camera_found) {
+        throw std::invalid_argument("unknown camera id: " + calibration.camera_id);
+    }
+
+    for (auto& entry : config.calibrations) {
+        if (entry.camera_id == calibration.camera_id) {
+            entry.active = false;
+        }
+    }
+
+    config.calibrations.erase(
+        std::remove_if(
+            config.calibrations.begin(),
+            config.calibrations.end(),
+            [&calibration](const CameraCalibrationConfig& entry) {
+                return entry.camera_id == calibration.camera_id &&
+                       entry.version == calibration.version;
+            }),
+        config.calibrations.end());
+    config.camera_extrinsics.erase(
+        std::remove_if(
+            config.camera_extrinsics.begin(),
+            config.camera_extrinsics.end(),
+            [&extrinsics](const CameraExtrinsicsConfig& entry) {
+                return entry.camera_id == extrinsics.camera_id &&
+                       entry.version == extrinsics.version;
+            }),
+        config.camera_extrinsics.end());
+
+    calibration.active = true;
+    config.calibrations.push_back(std::move(calibration));
+    config.camera_extrinsics.push_back(std::move(extrinsics));
+}
+
+void replaceFieldLayout(
+    RuntimeConfig& config,
+    FieldLayoutConfig layout,
+    bool activate) {
+    config.field_layouts.erase(
+        std::remove_if(
+            config.field_layouts.begin(),
+            config.field_layouts.end(),
+            [&layout](const FieldLayoutConfig& entry) { return entry.id == layout.id; }),
+        config.field_layouts.end());
+    if (activate) {
+        config.active_field_layout_id = layout.id;
+    }
+    config.field_layouts.push_back(std::move(layout));
+}
+
 }  // namespace
 
 DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
@@ -38,22 +164,68 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--help" || arg == "-h") {
+        if (arg == "calibrate-camera") {
+            if (options.command != DaemonCommand::Run) {
+                throw std::invalid_argument("only one subcommand may be provided");
+            }
+            options.command = DaemonCommand::CalibrateCamera;
+        } else if (arg == "import-field-layout") {
+            if (options.command != DaemonCommand::Run) {
+                throw std::invalid_argument("only one subcommand may be provided");
+            }
+            options.command = DaemonCommand::ImportFieldLayout;
+        } else if (arg == "--help" || arg == "-h") {
             options.help = true;
         } else if (arg == "--config") {
-            if (i + 1 >= argc) {
-                throw std::invalid_argument("--config requires a path");
-            }
-            options.config_path = argv[++i];
+            options.config_path = requireValue(i, argc, argv, arg);
         } else if (arg == "--health-once") {
             options.health_once = true;
         } else if (arg == "--health-interval-ms") {
-            if (i + 1 >= argc) {
-                throw std::invalid_argument("--health-interval-ms requires a value");
-            }
-            options.health_interval = parseMilliseconds(argv[++i]);
+            options.health_interval = parseMilliseconds(requireValue(i, argc, argv, arg));
+        } else if (arg == "--camera-id") {
+            options.calibrate_camera.camera_id = requireValue(i, argc, argv, arg);
+        } else if (arg == "--bag") {
+            options.calibrate_camera.bag_path = requireValue(i, argc, argv, arg);
+        } else if (arg == "--target") {
+            options.calibrate_camera.target_path = requireValue(i, argc, argv, arg);
+        } else if (arg == "--topic") {
+            options.calibrate_camera.topic = requireValue(i, argc, argv, arg);
+        } else if (arg == "--output-dir") {
+            options.calibrate_camera.output_dir = requireValue(i, argc, argv, arg);
+        } else if (arg == "--version") {
+            options.calibrate_camera.version = requireValue(i, argc, argv, arg);
+        } else if (arg == "--camera-to-robot") {
+            options.calibrate_camera.camera_to_robot =
+                config::parsePoseCsv(requireValue(i, argc, argv, arg));
+            options.calibrate_camera.has_camera_to_robot = true;
+        } else if (arg == "--docker-image") {
+            options.calibrate_camera.docker_image = requireValue(i, argc, argv, arg);
+        } else if (arg == "--field-id") {
+            options.import_field_layout.field_id = requireValue(i, argc, argv, arg);
+        } else if (arg == "--name") {
+            options.import_field_layout.name = requireValue(i, argc, argv, arg);
+        } else if (arg == "--file") {
+            options.import_field_layout.file_path = requireValue(i, argc, argv, arg);
+        } else if (arg == "--activate") {
+            options.import_field_layout.activate = true;
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
+        }
+    }
+
+    if (options.command == DaemonCommand::CalibrateCamera) {
+        const auto& command = options.calibrate_camera;
+        if (command.camera_id.empty() || command.bag_path.empty() ||
+            command.target_path.empty() || command.topic.empty() ||
+            command.output_dir.empty() || command.version.empty() ||
+            !command.has_camera_to_robot || command.docker_image.empty()) {
+            throw std::invalid_argument("calibrate-camera requires camera-id, bag, target, topic, "
+                                        "output-dir, version, camera-to-robot, and docker-image");
+        }
+    } else if (options.command == DaemonCommand::ImportFieldLayout) {
+        const auto& command = options.import_field_layout;
+        if (command.field_id.empty() || command.name.empty() || command.file_path.empty()) {
+            throw std::invalid_argument("import-field-layout requires field-id, name, and file");
         }
     }
 
@@ -62,8 +234,16 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
 
 std::string daemonUsage(const char* argv0) {
     std::ostringstream out;
-    out << "usage: " << (argv0 ? argv0 : "posest_daemon")
-        << " [--config PATH] [--health-once] [--health-interval-ms N]\n";
+    const char* exe = argv0 ? argv0 : "posest_daemon";
+    out << "usage: " << exe
+        << " [--config PATH] [--health-once] [--health-interval-ms N]\n"
+        << "       " << exe
+        << " calibrate-camera --config PATH --camera-id ID --bag BAG --target TARGET "
+           "--topic TOPIC --output-dir DIR --version VERSION "
+           "--camera-to-robot x,y,z,roll,pitch,yaw --docker-image IMAGE\n"
+        << "       " << exe
+        << " import-field-layout --config PATH --field-id ID --name NAME --file PATH "
+           "[--activate]\n";
     return out.str();
 }
 
@@ -125,6 +305,60 @@ std::string healthToJson(const DaemonHealth& health) {
         {"shutdown_signal", health.shutdown_signal},
     };
     return out.dump();
+}
+
+std::string buildKalibrDockerCommand(const CalibrateCameraOptions& options) {
+    std::ostringstream command;
+    command << "docker run --rm "
+            << "-v " << shellQuote(mountPath(options.bag_path).string()) << ":/data:ro "
+            << "-v " << shellQuote(mountPath(options.target_path).string()) << ":/target:ro "
+            << "-v " << shellQuote(std::filesystem::absolute(options.output_dir).string())
+            << ":/output "
+            << shellQuote(options.docker_image) << " "
+            << "kalibr_calibrate_cameras "
+            << "--bag " << shellQuote(mountedFilePath("/data", options.bag_path)) << " "
+            << "--target " << shellQuote(mountedFilePath("/target", options.target_path)) << " "
+            << "--topics " << shellQuote(options.topic) << " "
+            << "--models pinhole-radtan";
+    return command.str();
+}
+
+void runConfigCommand(const DaemonOptions& options, config::IConfigStore& config_store) {
+    if (options.command == DaemonCommand::Run) {
+        return;
+    }
+
+    if (options.command == DaemonCommand::CalibrateCamera) {
+        const auto command = buildKalibrDockerCommand(options.calibrate_camera);
+        const int rc = std::system(command.c_str());
+        if (rc != 0) {
+            throw std::runtime_error("Kalibr Docker command failed");
+        }
+
+        auto config = config_store.loadRuntimeConfig();
+        auto calibration = config::parseKalibrCameraCalibration(
+            findKalibrCamchain(options.calibrate_camera.output_dir),
+            options.calibrate_camera.camera_id,
+            options.calibrate_camera.version,
+            true,
+            nowIsoUtc(),
+            options.calibrate_camera.topic);
+        CameraExtrinsicsConfig extrinsics;
+        extrinsics.camera_id = options.calibrate_camera.camera_id;
+        extrinsics.version = options.calibrate_camera.version;
+        extrinsics.camera_to_robot = options.calibrate_camera.camera_to_robot;
+        replaceCalibration(config, std::move(calibration), std::move(extrinsics));
+        config_store.saveRuntimeConfig(config);
+        return;
+    }
+
+    auto config = config_store.loadRuntimeConfig();
+    auto layout = config::parseWpilibFieldLayout(
+        options.import_field_layout.file_path,
+        options.import_field_layout.field_id,
+        options.import_field_layout.name);
+    replaceFieldLayout(config, std::move(layout), options.import_field_layout.activate);
+    config_store.saveRuntimeConfig(config);
 }
 
 void ShutdownSignal::request(int signal_number) {

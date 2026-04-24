@@ -62,6 +62,10 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
     config.decode_sharpening =
         jsonValueOr<double>(params, "decode_sharpening", config.decode_sharpening);
     config.debug = jsonValueOr<bool>(params, "debug", config.debug);
+    config.calibration_version =
+        jsonValueOr<std::string>(params, "calibration_version", config.calibration_version);
+    config.field_layout_id =
+        jsonValueOr<std::string>(params, "field_layout_id", config.field_layout_id);
 
     if (config.family != "tag36h11") {
         throw std::invalid_argument("Only AprilTag family tag36h11 is supported");

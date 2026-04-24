@@ -16,6 +16,7 @@ find_package(GTest REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(apriltag REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 # --- posest_core: interfaces, Frame, LatestFrameSlot, ProducerBase, ConsumerBase
 add_library(posest_core
@@ -38,6 +39,7 @@ target_link_libraries(posest_camera PUBLIC posest_core)
 
 # --- posest_config: runtime config store contracts + SQLite schema
 add_library(posest_config
+    src/config/CalibrationParsers.cpp
     src/config/ConfigValidator.cpp
     src/config/InMemoryConfigStore.cpp
     src/config/SqliteConfigStore.cpp
@@ -45,6 +47,7 @@ add_library(posest_config
 )
 target_link_libraries(posest_config PUBLIC posest_core posest_camera SQLite::SQLite3)
 target_link_libraries(posest_config PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(posest_config PUBLIC yaml-cpp::yaml-cpp)
 
 # --- posest_runtime: graph wiring + web/control facade
 add_library(posest_runtime
