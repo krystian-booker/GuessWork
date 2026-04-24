@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -12,6 +13,8 @@
 namespace posest::config {
 
 namespace {
+
+constexpr std::size_t kMaxEnabledCameraTriggers = 6;
 
 bool isObjectJson(const std::string& value) {
     if (value.empty()) {
@@ -98,6 +101,7 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
 
     std::unordered_set<std::string> trigger_cameras;
     std::unordered_set<std::int32_t> enabled_trigger_pins;
+    std::size_t enabled_trigger_count = 0;
     for (const auto& trigger : config.camera_triggers) {
         require(!trigger.camera_id.empty(), "camera trigger has empty camera id");
         require(cameras_enabled.find(trigger.camera_id) != cameras_enabled.end(),
@@ -112,11 +116,14 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
                 "camera trigger for camera '" + trigger.camera_id +
                     "' pulse width must be > 0");
         if (trigger.enabled) {
+            ++enabled_trigger_count;
             require(enabled_trigger_pins.insert(trigger.teensy_pin).second,
                     "duplicate enabled camera trigger pin: " +
                         std::to_string(trigger.teensy_pin));
         }
     }
+    require(enabled_trigger_count <= kMaxEnabledCameraTriggers,
+            "enabled camera trigger count must be <= 6");
 
     require(config.teensy.baud_rate > 0, "Teensy baud rate must be > 0");
     require(config.teensy.reconnect_interval_ms > 0,

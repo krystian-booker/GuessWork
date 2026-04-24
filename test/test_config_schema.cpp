@@ -1,6 +1,10 @@
 #include <chrono>
+#include <cstring>
 #include <filesystem>
+#include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -9,6 +13,9 @@
 #include "posest/config/InMemoryConfigStore.h"
 #include "posest/config/SqliteConfigStore.h"
 #include "posest/config/SqliteSchema.h"
+#include "posest/teensy/FakeSerialTransport.h"
+#include "posest/teensy/Protocol.h"
+#include "posest/teensy/TeensyService.h"
 
 namespace {
 
@@ -90,6 +97,58 @@ posest::runtime::RuntimeConfig makeValidConfig() {
     config.teensy.pose_publish_hz = 50.0;
 
     return config;
+}
+
+posest::CameraConfig makeCamera(const std::string& id, const std::string& device) {
+    posest::CameraConfig camera;
+    camera.id = id;
+    camera.type = "v4l2";
+    camera.device = device;
+    camera.enabled = true;
+    camera.format.width = 1280;
+    camera.format.height = 720;
+    camera.format.fps = 60.0;
+    camera.format.pixel_format = "mjpeg";
+    return camera;
+}
+
+std::uint32_t readU32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8u) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16u) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24u);
+}
+
+std::uint64_t readU64(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    std::uint64_t value = 0;
+    for (int shift = 0; shift <= 56; shift += 8) {
+        value |= static_cast<std::uint64_t>(bytes[offset + static_cast<std::size_t>(shift / 8)])
+                 << static_cast<unsigned>(shift);
+    }
+    return value;
+}
+
+std::int64_t readI64(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::int64_t>(readU64(bytes, offset));
+}
+
+double readDouble(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    const std::uint64_t bits = readU64(bytes, offset);
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+posest::teensy::Frame decodeWrittenFrame(
+    const std::vector<std::vector<std::uint8_t>>& writes,
+    posest::teensy::MessageType type) {
+    for (const auto& bytes : writes) {
+        auto decoded = posest::teensy::decodeFrame(bytes);
+        if (decoded && decoded->frame.type == type) {
+            return decoded->frame;
+        }
+    }
+    throw std::runtime_error("expected written frame was not found");
 }
 
 }  // namespace
@@ -240,6 +299,17 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     bad_trigger_pulse.camera_triggers[0].pulse_width_us = 0;
     expect_invalid(bad_trigger_pulse);
 
+    auto too_many_enabled_triggers = config;
+    too_many_enabled_triggers.cameras.clear();
+    too_many_enabled_triggers.camera_triggers.clear();
+    for (int i = 0; i < 7; ++i) {
+        const auto id = "cam" + std::to_string(i);
+        too_many_enabled_triggers.cameras.push_back(makeCamera(id, "/dev/video" + std::to_string(i)));
+        too_many_enabled_triggers.camera_triggers.push_back(
+            {id, true, 2 + i, 50.0, 750, 0});
+    }
+    expect_invalid(too_many_enabled_triggers);
+
     auto duplicate_trigger_camera = config;
     duplicate_trigger_camera.camera_triggers.push_back(config.camera_triggers[0]);
     expect_invalid(duplicate_trigger_camera);
@@ -276,4 +346,50 @@ TEST(ConfigStore, InMemoryRoundTripsRuntimeConfig) {
     const auto loaded = store.loadRuntimeConfig();
     ASSERT_EQ(loaded.cameras.size(), 1u);
     EXPECT_EQ(loaded.cameras[0].id, "cam0");
+}
+
+TEST(TeensyService, CameraTriggerConfigWireFormatMatchesFirmwareParserContract) {
+    posest::MeasurementBus bus(4);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+
+    std::vector<posest::runtime::CameraTriggerConfig> triggers;
+    triggers.push_back({"cam0", true, 2, 50.0, 750, 125});
+    triggers.push_back({"cam1", false, 3, 30.0, 500, -25});
+
+    posest::runtime::TeensyConfig config;
+    config.serial_port = "/dev/fake-teensy";
+    config.reconnect_interval_ms = 5;
+    config.read_timeout_ms = 2;
+
+    posest::teensy::TeensyService service(
+        config,
+        triggers,
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); });
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, std::chrono::milliseconds(500)));
+    ASSERT_TRUE(fake.waitForWriteCount(1, std::chrono::milliseconds(500)));
+    service.stop();
+
+    const auto frame = decodeWrittenFrame(
+        fake.writes(),
+        posest::teensy::MessageType::ConfigCommand);
+    ASSERT_EQ(frame.payload.size(), 8u + 2u * 28u);
+    EXPECT_EQ(readU32(frame.payload, 0),
+              static_cast<std::uint32_t>(posest::teensy::ConfigCommandKind::CameraTriggers));
+    EXPECT_EQ(readU32(frame.payload, 4), 2u);
+
+    EXPECT_EQ(readU32(frame.payload, 8), 1u);
+    EXPECT_EQ(readU32(frame.payload, 12), 2u);
+    EXPECT_DOUBLE_EQ(readDouble(frame.payload, 16), 50.0);
+    EXPECT_EQ(readU32(frame.payload, 24), 750u);
+    EXPECT_EQ(readI64(frame.payload, 28), 125);
+
+    EXPECT_EQ(readU32(frame.payload, 36), 0u);
+    EXPECT_EQ(readU32(frame.payload, 40), 3u);
+    EXPECT_DOUBLE_EQ(readDouble(frame.payload, 44), 30.0);
+    EXPECT_EQ(readU32(frame.payload, 52), 500u);
+    EXPECT_EQ(readI64(frame.payload, 56), -25);
 }

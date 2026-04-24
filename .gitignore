@@ -54,6 +54,10 @@ Testing/
 _deps/
 compile_commands.json
 
+# PlatformIO
+.pio/
+firmware/**/.pio/
+
 # Conan 2 (local project-layout output)
 CMakeUserPresets.json
 conan.lock
