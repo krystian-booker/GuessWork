@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "Bmi088Imu.h"
 #include "CameraTriggerScheduler.h"
 #include "CanBridge.h"
 #include "FirmwareConfig.h"
@@ -15,6 +16,7 @@ using namespace posest::firmware;
 StreamDecoder g_decoder;
 CameraTriggerScheduler g_triggers;
 CanBridge g_can;
+Bmi088Imu g_imu;
 
 std::uint32_t g_tx_sequence = 0;
 std::uint32_t g_error_flags = 0;
@@ -82,7 +84,7 @@ void sendTimeSyncResponse(const TimeSyncRequestPayload& request, std::uint64_t r
 void sendHealth(std::uint64_t now_us) {
     TeensyHealthPayload health;
     health.uptime_us = now_us;
-    health.error_flags = g_error_flags | g_can.errorFlags();
+    health.error_flags = g_error_flags | g_can.errorFlags() | g_imu.errorFlags();
     health.trigger_status_flags = g_triggers.statusFlags();
     health.rx_queue_depth = static_cast<std::uint32_t>(g_decoder.bufferedBytes());
     health.tx_queue_depth = g_can.txQueueDepth();
@@ -97,6 +99,15 @@ void sendHealth(std::uint64_t now_us) {
         return;
     }
     writeFrame(MessageType::TeensyHealth, g_payload_buffer, payload_size);
+}
+
+void sendImuSample(const ImuPayload& sample) {
+    std::uint16_t payload_size = 0;
+    if (!encodeImuPayload(sample, g_payload_buffer, sizeof(g_payload_buffer), payload_size)) {
+        g_error_flags |= kErrorInvalidPayload;
+        return;
+    }
+    writeFrame(MessageType::ImuSample, g_payload_buffer, payload_size);
 }
 
 void applyCameraTriggerConfig(const Frame& frame) {
@@ -183,6 +194,9 @@ void setup() {
     digitalWrite(kStatusLedPin, LOW);
     g_triggers.begin();
     g_can.begin();
+    if (!g_imu.begin(micros64())) {
+        g_error_flags |= kErrorImuInitFailure;
+    }
     Serial.begin(kDefaultSerialBaud);
     g_next_health_us = micros64() + kHealthPublishIntervalUs;
     g_next_led_toggle_us = micros() + 250000u;
@@ -195,6 +209,15 @@ void loop() {
     const std::uint64_t now64 = micros64();
     g_triggers.update(now32);
     updateLed(now32);
+    g_imu.checkForMissedDataReady(now64);
+
+    for (std::uint8_t i = 0; i < 4u; ++i) {
+        ImuPayload sample;
+        if (!g_imu.poll(now64, sample)) {
+            break;
+        }
+        sendImuSample(sample);
+    }
 
     if (now64 >= g_next_health_us) {
         g_next_health_us = now64 + kHealthPublishIntervalUs;

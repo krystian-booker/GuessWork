@@ -26,6 +26,12 @@ constexpr std::uint32_t kErrorCrcFailure = 1u << 0u;
 constexpr std::uint32_t kErrorUnsupportedCommand = 1u << 1u;
 constexpr std::uint32_t kErrorInvalidPayload = 1u << 2u;
 constexpr std::uint32_t kErrorCanUnsupported = 1u << 3u;
+constexpr std::uint32_t kErrorImuInitFailure = 1u << 4u;
+constexpr std::uint32_t kErrorImuSpiFailure = 1u << 5u;
+constexpr std::uint32_t kErrorImuMissedDrdy = 1u << 6u;
+constexpr std::uint32_t kErrorImuSampleOverrun = 1u << 7u;
+constexpr std::uint32_t kErrorImuAccelSaturated = 1u << 8u;
+constexpr std::uint32_t kErrorImuGyroSaturated = 1u << 9u;
 
 constexpr std::uint32_t kTriggerUnsupportedCount = 1u << 0u;
 constexpr std::uint32_t kTriggerInvalidPin = 1u << 1u;

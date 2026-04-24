@@ -1,0 +1,9 @@
+{
+  "name": "BMI08x_SensorAPI",
+  "version": "1.9.0",
+  "description": "Vendored Bosch Sensortec BMI08x SensorAPI pinned to v1.9.0 commit 615efc5e2f295b208f4e62f2409ac6df8066c5ea.",
+  "license": "BSD-3-Clause",
+  "build": {
+    "srcDir": "src"
+  }
+}
