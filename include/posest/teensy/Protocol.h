@@ -3,12 +3,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <array>
 #include <vector>
+
+#include "posest/MeasurementTypes.h"
 
 namespace posest::teensy {
 
 constexpr std::uint16_t kFrameMagic = 0x4757;  // "GW"
 constexpr std::uint8_t kProtocolVersion = 1;
+constexpr std::uint32_t kStatusUnsynchronizedTime = 1u << 0u;
 
 enum class MessageType : std::uint8_t {
     ImuSample = 1,
@@ -22,10 +26,48 @@ enum class MessageType : std::uint8_t {
     ConfigCommand = 67,
 };
 
+enum class ConfigCommandKind : std::uint32_t {
+    CameraTriggers = 1,
+};
+
 struct Frame {
     MessageType type{MessageType::TeensyHealth};
     std::uint32_t sequence{0};
     std::vector<std::uint8_t> payload;
+};
+
+struct ImuPayload {
+    std::uint64_t teensy_time_us{0};
+    Vec3 accel_mps2;
+    Vec3 gyro_radps;
+    std::optional<double> temperature_c;
+    std::uint32_t status_flags{0};
+};
+
+struct WheelOdometryPayload {
+    std::uint64_t teensy_time_us{0};
+    Pose2d chassis_delta;
+    std::array<double, 4> wheel_delta_m{};
+    std::uint32_t status_flags{0};
+};
+
+struct TeensyHealthPayload {
+    std::uint64_t uptime_us{0};
+    std::uint32_t error_flags{0};
+    std::uint32_t trigger_status_flags{0};
+    std::uint32_t rx_queue_depth{0};
+    std::uint32_t tx_queue_depth{0};
+};
+
+struct TimeSyncRequestPayload {
+    std::uint32_t request_sequence{0};
+    std::uint64_t host_send_time_us{0};
+};
+
+struct TimeSyncResponsePayload {
+    std::uint32_t request_sequence{0};
+    std::uint64_t teensy_receive_time_us{0};
+    std::uint64_t teensy_transmit_time_us{0};
 };
 
 struct DecodeResult {
@@ -42,6 +84,27 @@ struct StreamStats {
 std::uint32_t crc32(const std::uint8_t* data, std::size_t size);
 std::vector<std::uint8_t> encodeFrame(const Frame& frame);
 std::optional<DecodeResult> decodeFrame(const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeImuPayload(const ImuPayload& payload);
+std::optional<ImuPayload> decodeImuPayload(const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeWheelOdometryPayload(const WheelOdometryPayload& payload);
+std::optional<WheelOdometryPayload> decodeWheelOdometryPayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload);
+std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeTimeSyncRequestPayload(
+    const TimeSyncRequestPayload& payload);
+std::optional<TimeSyncRequestPayload> decodeTimeSyncRequestPayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeTimeSyncResponsePayload(
+    const TimeSyncResponsePayload& payload);
+std::optional<TimeSyncResponsePayload> decodeTimeSyncResponsePayload(
+    const std::vector<std::uint8_t>& bytes);
 
 class StreamDecoder final {
 public:

@@ -81,6 +81,14 @@ const char* daemonStateName(DaemonState state) {
 }
 
 std::string healthToJson(const DaemonHealth& health) {
+    const auto now = std::chrono::steady_clock::now();
+    auto ageMs = [now](const std::optional<Timestamp>& timestamp) -> nlohmann::json {
+        if (!timestamp) {
+            return nullptr;
+        }
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now - *timestamp).count();
+    };
+
     nlohmann::json out = {
         {"state", daemonStateName(health.state)},
         {"config_path", health.config_path},
@@ -90,6 +98,29 @@ std::string healthToJson(const DaemonHealth& health) {
         {"measurements_processed", health.measurements_processed},
         {"stale_measurements", health.stale_measurements},
         {"has_latest_pose", health.has_latest_pose},
+        {"teensy",
+         {
+             {"enabled", health.teensy.enabled},
+             {"connected", health.teensy.connected},
+             {"reconnect_attempts", health.teensy.reconnect_attempts},
+             {"successful_connects", health.teensy.successful_connects},
+             {"disconnects", health.teensy.disconnects},
+             {"crc_failures", health.teensy.crc_failures},
+             {"sequence_gaps", health.teensy.sequence_gaps},
+             {"invalid_payloads", health.teensy.invalid_payloads},
+             {"inbound_imu_samples", health.teensy.inbound_imu_samples},
+             {"inbound_wheel_odometry_samples",
+              health.teensy.inbound_wheel_odometry_samples},
+             {"outbound_frames_queued", health.teensy.outbound_frames_queued},
+             {"outbound_frames_sent", health.teensy.outbound_frames_sent},
+             {"outbound_frames_dropped", health.teensy.outbound_frames_dropped},
+             {"last_receive_age_ms", ageMs(health.teensy.last_receive_time)},
+             {"last_transmit_age_ms", ageMs(health.teensy.last_transmit_time)},
+             {"last_error", health.teensy.last_error},
+             {"time_sync_established", health.teensy.time_sync_established},
+             {"time_sync_offset_us", health.teensy.time_sync_offset_us},
+             {"time_sync_round_trip_us", health.teensy.time_sync_round_trip_us},
+         }},
         {"last_error", health.last_error},
         {"shutdown_signal", health.shutdown_signal},
     };
@@ -155,7 +186,8 @@ void DaemonController::loadAndBuild() {
 
         measurement_bus_ = std::make_unique<MeasurementBus>(kMeasurementBusCapacity);
         fusion_ = std::make_unique<fusion::FusionService>(*measurement_bus_);
-        teensy_ = std::make_shared<teensy::TeensyService>(config_.teensy);
+        teensy_ = std::make_shared<teensy::TeensyService>(
+            config_.teensy, config_.camera_triggers, *measurement_bus_);
         fusion_->addOutputSink(teensy_);
         web_ = std::make_unique<WebService>(*config_store_);
         graph_ = std::make_unique<RuntimeGraph>(
@@ -185,6 +217,7 @@ void DaemonController::start() {
         if (started_) {
             return;
         }
+        teensy_->start();
         fusion_->start();
         graph_->start();
         started_ = true;
@@ -223,6 +256,9 @@ void DaemonController::stop(int shutdown_signal) {
     if (graph_) {
         graph_->stop();
     }
+    if (teensy_) {
+        teensy_->stop();
+    }
     if (fusion_) {
         fusion_->stop();
     }
@@ -257,6 +293,9 @@ void DaemonController::refreshHealth() {
         health_.measurements_processed = stats.measurements_processed;
         health_.stale_measurements = stats.stale_measurements;
         health_.has_latest_pose = fusion_->latestEstimate().has_value();
+    }
+    if (teensy_) {
+        health_.teensy = teensy_->stats();
     }
 }
 

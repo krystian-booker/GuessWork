@@ -93,10 +93,38 @@ COMMIT;
 )sql";
 }
 
+const char* migration2Sql() {
+    return R"sql(
+BEGIN;
+
+ALTER TABLE teensy_config
+    ADD COLUMN baud_rate INTEGER NOT NULL DEFAULT 115200;
+
+ALTER TABLE teensy_config
+    ADD COLUMN reconnect_interval_ms INTEGER NOT NULL DEFAULT 1000;
+
+ALTER TABLE teensy_config
+    ADD COLUMN read_timeout_ms INTEGER NOT NULL DEFAULT 20;
+
+CREATE TABLE IF NOT EXISTS camera_triggers (
+    camera_id TEXT PRIMARY KEY NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    teensy_pin INTEGER NOT NULL,
+    rate_hz REAL NOT NULL,
+    pulse_width_us INTEGER NOT NULL DEFAULT 1000,
+    phase_offset_us INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+
+PRAGMA user_version = 2;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 1;
+    return 2;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -108,8 +136,13 @@ void applyMigrations(sqlite3* db) {
     if (version > currentSchemaVersion()) {
         throw std::runtime_error("SQLite config database schema is newer than this binary");
     }
-    if (version == 0) {
+    int migrated_version = version;
+    if (migrated_version == 0) {
         exec(db, migration1Sql());
+        migrated_version = 1;
+    }
+    if (migrated_version == 1) {
+        exec(db, migration2Sql());
     }
 }
 

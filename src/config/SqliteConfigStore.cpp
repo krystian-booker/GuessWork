@@ -255,7 +255,25 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
     {
         Statement stmt(
             db_,
-            "SELECT serial_port, fused_pose_can_id, status_can_id, pose_publish_hz "
+            "SELECT camera_id, enabled, teensy_pin, rate_hz, pulse_width_us, phase_offset_us "
+            "FROM camera_triggers ORDER BY camera_id");
+        while (stmt.stepRow()) {
+            config.camera_triggers.push_back({
+                stmt.columnText(0),
+                stmt.columnInt(1) != 0,
+                static_cast<std::int32_t>(stmt.columnInt(2)),
+                stmt.columnDouble(3),
+                checkedUint32(stmt.columnInt64(4), "pulse_width_us"),
+                static_cast<std::int64_t>(stmt.columnInt64(5)),
+            });
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT serial_port, fused_pose_can_id, status_can_id, pose_publish_hz, "
+            "baud_rate, reconnect_interval_ms, read_timeout_ms "
             "FROM teensy_config WHERE id = 1");
         if (stmt.stepRow()) {
             config.teensy.serial_port = stmt.columnText(0);
@@ -264,6 +282,11 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             config.teensy.status_can_id =
                 checkedUint32(stmt.columnInt64(2), "status_can_id");
             config.teensy.pose_publish_hz = stmt.columnDouble(3);
+            config.teensy.baud_rate = checkedUint32(stmt.columnInt64(4), "baud_rate");
+            config.teensy.reconnect_interval_ms =
+                checkedUint32(stmt.columnInt64(5), "reconnect_interval_ms");
+            config.teensy.read_timeout_ms =
+                checkedUint32(stmt.columnInt64(6), "read_timeout_ms");
         }
     }
 
@@ -277,6 +300,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     std::lock_guard<std::mutex> g(mu_);
     Transaction tx(db_);
 
+    exec(db_, "DELETE FROM camera_triggers");
     exec(db_, "DELETE FROM calibrations");
     exec(db_, "DELETE FROM camera_pipeline_bindings");
     exec(db_, "DELETE FROM camera_controls");
@@ -347,16 +371,35 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.stepDone();
     }
 
+    for (const auto& trigger : config.camera_triggers) {
+        Statement insert(
+            db_,
+            "INSERT INTO camera_triggers "
+            "(camera_id, enabled, teensy_pin, rate_hz, pulse_width_us, phase_offset_us) "
+            "VALUES (?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, trigger.camera_id);
+        insert.bindInt(2, trigger.enabled ? 1 : 0);
+        insert.bindInt(3, trigger.teensy_pin);
+        insert.bindDouble(4, trigger.rate_hz);
+        insert.bindInt64(5, static_cast<sqlite3_int64>(trigger.pulse_width_us));
+        insert.bindInt64(6, static_cast<sqlite3_int64>(trigger.phase_offset_us));
+        insert.stepDone();
+    }
+
     {
         Statement insert(
             db_,
             "INSERT INTO teensy_config "
-            "(id, serial_port, fused_pose_can_id, status_can_id, pose_publish_hz) "
-            "VALUES (1, ?, ?, ?, ?)");
+            "(id, serial_port, fused_pose_can_id, status_can_id, pose_publish_hz, "
+            "baud_rate, reconnect_interval_ms, read_timeout_ms) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, config.teensy.serial_port);
         insert.bindInt64(2, static_cast<sqlite3_int64>(config.teensy.fused_pose_can_id));
         insert.bindInt64(3, static_cast<sqlite3_int64>(config.teensy.status_can_id));
         insert.bindDouble(4, config.teensy.pose_publish_hz);
+        insert.bindInt64(5, static_cast<sqlite3_int64>(config.teensy.baud_rate));
+        insert.bindInt64(6, static_cast<sqlite3_int64>(config.teensy.reconnect_interval_ms));
+        insert.bindInt64(7, static_cast<sqlite3_int64>(config.teensy.read_timeout_ms));
         insert.stepDone();
     }
 

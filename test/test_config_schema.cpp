@@ -80,7 +80,11 @@ posest::runtime::RuntimeConfig makeValidConfig() {
 
     config.bindings.push_back({"cam0", "tags"});
     config.calibrations.push_back({"cam0", "calib/cam0.json", "v1", "2026-04-24T00:00:00Z"});
+    config.camera_triggers.push_back({"cam0", true, 6, 50.0, 750, 125});
     config.teensy.serial_port = "/dev/ttyACM0";
+    config.teensy.baud_rate = 921600;
+    config.teensy.reconnect_interval_ms = 250;
+    config.teensy.read_timeout_ms = 5;
     config.teensy.fused_pose_can_id = 0x201;
     config.teensy.status_can_id = 0x202;
     config.teensy.pose_publish_hz = 50.0;
@@ -151,7 +155,17 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
 
     ASSERT_EQ(loaded.calibrations.size(), 1u);
     EXPECT_EQ(loaded.calibrations[0].file_path, "calib/cam0.json");
+    ASSERT_EQ(loaded.camera_triggers.size(), 1u);
+    EXPECT_EQ(loaded.camera_triggers[0].camera_id, "cam0");
+    EXPECT_TRUE(loaded.camera_triggers[0].enabled);
+    EXPECT_EQ(loaded.camera_triggers[0].teensy_pin, 6);
+    EXPECT_DOUBLE_EQ(loaded.camera_triggers[0].rate_hz, 50.0);
+    EXPECT_EQ(loaded.camera_triggers[0].pulse_width_us, 750u);
+    EXPECT_EQ(loaded.camera_triggers[0].phase_offset_us, 125);
     EXPECT_EQ(loaded.teensy.serial_port, "/dev/ttyACM0");
+    EXPECT_EQ(loaded.teensy.baud_rate, 921600u);
+    EXPECT_EQ(loaded.teensy.reconnect_interval_ms, 250u);
+    EXPECT_EQ(loaded.teensy.read_timeout_ms, 5u);
     EXPECT_EQ(loaded.teensy.fused_pose_can_id, 0x201u);
     EXPECT_EQ(loaded.teensy.status_can_id, 0x202u);
 
@@ -214,9 +228,38 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     bad_calibration.calibrations[0].file_path.clear();
     expect_invalid(bad_calibration);
 
+    auto unknown_trigger_camera = config;
+    unknown_trigger_camera.camera_triggers[0].camera_id = "missing";
+    expect_invalid(unknown_trigger_camera);
+
+    auto bad_trigger_rate = config;
+    bad_trigger_rate.camera_triggers[0].rate_hz = 0.0;
+    expect_invalid(bad_trigger_rate);
+
+    auto bad_trigger_pulse = config;
+    bad_trigger_pulse.camera_triggers[0].pulse_width_us = 0;
+    expect_invalid(bad_trigger_pulse);
+
+    auto duplicate_trigger_camera = config;
+    duplicate_trigger_camera.camera_triggers.push_back(config.camera_triggers[0]);
+    expect_invalid(duplicate_trigger_camera);
+
+    auto duplicate_trigger_pin = config;
+    posest::CameraConfig cam2;
+    cam2.id = "cam2";
+    cam2.type = "v4l2";
+    cam2.device = "/dev/video2";
+    duplicate_trigger_pin.cameras.push_back(cam2);
+    duplicate_trigger_pin.camera_triggers.push_back({"cam2", true, 6, 30.0, 500, 0});
+    expect_invalid(duplicate_trigger_pin);
+
     auto bad_teensy = config;
     bad_teensy.teensy.pose_publish_hz = 0.0;
     expect_invalid(bad_teensy);
+
+    auto bad_teensy_serial_timing = config;
+    bad_teensy_serial_timing.teensy.read_timeout_ms = 0;
+    expect_invalid(bad_teensy_serial_timing);
 }
 
 TEST(ConfigStore, InMemoryRoundTripsRuntimeConfig) {

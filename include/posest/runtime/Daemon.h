@@ -45,6 +45,7 @@ struct DaemonHealth {
     std::uint64_t measurements_processed{0};
     std::uint64_t stale_measurements{0};
     bool has_latest_pose{false};
+    teensy::TeensyStats teensy;
     std::string last_error;
     int shutdown_signal{0};
 };

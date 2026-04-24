@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <limits>
 #include <utility>
 
@@ -24,6 +26,19 @@ void appendU32(std::vector<std::uint8_t>& out, std::uint32_t value) {
     }
 }
 
+void appendU64(std::vector<std::uint8_t>& out, std::uint64_t value) {
+    for (int shift = 0; shift <= 56; shift += 8) {
+        out.push_back(static_cast<std::uint8_t>((value >> static_cast<unsigned>(shift)) & 0xFFu));
+    }
+}
+
+void appendDouble(std::vector<std::uint8_t>& out, double value) {
+    std::uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(value));
+    appendU64(out, bits);
+}
+
 std::uint16_t readU16(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
     return static_cast<std::uint16_t>(bytes[offset]) |
            static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[offset + 1]) << 8u);
@@ -34,6 +49,23 @@ std::uint32_t readU32(const std::vector<std::uint8_t>& bytes, std::size_t offset
            (static_cast<std::uint32_t>(bytes[offset + 1]) << 8u) |
            (static_cast<std::uint32_t>(bytes[offset + 2]) << 16u) |
            (static_cast<std::uint32_t>(bytes[offset + 3]) << 24u);
+}
+
+std::uint64_t readU64(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    std::uint64_t value = 0;
+    for (int shift = 0; shift <= 56; shift += 8) {
+        value |= static_cast<std::uint64_t>(bytes[offset + static_cast<std::size_t>(shift / 8)])
+                 << static_cast<unsigned>(shift);
+    }
+    return value;
+}
+
+double readDouble(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    const std::uint64_t bits = readU64(bytes, offset);
+    double value = 0.0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 }  // namespace
@@ -93,6 +125,150 @@ std::optional<DecodeResult> decodeFrame(const std::vector<std::uint8_t>& bytes) 
     frame.payload.assign(bytes.begin() + static_cast<std::ptrdiff_t>(kHeaderSize),
                          bytes.begin() + static_cast<std::ptrdiff_t>(kHeaderSize + payload_size));
     return DecodeResult{std::move(frame), total_size};
+}
+
+std::vector<std::uint8_t> encodeImuPayload(const ImuPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(68);
+    appendU64(out, payload.teensy_time_us);
+    appendDouble(out, payload.accel_mps2.x);
+    appendDouble(out, payload.accel_mps2.y);
+    appendDouble(out, payload.accel_mps2.z);
+    appendDouble(out, payload.gyro_radps.x);
+    appendDouble(out, payload.gyro_radps.y);
+    appendDouble(out, payload.gyro_radps.z);
+    appendDouble(out, payload.temperature_c.value_or(std::numeric_limits<double>::quiet_NaN()));
+    appendU32(out, payload.status_flags);
+    return out;
+}
+
+std::optional<ImuPayload> decodeImuPayload(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 68u) {
+        return std::nullopt;
+    }
+
+    ImuPayload payload;
+    std::size_t offset = 0;
+    payload.teensy_time_us = readU64(bytes, offset);
+    offset += 8;
+    payload.accel_mps2.x = readDouble(bytes, offset);
+    offset += 8;
+    payload.accel_mps2.y = readDouble(bytes, offset);
+    offset += 8;
+    payload.accel_mps2.z = readDouble(bytes, offset);
+    offset += 8;
+    payload.gyro_radps.x = readDouble(bytes, offset);
+    offset += 8;
+    payload.gyro_radps.y = readDouble(bytes, offset);
+    offset += 8;
+    payload.gyro_radps.z = readDouble(bytes, offset);
+    offset += 8;
+    const double temperature = readDouble(bytes, offset);
+    offset += 8;
+    if (!std::isnan(temperature)) {
+        payload.temperature_c = temperature;
+    }
+    payload.status_flags = readU32(bytes, offset);
+    return payload;
+}
+
+std::vector<std::uint8_t> encodeWheelOdometryPayload(
+    const WheelOdometryPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(68);
+    appendU64(out, payload.teensy_time_us);
+    appendDouble(out, payload.chassis_delta.x_m);
+    appendDouble(out, payload.chassis_delta.y_m);
+    appendDouble(out, payload.chassis_delta.theta_rad);
+    for (double wheel_delta : payload.wheel_delta_m) {
+        appendDouble(out, wheel_delta);
+    }
+    appendU32(out, payload.status_flags);
+    return out;
+}
+
+std::optional<WheelOdometryPayload> decodeWheelOdometryPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 68u) {
+        return std::nullopt;
+    }
+
+    WheelOdometryPayload payload;
+    std::size_t offset = 0;
+    payload.teensy_time_us = readU64(bytes, offset);
+    offset += 8;
+    payload.chassis_delta.x_m = readDouble(bytes, offset);
+    offset += 8;
+    payload.chassis_delta.y_m = readDouble(bytes, offset);
+    offset += 8;
+    payload.chassis_delta.theta_rad = readDouble(bytes, offset);
+    offset += 8;
+    for (double& wheel_delta : payload.wheel_delta_m) {
+        wheel_delta = readDouble(bytes, offset);
+        offset += 8;
+    }
+    payload.status_flags = readU32(bytes, offset);
+    return payload;
+}
+
+std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(24);
+    appendU64(out, payload.uptime_us);
+    appendU32(out, payload.error_flags);
+    appendU32(out, payload.trigger_status_flags);
+    appendU32(out, payload.rx_queue_depth);
+    appendU32(out, payload.tx_queue_depth);
+    return out;
+}
+
+std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 24u) {
+        return std::nullopt;
+    }
+    TeensyHealthPayload payload;
+    payload.uptime_us = readU64(bytes, 0);
+    payload.error_flags = readU32(bytes, 8);
+    payload.trigger_status_flags = readU32(bytes, 12);
+    payload.rx_queue_depth = readU32(bytes, 16);
+    payload.tx_queue_depth = readU32(bytes, 20);
+    return payload;
+}
+
+std::vector<std::uint8_t> encodeTimeSyncRequestPayload(
+    const TimeSyncRequestPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(12);
+    appendU32(out, payload.request_sequence);
+    appendU64(out, payload.host_send_time_us);
+    return out;
+}
+
+std::optional<TimeSyncRequestPayload> decodeTimeSyncRequestPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 12u) {
+        return std::nullopt;
+    }
+    return TimeSyncRequestPayload{readU32(bytes, 0), readU64(bytes, 4)};
+}
+
+std::vector<std::uint8_t> encodeTimeSyncResponsePayload(
+    const TimeSyncResponsePayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(20);
+    appendU32(out, payload.request_sequence);
+    appendU64(out, payload.teensy_receive_time_us);
+    appendU64(out, payload.teensy_transmit_time_us);
+    return out;
+}
+
+std::optional<TimeSyncResponsePayload> decodeTimeSyncResponsePayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 20u) {
+        return std::nullopt;
+    }
+    return TimeSyncResponsePayload{readU32(bytes, 0), readU64(bytes, 4), readU64(bytes, 12)};
 }
 
 std::vector<Frame> StreamDecoder::push(const std::uint8_t* data, std::size_t size) {

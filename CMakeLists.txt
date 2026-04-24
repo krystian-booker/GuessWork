@@ -62,6 +62,8 @@ target_link_libraries(posest_fusion PUBLIC posest_core)
 # --- posest_teensy: USB protocol codec + fusion output adapter
 add_library(posest_teensy
     src/teensy/Protocol.cpp
+    src/teensy/SerialTransport.cpp
+    src/teensy/FakeSerialTransport.cpp
     src/teensy/TeensyService.cpp
 )
 target_link_libraries(posest_teensy PUBLIC posest_core posest_fusion posest_runtime)
@@ -126,6 +128,7 @@ add_executable(posest_tests
     test/test_runtime_graph.cpp
     test/test_pipelines.cpp
     test/test_teensy_protocol.cpp
+    test/test_teensy_service.cpp
     test/test_config_schema.cpp
     test/test_fusion_service.cpp
     test/test_daemon.cpp

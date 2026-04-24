@@ -82,6 +82,8 @@ TEST(DaemonHealth, HealthOnceJsonContainsExpectedFieldsForEmptyDb) {
     EXPECT_EQ(json.at("camera_count"), 0);
     EXPECT_EQ(json.at("pipeline_count"), 0);
     EXPECT_EQ(json.at("has_latest_pose"), false);
+    ASSERT_TRUE(json.contains("teensy"));
+    EXPECT_EQ(json.at("teensy").at("enabled"), false);
 
     std::filesystem::remove(path);
 }
@@ -104,6 +106,7 @@ TEST(DaemonController, LoadsBuildsStartsAndStopsEmptyConfigWithFakeFactories) {
     const auto health = daemon.health();
     EXPECT_EQ(health.state, posest::runtime::DaemonState::Stopped);
     EXPECT_EQ(health.shutdown_signal, 15);
+    EXPECT_FALSE(health.teensy.enabled);
 
     std::filesystem::remove(path);
 }

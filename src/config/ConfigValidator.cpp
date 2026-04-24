@@ -96,6 +96,32 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
                     calibration.version);
     }
 
+    std::unordered_set<std::string> trigger_cameras;
+    std::unordered_set<std::int32_t> enabled_trigger_pins;
+    for (const auto& trigger : config.camera_triggers) {
+        require(!trigger.camera_id.empty(), "camera trigger has empty camera id");
+        require(cameras_enabled.find(trigger.camera_id) != cameras_enabled.end(),
+                "camera trigger references unknown camera: " + trigger.camera_id);
+        require(trigger_cameras.insert(trigger.camera_id).second,
+                "duplicate camera trigger for camera: " + trigger.camera_id);
+        require(trigger.teensy_pin >= 0,
+                "camera trigger for camera '" + trigger.camera_id + "' has invalid Teensy pin");
+        require(trigger.rate_hz > 0.0,
+                "camera trigger for camera '" + trigger.camera_id + "' rate must be > 0");
+        require(trigger.pulse_width_us > 0,
+                "camera trigger for camera '" + trigger.camera_id +
+                    "' pulse width must be > 0");
+        if (trigger.enabled) {
+            require(enabled_trigger_pins.insert(trigger.teensy_pin).second,
+                    "duplicate enabled camera trigger pin: " +
+                        std::to_string(trigger.teensy_pin));
+        }
+    }
+
+    require(config.teensy.baud_rate > 0, "Teensy baud rate must be > 0");
+    require(config.teensy.reconnect_interval_ms > 0,
+            "Teensy reconnect interval must be > 0");
+    require(config.teensy.read_timeout_ms > 0, "Teensy read timeout must be > 0");
     require(config.teensy.pose_publish_hz > 0.0, "Teensy pose publish rate must be > 0");
 }
 
