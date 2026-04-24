@@ -15,6 +15,7 @@ find_package(OpenCV REQUIRED)
 find_package(GTest REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(apriltag REQUIRED)
 
 # --- posest_core: interfaces, Frame, LatestFrameSlot, ProducerBase, ConsumerBase
 add_library(posest_core
@@ -65,6 +66,19 @@ add_library(posest_teensy
 )
 target_link_libraries(posest_teensy PUBLIC posest_core posest_fusion posest_runtime)
 
+# --- posest_pipelines: vision pipeline implementations
+add_library(posest_pipelines
+    src/pipelines/VisionPipelineBase.cpp
+    src/pipelines/PlaceholderPipelines.cpp
+    src/pipelines/AprilTagPipeline.cpp
+)
+target_link_libraries(posest_pipelines PUBLIC
+    posest_core
+    posest_runtime
+    nlohmann_json::nlohmann_json
+    apriltag::apriltag
+)
+
 # --- posest_v4l2: V4L2 camera backend (Linux only)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(posest_v4l2
@@ -83,6 +97,7 @@ target_link_libraries(posest_daemon_lib PUBLIC
     posest_runtime
     posest_fusion
     posest_teensy
+    posest_pipelines
     nlohmann_json::nlohmann_json
 )
 if(TARGET posest_v4l2)
@@ -109,6 +124,7 @@ add_executable(posest_tests
     test/test_mock_pipeline.cpp
     test/test_measurement_bus.cpp
     test/test_runtime_graph.cpp
+    test/test_pipelines.cpp
     test/test_teensy_protocol.cpp
     test/test_config_schema.cpp
     test/test_fusion_service.cpp
@@ -121,6 +137,7 @@ target_link_libraries(posest_tests PRIVATE
     posest_runtime
     posest_fusion
     posest_teensy
+    posest_pipelines
     posest_daemon_lib
     GTest::gtest
     GTest::gtest_main

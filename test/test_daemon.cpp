@@ -177,17 +177,22 @@ TEST(ProductionFactories, CameraFactoryCreatesV4L2OnLinuxAndRejectsUnknown) {
 #endif
 }
 
-TEST(ProductionFactories, PipelineFactoryRejectsUnimplementedPipelines) {
+TEST(ProductionFactories, PipelineFactoryCreatesImplementedAndPlaceholderPipelines) {
     posest::runtime::ProductionPipelineFactory factory;
     posest::MeasurementBus bus(4);
 
     posest::runtime::PipelineConfig tags;
     tags.id = "tags";
     tags.type = "apriltag";
-    EXPECT_THROW(factory.createPipeline(tags, bus), std::runtime_error);
+    EXPECT_TRUE(factory.createPipeline(tags, bus));
 
     posest::runtime::PipelineConfig vio;
     vio.id = "vio";
     vio.type = "vio";
-    EXPECT_THROW(factory.createPipeline(vio, bus), std::runtime_error);
+    EXPECT_TRUE(factory.createPipeline(vio, bus));
+
+    posest::runtime::PipelineConfig unknown;
+    unknown.id = "unknown";
+    unknown.type = "unknown";
+    EXPECT_THROW(factory.createPipeline(unknown, bus), std::runtime_error);
 }

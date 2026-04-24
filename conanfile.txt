@@ -3,6 +3,7 @@ opencv/4.10.0
 gtest/1.14.0
 sqlite3/3.45.3
 nlohmann_json/3.11.3
+apriltag/3.4.2
 
 [generators]
 CMakeDeps
