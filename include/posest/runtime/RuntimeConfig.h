@@ -33,6 +33,29 @@ struct CameraExtrinsicsConfig {
     Pose3d camera_to_robot;
 };
 
+struct CameraImuCalibrationConfig {
+    std::string camera_id;
+    std::string version;
+    bool active{true};
+    std::string source_file_path;
+    std::string created_at;
+    Pose3d camera_to_imu;
+    Pose3d imu_to_camera;
+    double time_shift_s{0.0};
+};
+
+struct KalibrDatasetConfig {
+    std::string id;
+    std::string path;
+    std::string created_at;
+    double duration_s{0.0};
+    std::vector<std::string> camera_ids;
+};
+
+struct CalibrationToolConfig {
+    std::string docker_image{"kalibr:latest"};
+};
+
 struct FieldTagConfig {
     int tag_id{0};
     Pose3d field_to_tag;
@@ -72,6 +95,9 @@ struct RuntimeConfig {
     std::vector<CameraPipelineBinding> bindings;
     std::vector<CameraCalibrationConfig> calibrations;
     std::vector<CameraExtrinsicsConfig> camera_extrinsics;
+    std::vector<CameraImuCalibrationConfig> camera_imu_calibrations;
+    std::vector<KalibrDatasetConfig> kalibr_datasets;
+    CalibrationToolConfig calibration_tools;
     std::vector<FieldLayoutConfig> field_layouts;
     std::string active_field_layout_id;
     std::vector<CameraTriggerConfig> camera_triggers;

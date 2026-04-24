@@ -205,10 +205,62 @@ COMMIT;
 )sql";
 }
 
+const char* migration4Sql() {
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS calibration_tool_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    docker_image TEXT NOT NULL DEFAULT 'kalibr:latest'
+);
+
+INSERT OR IGNORE INTO calibration_tool_config (id, docker_image)
+VALUES (1, 'kalibr:latest');
+
+CREATE TABLE IF NOT EXISTS kalibr_datasets (
+    id TEXT PRIMARY KEY NOT NULL,
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    duration_s REAL NOT NULL,
+    camera_ids_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS camera_imu_calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    cam_imu_tx_m REAL NOT NULL,
+    cam_imu_ty_m REAL NOT NULL,
+    cam_imu_tz_m REAL NOT NULL,
+    cam_imu_roll_rad REAL NOT NULL,
+    cam_imu_pitch_rad REAL NOT NULL,
+    cam_imu_yaw_rad REAL NOT NULL,
+    imu_cam_tx_m REAL NOT NULL,
+    imu_cam_ty_m REAL NOT NULL,
+    imu_cam_tz_m REAL NOT NULL,
+    imu_cam_roll_rad REAL NOT NULL,
+    imu_cam_pitch_rad REAL NOT NULL,
+    imu_cam_yaw_rad REAL NOT NULL,
+    time_shift_s REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (camera_id, version),
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX camera_imu_one_active_per_camera
+    ON camera_imu_calibrations(camera_id)
+    WHERE active = 1;
+
+PRAGMA user_version = 4;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 3;
+    return 4;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -231,6 +283,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 2) {
         exec(db, migration3Sql());
+        migrated_version = 3;
+    }
+    if (migrated_version == 3) {
+        exec(db, migration4Sql());
     }
 }
 

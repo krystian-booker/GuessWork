@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "posest/MeasurementTypes.h"
 #include "posest/MeasurementBus.h"
@@ -34,6 +35,9 @@ enum class DaemonCommand {
     Run,
     CalibrateCamera,
     ImportFieldLayout,
+    RecordKalibrDataset,
+    MakeKalibrBag,
+    CalibrateCameraImu,
 };
 
 struct CalibrateCameraOptions {
@@ -55,6 +59,26 @@ struct ImportFieldLayoutOptions {
     bool activate{false};
 };
 
+struct RecordKalibrDatasetOptions {
+    std::vector<std::string> camera_ids;
+    std::filesystem::path output_dir;
+    double duration_s{0.0};
+};
+
+struct MakeKalibrBagOptions {
+    std::filesystem::path dataset_dir;
+    std::filesystem::path bag_path;
+    std::string docker_image;
+};
+
+struct CalibrateCameraImuOptions {
+    std::filesystem::path dataset_dir;
+    std::filesystem::path target_path;
+    std::filesystem::path imu_path;
+    std::string version;
+    std::string docker_image;
+};
+
 struct DaemonOptions {
     DaemonCommand command{DaemonCommand::Run};
     std::filesystem::path config_path{"./posest.db"};
@@ -63,6 +87,9 @@ struct DaemonOptions {
     std::optional<std::chrono::milliseconds> health_interval;
     CalibrateCameraOptions calibrate_camera;
     ImportFieldLayoutOptions import_field_layout;
+    RecordKalibrDatasetOptions record_kalibr_dataset;
+    MakeKalibrBagOptions make_kalibr_bag;
+    CalibrateCameraImuOptions calibrate_camera_imu;
 };
 
 struct DaemonHealth {
@@ -84,7 +111,18 @@ std::string daemonUsage(const char* argv0);
 const char* daemonStateName(DaemonState state);
 std::string healthToJson(const DaemonHealth& health);
 std::string buildKalibrDockerCommand(const CalibrateCameraOptions& options);
-void runConfigCommand(const DaemonOptions& options, config::IConfigStore& config_store);
+std::string buildMakeKalibrBagDockerCommand(
+    const MakeKalibrBagOptions& options,
+    const std::string& docker_image);
+std::string buildCalibrateCameraImuDockerCommand(
+    const CalibrateCameraImuOptions& options,
+    const std::filesystem::path& bag_path,
+    const std::filesystem::path& camchain_path,
+    const std::string& docker_image);
+void runConfigCommand(
+    const DaemonOptions& options,
+    config::IConfigStore& config_store,
+    ICameraBackendFactory& camera_factory);
 
 class ShutdownSignal final {
 public:

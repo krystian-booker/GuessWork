@@ -113,10 +113,28 @@ TEST(TeensyProtocol, RobotOdometryPayloadRoundTrips) {
     EXPECT_NE(decoded->status_flags & posest::teensy::kStatusUnsynchronizedRioTime, 0u);
 }
 
+TEST(TeensyProtocol, CameraTriggerEventPayloadRoundTrips) {
+    posest::teensy::CameraTriggerEventPayload payload;
+    payload.teensy_time_us = 123456;
+    payload.pin = 6;
+    payload.trigger_sequence = 42;
+    payload.status_flags = 7;
+
+    const auto decoded = posest::teensy::decodeCameraTriggerEventPayload(
+        posest::teensy::encodeCameraTriggerEventPayload(payload));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->teensy_time_us, 123456u);
+    EXPECT_EQ(decoded->pin, 6);
+    EXPECT_EQ(decoded->trigger_sequence, 42u);
+    EXPECT_EQ(decoded->status_flags, 7u);
+}
+
 TEST(TeensyProtocol, RejectsBadPayloadSizes) {
     EXPECT_FALSE(posest::teensy::decodeImuPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeWheelOdometryPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeRobotOdometryPayload({1, 2, 3}).has_value());
+    EXPECT_FALSE(posest::teensy::decodeCameraTriggerEventPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeTimeSyncResponsePayload({1, 2, 3}).has_value());
 }
 

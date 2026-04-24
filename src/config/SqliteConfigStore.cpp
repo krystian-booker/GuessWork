@@ -165,6 +165,27 @@ std::string doubleArrayToJson(const std::vector<double>& values) {
     return nlohmann::json(values).dump();
 }
 
+std::vector<std::string> parseStringArrayJson(const std::string& value, const char* field_name) {
+    const auto json = nlohmann::json::parse(value);
+    if (!json.is_array()) {
+        throw std::runtime_error(std::string("SQLite field is not a JSON array: ") + field_name);
+    }
+    std::vector<std::string> out;
+    out.reserve(json.size());
+    for (const auto& entry : json) {
+        if (!entry.is_string()) {
+            throw std::runtime_error(std::string("SQLite JSON array contains non-string: ") +
+                                     field_name);
+        }
+        out.push_back(entry.get<std::string>());
+    }
+    return out;
+}
+
+std::string stringArrayToJson(const std::vector<std::string>& values) {
+    return nlohmann::json(values).dump();
+}
+
 }  // namespace
 
 SqliteConfigStore::SqliteConfigStore(std::filesystem::path db_path)
@@ -311,6 +332,72 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
         }
     }
 
+    {
+        Statement stmt(
+            db_,
+            "SELECT camera_id, version, active, source_file_path, created_at, "
+            "cam_imu_tx_m, cam_imu_ty_m, cam_imu_tz_m, "
+            "cam_imu_roll_rad, cam_imu_pitch_rad, cam_imu_yaw_rad, "
+            "imu_cam_tx_m, imu_cam_ty_m, imu_cam_tz_m, "
+            "imu_cam_roll_rad, imu_cam_pitch_rad, imu_cam_yaw_rad, time_shift_s "
+            "FROM camera_imu_calibrations ORDER BY camera_id, version");
+        while (stmt.stepRow()) {
+            runtime::CameraImuCalibrationConfig calibration;
+            calibration.camera_id = stmt.columnText(0);
+            calibration.version = stmt.columnText(1);
+            calibration.active = stmt.columnInt(2) != 0;
+            calibration.source_file_path = stmt.columnText(3);
+            calibration.created_at = stmt.columnText(4);
+            calibration.camera_to_imu.translation_m = {
+                stmt.columnDouble(5),
+                stmt.columnDouble(6),
+                stmt.columnDouble(7),
+            };
+            calibration.camera_to_imu.rotation_rpy_rad = {
+                stmt.columnDouble(8),
+                stmt.columnDouble(9),
+                stmt.columnDouble(10),
+            };
+            calibration.imu_to_camera.translation_m = {
+                stmt.columnDouble(11),
+                stmt.columnDouble(12),
+                stmt.columnDouble(13),
+            };
+            calibration.imu_to_camera.rotation_rpy_rad = {
+                stmt.columnDouble(14),
+                stmt.columnDouble(15),
+                stmt.columnDouble(16),
+            };
+            calibration.time_shift_s = stmt.columnDouble(17);
+            config.camera_imu_calibrations.push_back(calibration);
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT id, path, created_at, duration_s, camera_ids_json "
+            "FROM kalibr_datasets ORDER BY id");
+        while (stmt.stepRow()) {
+            runtime::KalibrDatasetConfig dataset;
+            dataset.id = stmt.columnText(0);
+            dataset.path = stmt.columnText(1);
+            dataset.created_at = stmt.columnText(2);
+            dataset.duration_s = stmt.columnDouble(3);
+            dataset.camera_ids = parseStringArrayJson(stmt.columnText(4), "camera_ids_json");
+            config.kalibr_datasets.push_back(std::move(dataset));
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT docker_image FROM calibration_tool_config WHERE id = 1");
+        if (stmt.stepRow()) {
+            config.calibration_tools.docker_image = stmt.columnText(0);
+        }
+    }
+
     std::unordered_map<std::string, std::size_t> field_layout_index;
     {
         Statement stmt(
@@ -410,6 +497,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM camera_triggers");
     exec(db_, "DELETE FROM field_tags");
     exec(db_, "DELETE FROM field_layouts");
+    exec(db_, "DELETE FROM camera_imu_calibrations");
+    exec(db_, "DELETE FROM kalibr_datasets");
+    exec(db_, "DELETE FROM calibration_tool_config");
     exec(db_, "DELETE FROM camera_extrinsics");
     exec(db_, "DELETE FROM calibrations");
     exec(db_, "DELETE FROM camera_pipeline_bindings");
@@ -508,6 +598,58 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindDouble(6, extrinsics.camera_to_robot.rotation_rpy_rad.x);
         insert.bindDouble(7, extrinsics.camera_to_robot.rotation_rpy_rad.y);
         insert.bindDouble(8, extrinsics.camera_to_robot.rotation_rpy_rad.z);
+        insert.stepDone();
+    }
+
+    for (const auto& calibration : config.camera_imu_calibrations) {
+        Statement insert(
+            db_,
+            "INSERT INTO camera_imu_calibrations "
+            "(camera_id, version, active, source_file_path, created_at, "
+            "cam_imu_tx_m, cam_imu_ty_m, cam_imu_tz_m, "
+            "cam_imu_roll_rad, cam_imu_pitch_rad, cam_imu_yaw_rad, "
+            "imu_cam_tx_m, imu_cam_ty_m, imu_cam_tz_m, "
+            "imu_cam_roll_rad, imu_cam_pitch_rad, imu_cam_yaw_rad, time_shift_s) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, calibration.camera_id);
+        insert.bindText(2, calibration.version);
+        insert.bindInt(3, calibration.active ? 1 : 0);
+        insert.bindText(4, calibration.source_file_path);
+        insert.bindText(5, calibration.created_at);
+        insert.bindDouble(6, calibration.camera_to_imu.translation_m.x);
+        insert.bindDouble(7, calibration.camera_to_imu.translation_m.y);
+        insert.bindDouble(8, calibration.camera_to_imu.translation_m.z);
+        insert.bindDouble(9, calibration.camera_to_imu.rotation_rpy_rad.x);
+        insert.bindDouble(10, calibration.camera_to_imu.rotation_rpy_rad.y);
+        insert.bindDouble(11, calibration.camera_to_imu.rotation_rpy_rad.z);
+        insert.bindDouble(12, calibration.imu_to_camera.translation_m.x);
+        insert.bindDouble(13, calibration.imu_to_camera.translation_m.y);
+        insert.bindDouble(14, calibration.imu_to_camera.translation_m.z);
+        insert.bindDouble(15, calibration.imu_to_camera.rotation_rpy_rad.x);
+        insert.bindDouble(16, calibration.imu_to_camera.rotation_rpy_rad.y);
+        insert.bindDouble(17, calibration.imu_to_camera.rotation_rpy_rad.z);
+        insert.bindDouble(18, calibration.time_shift_s);
+        insert.stepDone();
+    }
+
+    for (const auto& dataset : config.kalibr_datasets) {
+        Statement insert(
+            db_,
+            "INSERT INTO kalibr_datasets (id, path, created_at, duration_s, camera_ids_json) "
+            "VALUES (?, ?, ?, ?, ?)");
+        insert.bindText(1, dataset.id);
+        insert.bindText(2, dataset.path);
+        insert.bindText(3, dataset.created_at);
+        insert.bindDouble(4, dataset.duration_s);
+        insert.bindText(5, stringArrayToJson(dataset.camera_ids));
+        insert.stepDone();
+    }
+
+    {
+        Statement insert(
+            db_,
+            "INSERT INTO calibration_tool_config (id, docker_image) VALUES (1, ?)");
+        insert.bindText(1, config.calibration_tools.docker_image);
         insert.stepDone();
     }
 

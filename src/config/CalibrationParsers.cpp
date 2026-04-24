@@ -165,6 +165,42 @@ Pose3d parseWpilibPose(const nlohmann::json& pose) {
     return out;
 }
 
+Pose3d poseFromKalibrMatrix(const YAML::Node& matrix, const char* field_name) {
+    if (!matrix || !matrix.IsSequence() || matrix.size() != 4u) {
+        throw std::invalid_argument(std::string("Kalibr result missing matrix ") + field_name);
+    }
+    double m[4][4]{};
+    for (std::size_t row = 0; row < 4u; ++row) {
+        const auto yaml_row = matrix[row];
+        if (!yaml_row || !yaml_row.IsSequence() || yaml_row.size() != 4u) {
+            throw std::invalid_argument(std::string("Kalibr matrix has invalid row: ") +
+                                        field_name);
+        }
+        for (std::size_t col = 0; col < 4u; ++col) {
+            m[row][col] = yaml_row[col].as<double>();
+        }
+    }
+
+    Pose3d out;
+    out.translation_m = {m[0][3], m[1][3], m[2][3]};
+    const double sy = std::sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0]);
+    const bool singular = sy < 1e-9;
+    if (!singular) {
+        out.rotation_rpy_rad = {
+            std::atan2(m[2][1], m[2][2]),
+            std::atan2(-m[2][0], sy),
+            std::atan2(m[1][0], m[0][0]),
+        };
+    } else {
+        out.rotation_rpy_rad = {
+            std::atan2(-m[1][2], m[1][1]),
+            std::atan2(-m[2][0], sy),
+            0.0,
+        };
+    }
+    return out;
+}
+
 }  // namespace
 
 runtime::CameraCalibrationConfig parseKalibrCameraCalibration(
@@ -232,6 +268,33 @@ runtime::FieldLayoutConfig parseWpilibFieldLayout(
         }
         out.tags.push_back({tag_id, parseWpilibPose(jsonObject(tag, "pose"))});
     }
+    return out;
+}
+
+runtime::CameraImuCalibrationConfig parseKalibrCameraImuCalibration(
+    const std::filesystem::path& path,
+    const std::string& camera_id,
+    const std::string& version,
+    bool active,
+    const std::string& created_at,
+    const std::optional<std::string>& topic) {
+    const YAML::Node camera = chooseKalibrCameraNode(YAML::LoadFile(path.string()), topic);
+    const auto t_cam_imu = camera["T_cam_imu"];
+    if (!t_cam_imu) {
+        throw std::invalid_argument("Kalibr camera-IMU result missing T_cam_imu");
+    }
+
+    runtime::CameraImuCalibrationConfig out;
+    out.camera_id = camera_id;
+    out.version = version;
+    out.active = active;
+    out.source_file_path = path.string();
+    out.created_at = created_at;
+    out.camera_to_imu = poseFromKalibrMatrix(t_cam_imu, "T_cam_imu");
+    const auto t_imu_cam = camera["T_imu_cam"];
+    out.imu_to_camera = t_imu_cam ? poseFromKalibrMatrix(t_imu_cam, "T_imu_cam") : Pose3d{};
+    const auto timeshift = camera["timeshift_cam_imu"];
+    out.time_shift_s = timeshift ? timeshift.as<double>() : 0.0;
     return out;
 }
 

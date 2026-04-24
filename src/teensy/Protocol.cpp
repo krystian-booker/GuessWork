@@ -271,6 +271,30 @@ std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     return payload;
 }
 
+std::vector<std::uint8_t> encodeCameraTriggerEventPayload(
+    const CameraTriggerEventPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(20);
+    appendU64(out, payload.teensy_time_us);
+    appendU32(out, static_cast<std::uint32_t>(payload.pin));
+    appendU32(out, payload.trigger_sequence);
+    appendU32(out, payload.status_flags);
+    return out;
+}
+
+std::optional<CameraTriggerEventPayload> decodeCameraTriggerEventPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 20u) {
+        return std::nullopt;
+    }
+    CameraTriggerEventPayload payload;
+    payload.teensy_time_us = readU64(bytes, 0);
+    payload.pin = static_cast<std::int32_t>(readU32(bytes, 8));
+    payload.trigger_sequence = readU32(bytes, 12);
+    payload.status_flags = readU32(bytes, 16);
+    return payload;
+}
+
 std::vector<std::uint8_t> encodeTimeSyncRequestPayload(
     const TimeSyncRequestPayload& payload) {
     std::vector<std::uint8_t> out;

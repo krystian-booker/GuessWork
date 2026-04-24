@@ -31,6 +31,10 @@ bool MeasurementBus::publish(RobotOdometrySample sample) {
     return push(std::move(sample));
 }
 
+bool MeasurementBus::publish(CameraTriggerEvent event) {
+    return push(std::move(event));
+}
+
 bool MeasurementBus::push(Measurement measurement) {
     {
         std::lock_guard<std::mutex> g(mu_);

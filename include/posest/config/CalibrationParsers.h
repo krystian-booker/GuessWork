@@ -22,6 +22,14 @@ runtime::FieldLayoutConfig parseWpilibFieldLayout(
     std::string id,
     std::string name);
 
+runtime::CameraImuCalibrationConfig parseKalibrCameraImuCalibration(
+    const std::filesystem::path& path,
+    const std::string& camera_id,
+    const std::string& version,
+    bool active,
+    const std::string& created_at,
+    const std::optional<std::string>& topic = std::nullopt);
+
 Pose3d parsePoseCsv(const std::string& value);
 
 }  // namespace posest::config

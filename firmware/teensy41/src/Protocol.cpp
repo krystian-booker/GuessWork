@@ -193,6 +193,23 @@ bool encodeTeensyHealthPayload(
     return true;
 }
 
+bool encodeCameraTriggerEventPayload(
+    const CameraTriggerEventPayload& payload,
+    std::uint8_t* out,
+    std::size_t capacity,
+    std::uint16_t& out_size) {
+    if (!out || !ensure(capacity, 20u)) {
+        return false;
+    }
+    std::size_t offset = 0;
+    appendU64(out, offset, payload.teensy_time_us);
+    appendU32(out, offset, static_cast<std::uint32_t>(payload.pin));
+    appendU32(out, offset, payload.trigger_sequence);
+    appendU32(out, offset, payload.status_flags);
+    out_size = static_cast<std::uint16_t>(offset);
+    return true;
+}
+
 bool encodeTimeSyncResponsePayload(
     const TimeSyncResponsePayload& payload,
     std::uint8_t* out,

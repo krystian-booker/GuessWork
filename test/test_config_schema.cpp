@@ -127,6 +127,24 @@ posest::runtime::RuntimeConfig makeValidConfig() {
         "v1",
         {{0.2, 0.0, 0.5}, {0.0, 0.1, 0.2}},
     });
+    config.camera_imu_calibrations.push_back({
+        "cam0",
+        "imu-v1",
+        true,
+        "calib/camchain-imucam.yaml",
+        "2026-04-24T00:01:00Z",
+        {{0.01, 0.02, 0.03}, {0.1, 0.2, 0.3}},
+        {{-0.01, -0.02, -0.03}, {-0.1, -0.2, -0.3}},
+        0.004,
+    });
+    config.kalibr_datasets.push_back({
+        "/tmp/dataset",
+        "/tmp/dataset",
+        "2026-04-24T00:02:00Z",
+        15.0,
+        {"cam0"},
+    });
+    config.calibration_tools.docker_image = "kalibr:test";
     posest::runtime::FieldLayoutConfig field;
     field.id = "reefscape";
     field.name = "Reefscape";
@@ -227,6 +245,9 @@ TEST(SqliteConfigStore, EmptyDatabaseLoadsDefaultRuntimeConfig) {
     EXPECT_TRUE(config.bindings.empty());
     EXPECT_TRUE(config.calibrations.empty());
     EXPECT_TRUE(config.camera_extrinsics.empty());
+    EXPECT_TRUE(config.camera_imu_calibrations.empty());
+    EXPECT_TRUE(config.kalibr_datasets.empty());
+    EXPECT_EQ(config.calibration_tools.docker_image, "kalibr:latest");
     EXPECT_TRUE(config.field_layouts.empty());
     EXPECT_TRUE(config.active_field_layout_id.empty());
     EXPECT_DOUBLE_EQ(config.teensy.pose_publish_hz, 50.0);
@@ -273,6 +294,13 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
     ASSERT_EQ(loaded.camera_extrinsics.size(), 1u);
     EXPECT_EQ(loaded.camera_extrinsics[0].camera_id, "cam0");
     EXPECT_DOUBLE_EQ(loaded.camera_extrinsics[0].camera_to_robot.translation_m.x, 0.2);
+    ASSERT_EQ(loaded.camera_imu_calibrations.size(), 1u);
+    EXPECT_TRUE(loaded.camera_imu_calibrations[0].active);
+    EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].camera_to_imu.translation_m.y, 0.02);
+    EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].time_shift_s, 0.004);
+    ASSERT_EQ(loaded.kalibr_datasets.size(), 1u);
+    EXPECT_EQ(loaded.kalibr_datasets[0].camera_ids[0], "cam0");
+    EXPECT_EQ(loaded.calibration_tools.docker_image, "kalibr:test");
     ASSERT_EQ(loaded.field_layouts.size(), 1u);
     EXPECT_EQ(loaded.active_field_layout_id, "reefscape");
     ASSERT_EQ(loaded.field_layouts[0].tags.size(), 1u);
@@ -451,6 +479,37 @@ TEST(CalibrationParsers, ParsesWpilibFieldLayoutJson) {
     std::filesystem::remove(path);
 }
 
+TEST(CalibrationParsers, ParsesKalibrCameraImuResultYaml) {
+    const auto path = writeTempFile(
+        "imucam",
+        R"yaml(
+cam0:
+  rostopic: /posest/cam0/image_raw
+  T_cam_imu:
+    - [1.0, 0.0, 0.0, 0.1]
+    - [0.0, 1.0, 0.0, 0.2]
+    - [0.0, 0.0, 1.0, 0.3]
+    - [0.0, 0.0, 0.0, 1.0]
+  timeshift_cam_imu: 0.004
+)yaml");
+
+    const auto calibration = posest::config::parseKalibrCameraImuCalibration(
+        path,
+        "cam0",
+        "imu-v1",
+        true,
+        "2026-04-24T00:00:00Z",
+        "/posest/cam0/image_raw");
+
+    EXPECT_EQ(calibration.camera_id, "cam0");
+    EXPECT_EQ(calibration.version, "imu-v1");
+    EXPECT_TRUE(calibration.active);
+    EXPECT_DOUBLE_EQ(calibration.camera_to_imu.translation_m.x, 0.1);
+    EXPECT_DOUBLE_EQ(calibration.time_shift_s, 0.004);
+
+    std::filesystem::remove(path);
+}
+
 TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     auto config = makeValidConfig();
 
@@ -513,6 +572,16 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     auto bad_active_layout = config;
     bad_active_layout.active_field_layout_id = "missing";
     expect_invalid(bad_active_layout);
+
+    auto duplicate_active_camera_imu = config;
+    auto second_camera_imu = duplicate_active_camera_imu.camera_imu_calibrations[0];
+    second_camera_imu.version = "imu-v2";
+    duplicate_active_camera_imu.camera_imu_calibrations.push_back(second_camera_imu);
+    expect_invalid(duplicate_active_camera_imu);
+
+    auto bad_dataset_camera = config;
+    bad_dataset_camera.kalibr_datasets[0].camera_ids.push_back("missing");
+    expect_invalid(bad_dataset_camera);
 
     auto duplicate_tag = config;
     duplicate_tag.field_layouts[0].tags.push_back(duplicate_tag.field_layouts[0].tags[0]);

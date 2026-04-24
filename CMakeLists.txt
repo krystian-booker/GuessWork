@@ -56,6 +56,17 @@ add_library(posest_runtime
 )
 target_link_libraries(posest_runtime PUBLIC posest_core posest_camera posest_config)
 
+# --- posest_calibration: dataset recording and Kalibr Docker command helpers
+add_library(posest_calibration
+    src/calibration/CalibrationRecorder.cpp
+)
+target_link_libraries(posest_calibration PUBLIC
+    posest_core
+    posest_camera
+    posest_runtime
+    nlohmann_json::nlohmann_json
+)
+
 # --- posest_fusion: measurement ingestion + fusion output boundary
 add_library(posest_fusion
     src/fusion/FusionService.cpp
@@ -100,6 +111,7 @@ add_library(posest_daemon_lib
 target_link_libraries(posest_daemon_lib PUBLIC
     posest_config
     posest_runtime
+    posest_calibration
     posest_fusion
     posest_teensy
     posest_pipelines
@@ -132,6 +144,7 @@ add_executable(posest_tests
     test/test_pipelines.cpp
     test/test_teensy_protocol.cpp
     test/test_teensy_service.cpp
+    test/test_calibration_recorder.cpp
     test/test_config_schema.cpp
     test/test_fusion_service.cpp
     test/test_daemon.cpp
@@ -141,6 +154,7 @@ target_link_libraries(posest_tests PRIVATE
     posest_camera
     posest_config
     posest_runtime
+    posest_calibration
     posest_fusion
     posest_teensy
     posest_pipelines

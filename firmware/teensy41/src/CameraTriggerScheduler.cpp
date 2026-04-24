@@ -88,6 +88,7 @@ void CameraTriggerScheduler::update(std::uint32_t now_us) {
             digitalWrite(channel.pin, HIGH);
             channel.high = true;
             channel.fall_us = channel.next_rise_us + channel.pulse_width_us;
+            pushEvent(channel, channel.next_rise_us);
             if (due(now_us, channel.fall_us)) {
                 status_flags_ |= kTriggerOverrun;
                 digitalWrite(channel.pin, LOW);
@@ -96,6 +97,16 @@ void CameraTriggerScheduler::update(std::uint32_t now_us) {
             }
         }
     }
+}
+
+bool CameraTriggerScheduler::popEvent(CameraTriggerEventPayload& event) {
+    if (event_count_ == 0u) {
+        return false;
+    }
+    event = events_[event_head_].event;
+    event_head_ = (event_head_ + 1u) % 16u;
+    --event_count_;
+    return true;
 }
 
 void CameraTriggerScheduler::disableAll() {
@@ -107,6 +118,26 @@ void CameraTriggerScheduler::disableAll() {
     }
     for (std::uint8_t pin : kCameraSyncPins) {
         digitalWrite(pin, LOW);
+    }
+}
+
+void CameraTriggerScheduler::pushEvent(const Channel& channel, std::uint32_t now_us) {
+    if (event_count_ == 16u) {
+        status_flags_ |= kTriggerOverrun;
+        event_head_ = (event_head_ + 1u) % 16u;
+        --event_count_;
+    }
+    const std::size_t tail = (event_head_ + event_count_) % 16u;
+    events_[tail].event.teensy_time_us = now_us;
+    events_[tail].event.pin = channel.pin;
+    events_[tail].event.trigger_sequence = channel.trigger_sequence;
+    events_[tail].event.status_flags = status_flags_;
+    ++event_count_;
+    for (Channel& mutable_channel : channels_) {
+        if (&mutable_channel == &channel) {
+            ++mutable_channel.trigger_sequence;
+            break;
+        }
     }
 }
 

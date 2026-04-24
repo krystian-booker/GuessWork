@@ -86,7 +86,9 @@ TEST(DaemonOptions, ParsesCalibrationAndFieldImportCommands) {
         "--docker-image",
         "kalibr:test",
     };
-    const auto calibrate = posest::runtime::parseDaemonOptions(20, calibrate_args);
+    const auto calibrate = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(calibrate_args) / sizeof(calibrate_args[0])),
+        calibrate_args);
     EXPECT_EQ(calibrate.command, posest::runtime::DaemonCommand::CalibrateCamera);
     EXPECT_EQ(calibrate.calibrate_camera.camera_id, "cam0");
     EXPECT_TRUE(calibrate.calibrate_camera.has_camera_to_robot);
@@ -105,10 +107,54 @@ TEST(DaemonOptions, ParsesCalibrationAndFieldImportCommands) {
         "/tmp/field.json",
         "--activate",
     };
-    const auto field = posest::runtime::parseDaemonOptions(11, field_args);
+    const auto field = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(field_args) / sizeof(field_args[0])),
+        field_args);
     EXPECT_EQ(field.command, posest::runtime::DaemonCommand::ImportFieldLayout);
     EXPECT_EQ(field.import_field_layout.field_id, "reefscape");
     EXPECT_TRUE(field.import_field_layout.activate);
+
+    const char* record_args[] = {
+        "posest_daemon",
+        "record-kalibr-dataset",
+        "--config",
+        "/tmp/robot.db",
+        "--camera-id",
+        "cam0",
+        "--camera-id",
+        "cam1",
+        "--duration-s",
+        "12.5",
+        "--output-dir",
+        "/tmp/dataset",
+    };
+    const auto record = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(record_args) / sizeof(record_args[0])),
+        record_args);
+    EXPECT_EQ(record.command, posest::runtime::DaemonCommand::RecordKalibrDataset);
+    ASSERT_EQ(record.record_kalibr_dataset.camera_ids.size(), 2u);
+    EXPECT_EQ(record.record_kalibr_dataset.camera_ids[1], "cam1");
+    EXPECT_DOUBLE_EQ(record.record_kalibr_dataset.duration_s, 12.5);
+
+    const char* imu_args[] = {
+        "posest_daemon",
+        "calibrate-camera-imu",
+        "--config",
+        "/tmp/robot.db",
+        "--dataset",
+        "/tmp/dataset",
+        "--target",
+        "/tmp/target.yaml",
+        "--imu",
+        "/tmp/imu.yaml",
+        "--version",
+        "imu-v1",
+    };
+    const auto imu = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(imu_args) / sizeof(imu_args[0])),
+        imu_args);
+    EXPECT_EQ(imu.command, posest::runtime::DaemonCommand::CalibrateCameraImu);
+    EXPECT_EQ(imu.calibrate_camera_imu.version, "imu-v1");
 }
 
 TEST(DaemonOptions, BuildsKalibrDockerCommandWithExpectedMounts) {
@@ -126,6 +172,30 @@ TEST(DaemonOptions, BuildsKalibrDockerCommandWithExpectedMounts) {
     EXPECT_NE(command.find("--bag '/data/cam.bag'"), std::string::npos);
     EXPECT_NE(command.find("--target '/target/target.yaml'"), std::string::npos);
     EXPECT_NE(command.find("--topics '/cam/image_raw'"), std::string::npos);
+}
+
+TEST(DaemonOptions, BuildsKalibrBagAndCameraImuDockerCommands) {
+    posest::runtime::MakeKalibrBagOptions bag;
+    bag.dataset_dir = "/home/team/dataset";
+    bag.bag_path = "/home/team/out/kalibr.bag";
+    const auto bag_command =
+        posest::runtime::buildMakeKalibrBagDockerCommand(bag, "kalibr:test");
+    EXPECT_NE(bag_command.find("make_rosbag.py"), std::string::npos);
+    EXPECT_NE(bag_command.find("-v '/home/team/dataset':/dataset:ro"), std::string::npos);
+    EXPECT_NE(bag_command.find("--bag /out/kalibr.bag"), std::string::npos);
+
+    posest::runtime::CalibrateCameraImuOptions imu;
+    imu.dataset_dir = "/home/team/dataset";
+    imu.target_path = "/home/team/calib/target.yaml";
+    imu.imu_path = "/home/team/calib/imu.yaml";
+    const auto imu_command = posest::runtime::buildCalibrateCameraImuDockerCommand(
+        imu,
+        "/home/team/dataset/kalibr.bag",
+        "/home/team/dataset/input-camchain.yaml",
+        "kalibr:test");
+    EXPECT_NE(imu_command.find("kalibr_calibrate_imu_camera"), std::string::npos);
+    EXPECT_NE(imu_command.find("--bag /dataset/kalibr.bag"), std::string::npos);
+    EXPECT_NE(imu_command.find("--imu /imu/imu.yaml"), std::string::npos);
 }
 
 TEST(DaemonHealth, HealthOnceJsonContainsExpectedFieldsForEmptyDb) {

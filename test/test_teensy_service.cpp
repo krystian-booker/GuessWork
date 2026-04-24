@@ -183,6 +183,42 @@ TEST(TeensyService, PublishesInboundRobotOdometrySamples) {
     service.stop();
 }
 
+TEST(TeensyService, PublishesInboundCameraTriggerEvents) {
+    posest::MeasurementBus bus(4);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); });
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, std::chrono::milliseconds(500)));
+
+    posest::teensy::CameraTriggerEventPayload payload;
+    payload.teensy_time_us = 100;
+    payload.pin = 6;
+    payload.trigger_sequence = 3;
+    payload.status_flags = 0xA;
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::CameraTriggerEvent,
+        1,
+        posest::teensy::encodeCameraTriggerEventPayload(payload));
+
+    auto measurement = bus.take();
+    service.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    ASSERT_TRUE(std::holds_alternative<posest::CameraTriggerEvent>(*measurement));
+    const auto& event = std::get<posest::CameraTriggerEvent>(*measurement);
+    EXPECT_EQ(event.teensy_time_us, 100u);
+    EXPECT_EQ(event.pin, 6);
+    EXPECT_EQ(event.trigger_sequence, 3u);
+    EXPECT_NE(event.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
+}
+
 TEST(TeensyService, TracksCrcFailuresSequenceGapsAndInvalidPayloads) {
     posest::MeasurementBus bus(8);
     posest::teensy::FakeSerialTransport fake;

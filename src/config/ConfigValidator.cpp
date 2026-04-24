@@ -135,6 +135,54 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
         }
     }
 
+    std::unordered_set<std::string> active_camera_imu_cameras;
+    std::unordered_set<std::string> camera_imu_calibrations;
+    for (const auto& calibration : config.camera_imu_calibrations) {
+        require(!calibration.camera_id.empty(), "camera-IMU calibration has empty camera id");
+        require(cameras_enabled.find(calibration.camera_id) != cameras_enabled.end(),
+                "camera-IMU calibration references unknown camera: " + calibration.camera_id);
+        require(!calibration.version.empty(),
+                "camera-IMU calibration for camera '" + calibration.camera_id +
+                    "' has empty version");
+        require(!calibration.source_file_path.empty(),
+                "camera-IMU calibration for camera '" + calibration.camera_id +
+                    "' has empty source file path");
+        require(camera_imu_calibrations
+                    .insert(calibration.camera_id + "\n" + calibration.version)
+                    .second,
+                "duplicate camera-IMU calibration for camera/version: " +
+                    calibration.camera_id + "/" + calibration.version);
+        require(isFinitePose(calibration.camera_to_imu) &&
+                    isFinitePose(calibration.imu_to_camera) &&
+                    isFinite(calibration.time_shift_s),
+                "camera-IMU calibration for camera '" + calibration.camera_id +
+                    "' has non-finite value");
+        if (calibration.active) {
+            require(active_camera_imu_cameras.insert(calibration.camera_id).second,
+                    "multiple active camera-IMU calibrations for camera: " +
+                        calibration.camera_id);
+        }
+    }
+
+    std::unordered_set<std::string> dataset_ids;
+    for (const auto& dataset : config.kalibr_datasets) {
+        require(!dataset.id.empty(), "Kalibr dataset id is empty");
+        require(dataset_ids.insert(dataset.id).second,
+                "duplicate Kalibr dataset id: " + dataset.id);
+        require(!dataset.path.empty(), "Kalibr dataset '" + dataset.id + "' has empty path");
+        require(dataset.duration_s >= 0.0 && isFinite(dataset.duration_s),
+                "Kalibr dataset '" + dataset.id + "' has invalid duration");
+        std::unordered_set<std::string> dataset_cameras;
+        for (const auto& camera_id : dataset.camera_ids) {
+            require(cameras_enabled.find(camera_id) != cameras_enabled.end(),
+                    "Kalibr dataset references unknown camera: " + camera_id);
+            require(dataset_cameras.insert(camera_id).second,
+                    "Kalibr dataset has duplicate camera id: " + camera_id);
+        }
+    }
+    require(!config.calibration_tools.docker_image.empty(),
+            "Kalibr Docker image default is empty");
+
     std::unordered_set<std::string> extrinsics;
     for (const auto& entry : config.camera_extrinsics) {
         require(!entry.camera_id.empty(), "camera extrinsics has empty camera id");

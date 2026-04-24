@@ -78,6 +78,14 @@ struct RobotOdometrySample {
     std::uint32_t status_flags{0};
 };
 
+struct CameraTriggerEvent {
+    Timestamp timestamp{};
+    std::uint64_t teensy_time_us{0};
+    std::int32_t pin{-1};
+    std::uint32_t trigger_sequence{0};
+    std::uint32_t status_flags{0};
+};
+
 struct FusedPoseEstimate {
     Timestamp timestamp{};
     Pose2d field_to_robot;

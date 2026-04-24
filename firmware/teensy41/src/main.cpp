@@ -110,6 +110,19 @@ void sendImuSample(const ImuPayload& sample) {
     writeFrame(MessageType::ImuSample, g_payload_buffer, payload_size);
 }
 
+void sendCameraTriggerEvent(const CameraTriggerEventPayload& event) {
+    std::uint16_t payload_size = 0;
+    if (!encodeCameraTriggerEventPayload(
+            event,
+            g_payload_buffer,
+            sizeof(g_payload_buffer),
+            payload_size)) {
+        g_error_flags |= kErrorInvalidPayload;
+        return;
+    }
+    writeFrame(MessageType::CameraTriggerEvent, g_payload_buffer, payload_size);
+}
+
 void applyCameraTriggerConfig(const Frame& frame) {
     CameraTriggerCommand commands[kMaxCameraSyncOutputs]{};
     std::size_t count = 0;
@@ -208,6 +221,10 @@ void loop() {
     const std::uint32_t now32 = micros();
     const std::uint64_t now64 = micros64();
     g_triggers.update(now32);
+    CameraTriggerEventPayload trigger_event;
+    while (g_triggers.popEvent(trigger_event)) {
+        sendCameraTriggerEvent(trigger_event);
+    }
     updateLed(now32);
     g_imu.checkForMissedDataReady(now64);
 

@@ -74,6 +74,10 @@ void FusionService::runLoop() {
 }
 
 void FusionService::process(const Measurement& measurement) {
+    if (std::holds_alternative<CameraTriggerEvent>(measurement)) {
+        return;
+    }
+
     const Timestamp measurement_time = timestampOf(measurement);
     if (!acceptTimestamp(measurement_time)) {
         return;

@@ -23,6 +23,7 @@ enum class MessageType : std::uint8_t {
     TeensyHealth = 4,
     TimeSyncResponse = 5,
     RobotOdometry = 6,
+    CameraTriggerEvent = 7,
     FusedPose = 64,
     CanTx = 65,
     TimeSyncRequest = 66,
@@ -69,6 +70,13 @@ struct TeensyHealthPayload {
     std::uint32_t tx_queue_depth{0};
 };
 
+struct CameraTriggerEventPayload {
+    std::uint64_t teensy_time_us{0};
+    std::int32_t pin{-1};
+    std::uint32_t trigger_sequence{0};
+    std::uint32_t status_flags{0};
+};
+
 struct TimeSyncRequestPayload {
     std::uint32_t request_sequence{0};
     std::uint64_t host_send_time_us{0};
@@ -109,6 +117,11 @@ std::optional<RobotOdometryPayload> decodeRobotOdometryPayload(
 
 std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload);
 std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeCameraTriggerEventPayload(
+    const CameraTriggerEventPayload& payload);
+std::optional<CameraTriggerEventPayload> decodeCameraTriggerEventPayload(
     const std::vector<std::uint8_t>& bytes);
 
 std::vector<std::uint8_t> encodeTimeSyncRequestPayload(

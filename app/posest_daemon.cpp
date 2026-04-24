@@ -29,7 +29,7 @@ int main(int argc, const char* const argv[]) {
         auto config_store =
             std::make_unique<posest::config::SqliteConfigStore>(options.config_path);
         if (options.command != posest::runtime::DaemonCommand::Run) {
-            posest::runtime::runConfigCommand(options, *config_store);
+            posest::runtime::runConfigCommand(options, *config_store, camera_factory);
             return 0;
         }
 

@@ -327,6 +327,37 @@ void TeensyService::handleFrame(const Frame& frame) {
             }
             break;
         }
+        case MessageType::CameraTriggerEvent: {
+            const auto decoded = decodeCameraTriggerEventPayload(frame.payload);
+            if (!decoded) {
+                std::lock_guard<std::mutex> g(mu_);
+                ++stats_.invalid_payloads;
+                return;
+            }
+
+            CameraTriggerEvent event;
+            event.timestamp = timestampFromTeensyTime(decoded->teensy_time_us, now);
+            event.teensy_time_us = decoded->teensy_time_us;
+            event.pin = decoded->pin;
+            event.trigger_sequence = decoded->trigger_sequence;
+            event.status_flags = decoded->status_flags;
+            bool time_sync_established = false;
+            {
+                std::lock_guard<std::mutex> g(mu_);
+                time_sync_established = stats_.time_sync_established;
+            }
+            if (!time_sync_established) {
+                event.status_flags |= kStatusUnsynchronizedTime;
+            }
+            const bool published = measurement_sink_.publish(event);
+            std::lock_guard<std::mutex> g(mu_);
+            if (published) {
+                ++stats_.inbound_camera_trigger_events;
+            } else {
+                ++stats_.inbound_measurements_dropped;
+            }
+            break;
+        }
         case MessageType::TimeSyncResponse: {
             const auto decoded = decodeTimeSyncResponsePayload(frame.payload);
             if (!decoded) {
