@@ -53,6 +53,28 @@ TEST(FusionService, ProcessesOrderedMeasurementsAndPublishesEstimate) {
     ASSERT_EQ(sink->estimates.size(), 1u);
 }
 
+TEST(FusionService, UsesRobotOdometryPoseInPlaceholderEstimate) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    posest::RobotOdometrySample odom;
+    odom.timestamp = std::chrono::steady_clock::now();
+    odom.field_to_robot = {2.0, 3.0, 1.0};
+    odom.status_flags = 0x12;
+    ASSERT_TRUE(bus.publish(odom));
+
+    std::this_thread::sleep_for(20ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_DOUBLE_EQ(latest->field_to_robot.x_m, 2.0);
+    EXPECT_DOUBLE_EQ(latest->field_to_robot.y_m, 3.0);
+    EXPECT_DOUBLE_EQ(latest->field_to_robot.theta_rad, 1.0);
+    EXPECT_EQ(latest->status_flags, 0x12u);
+}
+
 TEST(FusionService, RejectsStaleMeasurements) {
     posest::MeasurementBus bus(8);
     posest::fusion::FusionService fusion(bus);

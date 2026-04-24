@@ -15,17 +15,23 @@ TEST(MeasurementBus, PreservesFifoOrderAcrossMeasurementTypes) {
     imu.timestamp = t0;
     posest::WheelOdometrySample odom;
     odom.timestamp = t0 + 1ms;
+    posest::RobotOdometrySample robot_odom;
+    robot_odom.timestamp = t0 + 2ms;
 
     EXPECT_TRUE(bus.publish(imu));
     EXPECT_TRUE(bus.publish(odom));
+    EXPECT_TRUE(bus.publish(robot_odom));
 
     auto first = bus.take();
     auto second = bus.take();
+    auto third = bus.take();
 
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(third.has_value());
     EXPECT_TRUE(std::holds_alternative<posest::ImuSample>(*first));
     EXPECT_TRUE(std::holds_alternative<posest::WheelOdometrySample>(*second));
+    EXPECT_TRUE(std::holds_alternative<posest::RobotOdometrySample>(*third));
 }
 
 TEST(MeasurementBus, DropsNewestWhenBoundedQueueIsFull) {

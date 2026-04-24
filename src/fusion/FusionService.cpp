@@ -89,6 +89,9 @@ void FusionService::process(const Measurement& measurement) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, WheelOdometrySample>) {
                 estimate.field_to_robot = value.chassis_delta;
+            } else if constexpr (std::is_same_v<T, RobotOdometrySample>) {
+                estimate.field_to_robot = value.field_to_robot;
+                estimate.status_flags = value.status_flags;
             } else if constexpr (std::is_same_v<T, AprilTagObservation>) {
                 estimate.status_flags = value.detections.empty() ? 1u : 0u;
             } else if constexpr (std::is_same_v<T, VioMeasurement>) {

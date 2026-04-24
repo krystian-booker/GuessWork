@@ -13,6 +13,8 @@ namespace posest::teensy {
 constexpr std::uint16_t kFrameMagic = 0x4757;  // "GW"
 constexpr std::uint8_t kProtocolVersion = 1;
 constexpr std::uint32_t kStatusUnsynchronizedTime = 1u << 0u;
+constexpr std::uint32_t kStatusUnsynchronizedRioTime = 1u << 1u;
+constexpr std::uint32_t kStatusRobotSlipping = 1u << 2u;
 
 enum class MessageType : std::uint8_t {
     ImuSample = 1,
@@ -20,6 +22,7 @@ enum class MessageType : std::uint8_t {
     CanRx = 3,
     TeensyHealth = 4,
     TimeSyncResponse = 5,
+    RobotOdometry = 6,
     FusedPose = 64,
     CanTx = 65,
     TimeSyncRequest = 66,
@@ -48,6 +51,13 @@ struct WheelOdometryPayload {
     std::uint64_t teensy_time_us{0};
     Pose2d chassis_delta;
     std::array<double, 4> wheel_delta_m{};
+    std::uint32_t status_flags{0};
+};
+
+struct RobotOdometryPayload {
+    std::uint64_t teensy_time_us{0};
+    std::uint64_t rio_time_us{0};
+    Pose2d field_to_robot;
     std::uint32_t status_flags{0};
 };
 
@@ -90,6 +100,11 @@ std::optional<ImuPayload> decodeImuPayload(const std::vector<std::uint8_t>& byte
 
 std::vector<std::uint8_t> encodeWheelOdometryPayload(const WheelOdometryPayload& payload);
 std::optional<WheelOdometryPayload> decodeWheelOdometryPayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeRobotOdometryPayload(
+    const RobotOdometryPayload& payload);
+std::optional<RobotOdometryPayload> decodeRobotOdometryPayload(
     const std::vector<std::uint8_t>& bytes);
 
 std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload);

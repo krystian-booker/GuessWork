@@ -71,6 +71,13 @@ struct WheelOdometrySample {
     std::uint32_t status_flags{0};
 };
 
+struct RobotOdometrySample {
+    Timestamp timestamp{};
+    Pose2d field_to_robot;
+    std::uint64_t rio_time_us{0};
+    std::uint32_t status_flags{0};
+};
+
 struct FusedPoseEstimate {
     Timestamp timestamp{};
     Pose2d field_to_robot;

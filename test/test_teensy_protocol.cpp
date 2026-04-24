@@ -92,9 +92,31 @@ TEST(TeensyProtocol, WheelOdometryPayloadRoundTrips) {
     EXPECT_EQ(decoded->status_flags, 7u);
 }
 
+TEST(TeensyProtocol, RobotOdometryPayloadRoundTrips) {
+    posest::teensy::RobotOdometryPayload payload;
+    payload.teensy_time_us = 1234;
+    payload.rio_time_us = 5678;
+    payload.field_to_robot = {1.0, 2.0, 3.0};
+    payload.status_flags = posest::teensy::kStatusRobotSlipping |
+                           posest::teensy::kStatusUnsynchronizedRioTime;
+
+    const auto decoded = posest::teensy::decodeRobotOdometryPayload(
+        posest::teensy::encodeRobotOdometryPayload(payload));
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->teensy_time_us, 1234u);
+    EXPECT_EQ(decoded->rio_time_us, 5678u);
+    EXPECT_DOUBLE_EQ(decoded->field_to_robot.x_m, 1.0);
+    EXPECT_DOUBLE_EQ(decoded->field_to_robot.y_m, 2.0);
+    EXPECT_DOUBLE_EQ(decoded->field_to_robot.theta_rad, 3.0);
+    EXPECT_NE(decoded->status_flags & posest::teensy::kStatusRobotSlipping, 0u);
+    EXPECT_NE(decoded->status_flags & posest::teensy::kStatusUnsynchronizedRioTime, 0u);
+}
+
 TEST(TeensyProtocol, RejectsBadPayloadSizes) {
     EXPECT_FALSE(posest::teensy::decodeImuPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeWheelOdometryPayload({1, 2, 3}).has_value());
+    EXPECT_FALSE(posest::teensy::decodeRobotOdometryPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeTimeSyncResponsePayload({1, 2, 3}).has_value());
 }
 
