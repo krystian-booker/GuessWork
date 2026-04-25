@@ -37,6 +37,9 @@ struct MockConsumerStats {
 class MockConsumer final : public ConsumerBase {
 public:
     explicit MockConsumer(MockConsumerConfig cfg);
+    // Required by the ConsumerBase contract: stop the worker thread before
+    // this leaf's members go out of scope (~ConsumerBase aborts otherwise).
+    ~MockConsumer() override { stop(); }
 
     MockConsumerStats snapshot() const;
 

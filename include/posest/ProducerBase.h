@@ -36,9 +36,10 @@ public:
     // Safe to call at any time, including while the producer is running.
     // The capture loop refreshes its subscriber snapshot every frame.
     void addConsumer(std::shared_ptr<IFrameConsumer> consumer) override;
-    bool removeConsumer(const std::shared_ptr<IFrameConsumer>& consumer) override;
+    [[nodiscard]] bool removeConsumer(
+        const std::shared_ptr<IFrameConsumer>& consumer) override;
 
-    void start() override;
+    [[nodiscard]] ProducerState start() override;
     void stop() override;
 
     ProducerState state() const override { return state_.load(std::memory_order_acquire); }

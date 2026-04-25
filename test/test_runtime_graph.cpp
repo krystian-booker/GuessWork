@@ -31,9 +31,10 @@ public:
         return true;
     }
 
-    void start() override {
+    posest::ProducerState start() override {
         started = true;
         state_ = posest::ProducerState::Running;
+        return state_;
     }
     void stop() override {
         stopped = true;

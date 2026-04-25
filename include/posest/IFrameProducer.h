@@ -44,9 +44,16 @@ public:
     // Detach a previously-added consumer. Returns true if found and removed.
     // Frames already pushed into the consumer's mailbox are not recalled; the
     // caller still owns the consumer's lifecycle (stop() before destruction).
-    virtual bool removeConsumer(const std::shared_ptr<IFrameConsumer>& consumer) = 0;
+    [[nodiscard]] virtual bool removeConsumer(
+        const std::shared_ptr<IFrameConsumer>& consumer) = 0;
 
-    virtual void start() = 0;
+    // Returns the new state. On success returns Running. If the producer was
+    // already Running, returns Running. If it has reached a terminal state
+    // (EndOfStream / Failed) without an intervening stop(), the call is a
+    // no-op and the terminal state is returned — the caller MUST construct
+    // a new producer rather than attempting to re-arm this one. The
+    // [[nodiscard]] enforces that the outcome is observed.
+    [[nodiscard]] virtual ProducerState start() = 0;
     virtual void stop() = 0;
 
     // Current lifecycle state. Safe to call from any thread.

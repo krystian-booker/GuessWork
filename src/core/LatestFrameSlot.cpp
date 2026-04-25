@@ -11,7 +11,7 @@ void LatestFrameSlot::put(FramePtr frame) {
             return;
         }
         if (pending_) {
-            ++dropped_;
+            dropped_.fetch_add(1, std::memory_order_relaxed);
         }
         pending_ = std::move(frame);
     }
@@ -38,8 +38,7 @@ void LatestFrameSlot::shutdown() {
 }
 
 std::uint64_t LatestFrameSlot::droppedCount() const {
-    std::lock_guard<std::mutex> g(mu_);
-    return dropped_;
+    return dropped_.load(std::memory_order_relaxed);
 }
 
 }  // namespace posest

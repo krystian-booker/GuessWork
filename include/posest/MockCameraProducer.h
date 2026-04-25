@@ -38,6 +38,9 @@ const char* cameraHookName(CameraHook hook) noexcept;
 class MockCameraProducer : public CameraProducer {
 public:
     explicit MockCameraProducer(CameraConfig config);
+    // Required by the ProducerBase contract: stop the capture thread before
+    // this leaf's members go out of scope (~ProducerBase aborts otherwise).
+    ~MockCameraProducer() override { stop(); }
 
     // Test-side knobs. All accessors lock mu_; safe to call from any thread.
 

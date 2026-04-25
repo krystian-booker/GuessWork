@@ -11,6 +11,19 @@ namespace posest {
 ProducerBase::ProducerBase(std::string id) : id_(std::move(id)) {}
 
 ProducerBase::~ProducerBase() {
+    // CRITICAL: by the time we run, every leaf-class member has already been
+    // destroyed. If the worker is still inside captureOne() it is touching
+    // freed subclass memory — terminate loudly rather than corrupt silently.
+    // Leaf subclasses are required to call stop() in their own destructor.
+    if (state_.load(std::memory_order_acquire) == ProducerState::Running) {
+        std::fprintf(stderr,
+                     "%s: ~ProducerBase ran while state==Running — leaf "
+                     "subclass forgot to stop() in its destructor\n",
+                     id_.c_str());
+        std::terminate();
+    }
+    // EndOfStream / Failed mean the worker has already exited; just join
+    // (no-op if the leaf already did so).
     stop();
 }
 
@@ -29,17 +42,20 @@ bool ProducerBase::removeConsumer(const std::shared_ptr<IFrameConsumer>& consume
     return true;
 }
 
-void ProducerBase::start() {
+ProducerState ProducerBase::start() {
     // Only Idle → Running is permitted. EndOfStream/Failed are terminal:
     // once a capture loop has exited on its own, the operator must construct
     // a new producer rather than re-arming this one. Running → Running is a
-    // no-op (idempotent start).
+    // no-op (idempotent start). On any non-Idle current state, the CAS fails
+    // and `expected` is updated to the observed state — return that to the
+    // caller so they can decide what to do.
     ProducerState expected = ProducerState::Idle;
     if (!state_.compare_exchange_strong(
             expected, ProducerState::Running, std::memory_order_acq_rel)) {
-        return;
+        return expected;
     }
     worker_ = std::thread(&ProducerBase::runLoop, this);
+    return ProducerState::Running;
 }
 
 void ProducerBase::stop() {

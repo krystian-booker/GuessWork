@@ -28,7 +28,7 @@ TEST(MockPipeline, FastConsumerSeesMostFrames) {
 
     fast->start();
     const auto t0 = std::chrono::steady_clock::now();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     runFor(1000ms);
     prod.stop();
     const auto t1 = std::chrono::steady_clock::now();
@@ -57,7 +57,7 @@ TEST(MockPipeline, SlowConsumerDropsButProducerIsNotBlocked) {
 
     slow->start();
     const auto t0 = std::chrono::steady_clock::now();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     runFor(1500ms);
     prod.stop();
     const auto t1 = std::chrono::steady_clock::now();
@@ -90,7 +90,7 @@ TEST(MockPipeline, FastAndSlowConsumersAreIndependent) {
     fast->start();
     slow->start();
     const auto t0 = std::chrono::steady_clock::now();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     runFor(1500ms);
     prod.stop();
     const auto t1 = std::chrono::steady_clock::now();
@@ -114,7 +114,7 @@ TEST(MockPipeline, StopJoinsAllThreadsWithinTimeout) {
     prod.addConsumer(c);
 
     c->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     runFor(200ms);
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -144,7 +144,7 @@ TEST(MockPipeline, HotPreviewAttachDoesNotDisturbPrimary) {
     primary->start();
     aux->start();
     const auto t0 = std::chrono::steady_clock::now();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
 
     runFor(400ms);
     prod.addConsumer(aux);

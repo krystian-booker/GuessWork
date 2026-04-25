@@ -23,7 +23,7 @@ CameraProducer::~CameraProducer() {
     }
 }
 
-void CameraProducer::start() {
+ProducerState CameraProducer::start() {
     resetReconnectSignal();
     {
         std::scoped_lock g(caps_mu_);
@@ -59,7 +59,7 @@ void CameraProducer::start() {
         ++live_stats_.successful_connects;
     }
 
-    ProducerBase::start();
+    return ProducerBase::start();
 }
 
 void CameraProducer::stop() {

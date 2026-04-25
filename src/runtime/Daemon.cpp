@@ -647,7 +647,13 @@ void runConfigCommand(
             throw std::runtime_error("Teensy time sync was not established");
         }
 
-        for (auto& camera : cameras) camera->start();
+        for (auto& camera : cameras) {
+            if (camera->start() != ProducerState::Running) {
+                throw std::runtime_error(
+                    "Failed to start camera " + camera->id() +
+                    " for kalibr recording (already in terminal state)");
+            }
+        }
         std::this_thread::sleep_for(std::chrono::duration<double>(
             options.record_kalibr_dataset.duration_s));
         for (auto& camera : cameras) camera->stop();

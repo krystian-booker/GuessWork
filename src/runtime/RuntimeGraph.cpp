@@ -89,7 +89,15 @@ void RuntimeGraph::start() {
         pipeline->start();
     }
     for (auto& camera : camera_start_order_) {
-        camera->start();
+        const auto post_state = camera->start();
+        if (post_state != ProducerState::Running) {
+            // The producer reached a terminal state without ever running for
+            // us — almost certainly because the same instance was previously
+            // run and we never constructed a fresh one. Surface it loudly.
+            std::fprintf(stderr,
+                         "RuntimeGraph: camera %s failed to start (state=%d)\n",
+                         camera->id().c_str(), static_cast<int>(post_state));
+        }
     }
     running_ = true;
 }

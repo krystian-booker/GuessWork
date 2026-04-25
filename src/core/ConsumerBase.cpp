@@ -1,5 +1,7 @@
 #include "posest/ConsumerBase.h"
 
+#include <cstdio>
+#include <exception>
 #include <utility>
 
 namespace posest {
@@ -7,6 +9,17 @@ namespace posest {
 ConsumerBase::ConsumerBase(std::string id) : id_(std::move(id)) {}
 
 ConsumerBase::~ConsumerBase() {
+    // CRITICAL: leaf-subclass members have already been destroyed by the
+    // time we run. If the worker is still inside process() it is touching
+    // freed subclass memory — terminate loudly rather than corrupt silently.
+    // Leaf subclasses are required to call stop() in their own destructor.
+    if (running_.load(std::memory_order_acquire)) {
+        std::fprintf(stderr,
+                     "%s: ~ConsumerBase ran while still running — leaf "
+                     "subclass forgot to stop() in its destructor\n",
+                     id_.c_str());
+        std::terminate();
+    }
     stop();
 }
 

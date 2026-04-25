@@ -31,6 +31,7 @@ posest::CameraConfig makeConfig(const std::string& id = "mock") {
 class CountingConsumer final : public posest::ConsumerBase {
 public:
     explicit CountingConsumer(std::string id) : posest::ConsumerBase(std::move(id)) {}
+    ~CountingConsumer() override { stop(); }
     std::uint64_t count() const { return count_.load(); }
 
 protected:
@@ -53,7 +54,7 @@ void waitFor(const std::function<bool()>& predicate,
 TEST(CameraProducer, LifecycleHooksFireInOrderOnStart) {
     posest::mock::MockCameraProducer prod(makeConfig());
     prod.setDefaultGrabResult(posest::GrabResult::Stopping);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.stop();
 
     const auto history = prod.hookHistory();
@@ -67,9 +68,9 @@ TEST(CameraProducer, LifecycleHooksFireInOrderOnStart) {
 TEST(CameraProducer, StartStopRestartIsClean) {
     posest::mock::MockCameraProducer prod(makeConfig());
     prod.setDefaultGrabResult(posest::GrabResult::Stopping);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.stop();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.stop();
     EXPECT_EQ(prod.openDeviceCount(), 2u);
     EXPECT_EQ(prod.closeDeviceCount(), 2u);
@@ -81,7 +82,7 @@ TEST(CameraProducer, ApplyControlsErrorsArePropagated) {
     posest::mock::MockCameraProducer prod(makeConfig());
     prod.setDefaultGrabResult(posest::GrabResult::Stopping);
     prod.scriptApplyControlsErrors({{"gain", 99, "permission denied"}});
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.stop();
 
     const auto errors = prod.lastApplyErrors();
@@ -117,7 +118,7 @@ TEST(CameraProducer, GetControlDefaultThrowsNotSupported) {
 TEST(CameraProducer, BaseCapabilitiesReportsCurrentFormatAfterStart) {
     posest::mock::MockCameraProducer prod(makeConfig());
     prod.setDefaultGrabResult(posest::GrabResult::Stopping);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.stop();
 
     const auto caps = prod.capabilities();
@@ -145,7 +146,7 @@ TEST(CameraProducer, TransientErrorTriggersReconnectInOrder) {
     auto consumer = std::make_shared<CountingConsumer>("c");
     prod.addConsumer(consumer);
     consumer->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     waitFor([&] { return prod.openDeviceCount() >= 2; });
     prod.stop();
     consumer->stop();
@@ -170,7 +171,7 @@ TEST(CameraProducer, ReconnectInterruptedByStop) {
     // the worker will then fail every reconnect attempt and stay in the
     // sleep loop until stop() interrupts.
     prod.setDefaultGrabResult(posest::GrabResult::TransientError);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.scriptOpenDeviceFailures(100, "device unplugged");
 
     waitFor([&] { return prod.openDeviceCount() >= 2; });
@@ -187,7 +188,7 @@ TEST(CameraProducer, MaxAttemptsHonoredAndStateTransitionsToFailed) {
     posest::mock::MockCameraProducer prod(cfg);
 
     prod.setDefaultGrabResult(posest::GrabResult::TransientError);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.scriptOpenDeviceFailures(100, "permanent failure");
 
     waitFor([&] {
@@ -208,7 +209,7 @@ TEST(CameraProducer, ReconnectDisabledWhenIntervalIsZero) {
 
     prod.scriptGrabResults({posest::GrabResult::TransientError});
     prod.setDefaultGrabResult(posest::GrabResult::Stopping);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     waitFor([&] { return prod.grabFrameCount() >= 1; });
     prod.stop();
 

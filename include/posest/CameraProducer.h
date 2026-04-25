@@ -63,7 +63,7 @@ public:
 
     const CameraConfig& config() const { return config_; }
 
-    void start() override;
+    [[nodiscard]] ProducerState start() override;
     void stop() override;
 
     // --- Capability descriptor -------------------------------------------

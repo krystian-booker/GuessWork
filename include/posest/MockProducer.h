@@ -28,6 +28,9 @@ struct MockProducerConfig {
 class MockProducer final : public ProducerBase {
 public:
     explicit MockProducer(MockProducerConfig cfg);
+    // Required by the ProducerBase contract: stop the capture thread before
+    // this leaf's members go out of scope (~ProducerBase aborts otherwise).
+    ~MockProducer() override { stop(); }
 
 protected:
     bool captureOne(

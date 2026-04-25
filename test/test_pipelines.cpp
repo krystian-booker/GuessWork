@@ -34,6 +34,7 @@ class SlowPipeline final : public posest::pipelines::VisionPipelineBase {
 public:
     explicit SlowPipeline(posest::IMeasurementSink& sink)
         : VisionPipelineBase("slow", "slow", sink) {}
+    ~SlowPipeline() override { stop(); }
 
 protected:
     void processFrame(const posest::Frame& /*frame*/) override {

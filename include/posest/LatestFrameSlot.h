@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -35,7 +36,9 @@ private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
     FramePtr pending_;
-    std::uint64_t dropped_{0};
+    // Diagnostic counter only — not part of any synchronization, so it lives
+    // outside the mutex to keep droppedCount() lock-free for telemetry callers.
+    std::atomic<std::uint64_t> dropped_{0};
     bool shut_{false};
 };
 

@@ -25,6 +25,7 @@ class CountingProducer final : public posest::ProducerBase {
 public:
     CountingProducer(std::string id, std::uint64_t max)
         : posest::ProducerBase(std::move(id)), max_(max) {}
+    ~CountingProducer() override { stop(); }
 
 protected:
     bool captureOne(
@@ -51,6 +52,7 @@ public:
                     std::uint64_t max,
                     std::chrono::steady_clock::time_point stamp)
         : posest::ProducerBase(std::move(id)), max_(max), stamp_(stamp) {}
+    ~StampedProducer() override { stop(); }
 
 protected:
     bool captureOne(
@@ -79,6 +81,7 @@ struct Observation {
 class RecordingConsumer final : public posest::ConsumerBase {
 public:
     explicit RecordingConsumer(std::string id) : posest::ConsumerBase(std::move(id)) {}
+    ~RecordingConsumer() override { stop(); }
 
     std::vector<Observation> take() const {
         std::lock_guard<std::mutex> g(mu_);
@@ -104,7 +107,7 @@ TEST(ProducerBase, TimestampsAreMonotonicAndNonzero) {
     prod.addConsumer(cons);
 
     cons->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
 
     // Wait for producer to exhaust its 200 frames; consumer sees at least 1
     // because the final put is never dropped.
@@ -135,7 +138,7 @@ TEST(ProducerBase, FanOutDeliversToAllConsumers) {
     a->start();
     b->start();
     c->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     while (prod.producedCount() < 500) std::this_thread::sleep_for(1ms);
     prod.stop();
     std::this_thread::sleep_for(5ms);
@@ -159,7 +162,7 @@ TEST(ProducerBase, SequenceAssignedByProducerIsContiguous) {
     prod.addConsumer(cons);
 
     cons->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     while (prod.producedCount() < 300) std::this_thread::sleep_for(1ms);
     prod.stop();
     std::this_thread::sleep_for(5ms);
@@ -184,7 +187,7 @@ TEST(ProducerBase, SubclassSuppliedTimestampPassesThrough) {
     prod.addConsumer(cons);
 
     cons->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     while (prod.producedCount() < 50) std::this_thread::sleep_for(1ms);
     prod.stop();
     std::this_thread::sleep_for(5ms);
@@ -204,6 +207,7 @@ class ThrowingProducer final : public posest::ProducerBase {
 public:
     explicit ThrowingProducer(std::string id)
         : posest::ProducerBase(std::move(id)) {}
+    ~ThrowingProducer() override { stop(); }
 
 protected:
     bool captureOne(
@@ -226,7 +230,7 @@ TEST(ProducerBase, ThrowingCaptureOneLogsAndExitsCleanly) {
     auto cons = std::make_shared<RecordingConsumer>("c");
     prod.addConsumer(cons);
     cons->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
 
     // The throw on the second capture should terminate the worker. Stopping
     // (which joins the worker) must complete without deadlocking.
@@ -244,11 +248,11 @@ TEST(ProducerBase, ThrowingCaptureOneLogsAndExitsCleanly) {
 
 TEST(ProducerBase, StartStopRestartIsClean) {
     CountingProducer prod("cam", 100);
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     prod.stop();
     // Re-entrancy: a second start/stop must work without leaking the worker.
     CountingProducer prod2("cam2", 100);
-    prod2.start();
+    ASSERT_EQ(prod2.start(), posest::ProducerState::Running);
     prod2.stop();
 }
 
@@ -259,7 +263,7 @@ TEST(ProducerBase, FallbackStampsWithSteadyClockNowWhenSubclassOmits) {
     prod.addConsumer(cons);
 
     cons->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     while (prod.producedCount() < 50) std::this_thread::sleep_for(1ms);
     prod.stop();
     std::this_thread::sleep_for(5ms);
@@ -285,7 +289,7 @@ TEST(ProducerBase, HotAddConsumerSeesOnlyFramesAfterAttach) {
     prod.addConsumer(pre);
 
     pre->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     std::this_thread::sleep_for(50ms);
 
     const auto produced_at_attach = prod.producedCount();
@@ -315,7 +319,7 @@ TEST(ProducerBase, HotRemoveConsumerStopsReceiving) {
 
     a->start();
     b->start();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
     std::this_thread::sleep_for(50ms);
 
     const bool removed = prod.removeConsumer(a);
@@ -359,7 +363,7 @@ TEST(ProducerBase, AddRemoveDuringCaptureDoesNotDeadlock) {
 
     primary->start();
     const auto t0 = std::chrono::steady_clock::now();
-    prod.start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
 
     std::atomic<bool> stop_churn{false};
     std::thread churn([&] {
@@ -376,14 +380,14 @@ TEST(ProducerBase, AddRemoveDuringCaptureDoesNotDeadlock) {
             } else if (!live.empty()) {
                 auto c = live.back();
                 live.pop_back();
-                prod.removeConsumer(c);
+                EXPECT_TRUE(prod.removeConsumer(c));
                 c->stop();
             }
             ++i;
             std::this_thread::sleep_for(2ms);
         }
         for (auto& c : live) {
-            prod.removeConsumer(c);
+            EXPECT_TRUE(prod.removeConsumer(c));
             c->stop();
         }
     });

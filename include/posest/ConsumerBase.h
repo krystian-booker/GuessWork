@@ -15,6 +15,12 @@ namespace posest {
 // Subclasses implement process(const Frame&), which runs on the consumer's
 // own worker thread. Subclasses must NOT assume they see every frame: the
 // mailbox drops unread frames when a newer one arrives.
+//
+// Virtual inheritance of IFrameConsumer is intentional: VisionPipelineBase
+// inherits both ConsumerBase and runtime::IVisionPipeline (which itself
+// extends IFrameConsumer), so a single shared IFrameConsumer subobject is
+// required to avoid the diamond. Do not drop the `virtual` keyword without
+// also updating IVisionPipeline.
 class ConsumerBase : public virtual IFrameConsumer {
 public:
     explicit ConsumerBase(std::string id);
