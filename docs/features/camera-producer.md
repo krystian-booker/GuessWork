@@ -1,8 +1,8 @@
 # Camera Producer Subsystem
 
-**Status:** Partially feature-complete. Core abstraction and V4L2 backend are solid; several explicit requirements (capability descriptors, live control updates, hotplug recovery, hardware-trigger abstraction) are missing.
+**Status:** Feature-complete against the stated requirements. Capability descriptors, live control updates, reconnect-on-unplug, hardware-trigger abstraction, and device enumeration are all implemented. Pixel-format coverage has been expanded from 2 to 9 formats.
 
-This document covers the generic frame producer interface, the camera-specific lifecycle abstraction layered on top of it, and the V4L2 implementation that ships today. It is structured as: requirements → architecture → what is implemented → gap analysis against the requirements → recommended additions to reach feature-complete.
+This document covers the generic frame producer interface, the camera-specific lifecycle abstraction layered on top of it, and the V4L2 implementation that ships today. It is structured as: requirements → architecture → what is implemented → status against the requirements.
 
 ---
 
@@ -186,12 +186,18 @@ This is guarded by a `static_assert(std::chrono::steady_clock::is_steady)` at fi
 
 ### 4.3 Pixel-format support
 
+Nine formats are wired up via the `kPixelFormats` table (`V4L2Producer.cpp:110`):
+
 | Format | Path |
 |--------|------|
 | `MJPEG` | `cv::imdecode(raw, IMREAD_COLOR)` — input wrapped over the MMAP buffer (zero-copy in), output is a fresh `cv::Mat`. |
 | `YUYV`  | `cv::cvtColor(yuyv, out, COLOR_YUV2BGR_YUYV)` — input wrapped over the MMAP buffer (zero-copy in), output is a fresh `cv::Mat`. |
+| `GREY`  | Mono 8-bit; wrapped and copied into an owning `cv::Mat`. |
+| `NV12`  | `cv::cvtColor(nv12, out, COLOR_YUV2BGR_NV12)`. |
+| `BGR3`  | Copied into an owning BGR `cv::Mat`. |
+| `bayer_rggb8` / `bayer_grbg8` / `bayer_gbrg8` / `bayer_bggr8` | `cv::cvtColor` with the matching `COLOR_BayerXX2BGR` code — covers common mono machine-vision sensors. |
 
-`pixelFormatFromString()` (`V4L2Producer.cpp:33`) currently rejects anything else with `std::runtime_error`. Other USB cameras commonly emit GREY, NV12, BGR3, or raw Bayer — none of those are wired up yet.
+`pixelFormatFromString()` rejects anything not in the table with `std::runtime_error`. `test/test_v4l2_producer.cpp` asserts each format round-trips through the helper.
 
 ### 4.4 Buffer ownership
 
@@ -227,87 +233,82 @@ The `MockProducer`/`MockConsumer` pair (`include/posest/MockProducer.h`, `includ
 
 ---
 
-## 6. Gap analysis vs. the requirements
+## 6. Status vs. the requirements
 
-This is the part to read carefully — the abstraction is mostly there, but several explicit requirements are not yet met.
+All four introspection/runtime-control/resilience requirements that were previously open have landed. The abstraction remains clean — everything is additive on `CameraProducer` with `virtual` defaults so backends can opt in per feature.
 
-### 6.1 Requirement: hardware-triggered vs. free-running declaration  →  **MISSING**
+### 6.1 Requirement: hardware-triggered vs. free-running declaration  →  **IMPLEMENTED**
 
-The producer/camera interface has **no concept of trigger mode**. The Teensy domain has a `CameraTriggerConfig` (used to drive GPIO pulses out of the Teensy and to time-align frames during calibration recording), but:
+- `enum class TriggerMode { FreeRun, External, Software }` in `CameraConfig.h:23`, with `triggerModeToString` / `triggerModeFromString` helpers in `src/camera/CameraConfig.cpp:16`.
+- `CameraConfig::trigger_mode` carries the requested mode (`CameraConfig.h:48`, default `FreeRun`).
+- `virtual void setTriggerMode(TriggerMode)` on `CameraProducer` (`CameraProducer.h:83`). The base default accepts `FreeRun` as a no-op and throws `NotSupportedError` for `External` / `Software` (`CameraProducer.cpp:107`). The V4L2 backend keeps that default behavior since UVC webcams are free-running (`V4L2Producer.cpp:477`).
+- Support is surfaced on the capability descriptor via `trigger_modes`, `current_trigger_mode`, and `supports_set_trigger_mode` (`CameraCapabilities.h:101`).
 
-- `CameraConfig` does not carry a `trigger_mode` field.
-- `CameraProducer` has no `setTriggerMode()` / `isHardwareTriggered()` method.
-- The V4L2 backend never sets `V4L2_CID_PRIVACY` / vendor trigger controls and never asserts that a UVC camera is in a particular trigger state.
+Future machine-vision backends (FLIR/Spinnaker, GenICam, Allied Vision) override `setTriggerMode()` and report the additional modes in their capabilities.
 
-For UVC webcams this is mostly fine (they are not hardware-triggered). For machine-vision cameras (FLIR/Spinnaker, GenICam, Allied Vision), trigger mode is a first-class control and the abstraction needs to express it.
+### 6.2 Requirement: re-initialization on unplug  →  **IMPLEMENTED**
 
-**Suggested shape:** add an enum to `CameraConfig` (`TriggerMode { Free, External, Software }`) and a virtual `setTriggerMode()` on `CameraProducer` that defaults to throwing `not_supported`. Surface support via the capability descriptor (§6.3).
+`grabFrame()` now returns an `enum class GrabResult { Ok, EndOfStream, TransientError, Stopping }` (`CameraProducer.h:23`) so the base can distinguish a hard EOS from a transient I/O error.
 
-### 6.2 Requirement: re-initialization on unplug  →  **MISSING**
+- `ReconnectPolicy { interval_ms, max_attempts }` in `CameraConfig.h:36`. `max_attempts == 0` means retry forever (mirrors `TeensyConfig`); `interval_ms == 0` disables reconnect entirely.
+- `CameraProducer::attemptReconnect()` (`CameraProducer.cpp:192`) runs the full ladder: `stopStream → closeDevice → interruptible sleep → openDevice → applyFormat → applyControls → startStream`. Exceptions at any step are caught, logged, and counted; the ladder retries until success, `max_attempts` exhaustion, or a `stop()` signal.
+- The reconnect sleep is interruptible via a condition variable on `reconnect_cv_` so `stop()` tears the camera down promptly even mid-backoff.
+- V4L2 `grabFrame()` reports `TransientError` on `POLLERR|POLLHUP|POLLNVAL` or `VIDIOC_DQBUF` failure (`V4L2Producer.cpp:370`, `388`), and `Stopping` when `isRunning()` flipped during the call (`V4L2Producer.cpp:364`).
+- Connection state is exposed as `ConnectionState { Disconnected, Connecting, Streaming, Failed }` (`CameraCapabilities.h:13`) via `capabilities().live.state`, alongside `disconnect_count`, `reconnect_attempts`, and `successful_connects` counters (`CameraCapabilities.h:78`).
 
-Today, on disconnect:
+Tests: `test/test_camera_producer.cpp:135` covers the reconnect-on-transient path, interruptible-sleep on `stop()`, and `max_attempts` exhaustion transitioning the state to `Failed`.
 
-- `poll()` typically returns immediately with `POLLERR`/`POLLHUP`; the `pollfd.events = POLLIN` mask means we ignore these and the next `VIDIOC_DQBUF` fails with `ENODEV`.
-- `grabFrame()` returns `false` (`V4L2Producer.cpp:222`).
-- `ProducerBase::runLoop()` interprets `false` as end-of-stream and exits the loop.
-- The capture thread terminates silently. Consumers continue to wait on empty mailboxes. There is no surfaced error, no retry, no reopen.
+### 6.3 Requirement: capability descriptor for the UI  →  **IMPLEMENTED**
 
-The Teensy service has explicit reconnect plumbing (`reconnect_interval_ms`, `reconnect_attempts`, `disconnects` in stats) — cameras have none of that.
+`include/posest/CameraCapabilities.h` defines the full descriptor family:
 
-**Suggested shape:**
-- Distinguish "end-of-stream" from "transient I/O error" in the `captureOne()` return contract (e.g. an enum or exception).
-- Add a reconnect policy to `CameraConfig` (`reconnect_interval_ms`, `max_reconnect_attempts`, etc.).
-- In `CameraProducer`, on transient failure, run `stopStream → closeDevice → sleep → openDevice → applyFormat → applyControls → startStream` with backoff.
-- Expose `connection_state` in the capability/health descriptor and surface it in telemetry alongside the existing Teensy reconnect metrics.
+- `PixelFormatOption` → `FrameSizeOption` → `FrameRateRange` (discrete + continuous) for the `(format, width, height, fps)` matrix.
+- `ControlDescriptor` with `type` (Integer/Boolean/Menu), `min`/`max`/`step`/`default_value`/`current_value`, `read_only`, `auto_mode`, `auto_companion` (links e.g. `exposure_auto` ↔ `exposure_absolute`), and enumerated `menu_entries` for menu-typed controls.
+- `DeviceHint { kind, description }` with `DeviceHintKind { DevicePath, SerialNumber, NetworkAddress, DiscoveryName }` so the UI knows whether to render a file picker (V4L2), a serial field (Spinnaker), etc. — this closes the §6.6 "wart" from earlier drafts.
+- `LiveStats` with `state`, disconnect/reconnect counters, `measured_fps` (EWMA maintained by `ProducerBase`-adjacent hooks), `last_frame_time`, and `last_error`.
+- Top-level `CameraCapabilities { camera_id, backend, device_hint, pixel_formats, controls, trigger_modes, supports_* flags, current_format, current_trigger_mode, live }`.
 
-### 6.3 Requirement: capability descriptor for the UI  →  **MISSING**
+`virtual CameraCapabilities capabilities() const` on `CameraProducer` (`CameraProducer.h:73`). The base implementation fills `camera_id`, `backend`, cached `current_format` / `current_trigger_mode`, and `live` under `caps_mu_`; backends override to populate the static catalogs.
 
-The user explicitly asked for "some object that can be returned for the frontend that states what the camera backend is capable of so the UI knows what to display." Nothing of the sort exists today.
+The V4L2 implementation (`V4L2Producer.cpp:524`) enumerates:
 
-What the UI would need to render a configuration page without per-backend `if` trees:
+- pixel formats via `VIDIOC_ENUM_FMT`
+- sizes via `VIDIOC_ENUM_FRAMESIZES` (both discrete and stepwise)
+- frame rates via `VIDIOC_ENUM_FRAMEINTERVALS`
+- control metadata via `VIDIOC_QUERYCTRL` + `VIDIOC_G_CTRL` + `VIDIOC_QUERYMENU`
 
-- list of supported pixel formats and their `(width, height, fps)` matrices
-- list of supported controls (name, type, range/min/max/step/default, current value, whether currently in auto mode)
-- list of supported trigger modes
-- whether the device is currently connected, current negotiated format, last-frame timestamp / fps
-
-None of this is exposed from `IFrameProducer` or `CameraProducer`. The V4L2 backend has the data internally (`negotiated_pixfmt_`, `negotiated_width_`, `negotiated_height_`) but doesn't surface it.
-
-**Suggested shape:** introduce `struct CameraCapabilities { ... }` and a virtual `CameraCapabilities capabilities() const` on `CameraProducer`. Each backend fills in what it knows; the UI renders strictly off this struct. For V4L2, populate by enumerating with `VIDIOC_ENUM_FMT`, `VIDIOC_ENUM_FRAMESIZES`, `VIDIOC_ENUM_FRAMEINTERVALS`, and `VIDIOC_QUERYCTRL` / `VIDIOC_QUERY_EXT_CTRL`.
-
-### 6.4 Requirement: full live control (set exposure, gain, WB at runtime)  →  **PARTIALLY MISSING**
-
-Today, controls are applied **once** during `start()` (`CameraProducer::start` → `applyControls()`). There is no public API for runtime adjustment. If the UI wants to slide an exposure control, the only path is: edit `RuntimeConfig`, persist, restart the camera (and likely the whole runtime graph). That is unacceptable for an interactive tuning UI.
-
-**Suggested shape:** add to `CameraProducer`:
+### 6.4 Requirement: full live control (set exposure, gain, WB at runtime)  →  **IMPLEMENTED**
 
 ```c++
 virtual void setControl(const std::string& name, std::int32_t value);
 virtual std::optional<std::int32_t> getControl(const std::string& name) const;
 ```
 
-Both default to `not_supported`. The V4L2 backend implements them with `VIDIOC_S_CTRL` / `VIDIOC_G_CTRL` (taking care to use atomic locking around the fd if needed — `ioctl` is generally safe to call from another thread but the buffer ring is not).
+on `CameraProducer.h:78`. Defaults throw `NotSupportedError` (`CameraProducer.cpp:97`). Mode flags (`exposure_auto`, `white_balance_auto`, `focus_auto`) use the same API, so auto↔manual switching is covered.
 
-Mode flags (`exposure_auto`, `white_balance_auto`, `focus_auto`) are already in the control vocabulary, so this single API covers auto vs. manual switching too.
+The V4L2 backend implements both with `VIDIOC_S_CTRL` / `VIDIOC_G_CTRL` (`V4L2Producer.cpp:447`, `465`) under `fd_mu_` (`V4L2Producer.h:62`). The mutex guards the fd against races with `openDevice` / `closeDevice` during reconnect, but is intentionally not held across `poll()` in `grabFrame()` so live-control calls never block the capture thread.
+
+Unknown names: `setControl` throws `std::invalid_argument`; `getControl` returns `std::nullopt`.
 
 ### 6.5 Requirement: frame retrieval / init / destroy  →  **MET**
 
 `grabFrame()` / `openDevice()` / `closeDevice()` are present and exercised through the lifecycle. ✅
 
-### 6.6 Requirement: rest of app is backend-agnostic  →  **MET (with one wart)**
+### 6.6 Requirement: rest of app is backend-agnostic  →  **MET**
 
-The factory branch (`if (config.type == "v4l2")`) is correct and the only such branch. ✅
+The factory branch (`if (config.type == "v4l2")`) is correct and the only such branch. ✅ The earlier "wart" — `CameraConfig::device` being an opaque string with no indication of how to populate it — is now resolved by `DeviceHint` in the capability descriptor (§6.3).
 
-The wart: `CameraConfig::device` is just a string and its meaning is backend-defined. That is fine in principle but the UI has no way to know whether it should be a file picker (V4L2: `/dev/...`), a serial number (Spinnaker), a CIDR (GigE), or a discovery name. The capability descriptor (§6.3) should also describe how `device` is meant to be populated.
+### 6.7 Other practical gaps — resolved
 
-### 6.7 Other practical gaps
+- **Negotiated format surfaced.** `CameraProducer::setCurrentFormat()` is called by `applyFormat()` in `V4L2Producer.cpp:254` and exposed through `currentFormat()` and `capabilities().current_format`.
+- **Pixel-format catalog expanded.** See §4.3 — MJPEG, YUYV, GREY, NV12, BGR3, and four Bayer variants (RGGB/GRBG/GBRG/BGGR 8-bit).
+- **Failed control sets are propagated.** `applyControls()` now returns `std::vector<ControlSetError>` (`CameraProducer.h:100`). `CameraProducer::start()` and `attemptReconnect()` capture the list, stash the first failure in `live_stats_.last_error`, and expose the full vector via `lastApplyErrors()` (`CameraProducer.h:91`). The V4L2 backend collects both unknown-name and ioctl-failure cases (`V4L2Producer.cpp:273`).
+- **Device enumeration implemented.** `posest::v4l2::enumerateDevices()` (`include/posest/V4L2DeviceEnumerator.h`) walks `/sys/class/video4linux/video*`, verifies `V4L2_CAP_VIDEO_CAPTURE` + `V4L2_CAP_STREAMING` via `VIDIOC_QUERYCAP`, and resolves each result to the most stable path under `/dev/v4l/by-id/` when available. Returns a `std::vector<CameraCapabilities>` ready for the UI camera picker.
+- **`start()` re-entrancy tested.** `test/test_camera_producer.cpp` exercises `start → stop → start → stop` with a mock backend and asserts each hook was invoked exactly twice.
 
-- **Negotiated format not surfaced.** V4L2 may coerce the requested width/height/pixel format. The negotiated values are kept inside the producer but never reported back. Consumers and UI both could benefit from seeing them.
-- **Pixel-format catalog is small.** Only `mjpeg` and `yuyv` are implemented. GREY (mono machine-vision sensors), NV12, BGR3, raw Bayer (RG10/GR12 etc.) are not supported. If the planned hardware uses any of those, this is a blocker.
+### 6.8 Remaining tradeoff (not a gap)
+
 - **Per-frame decoding cost is on the producer thread.** MJPEG decode in particular can be 2–10 ms at 1080p. This is a deliberate latency tradeoff (decode-once-then-fan-out beats decode-per-consumer), but means the producer thread is not "pure capture." If the future load includes 2× 4K MJPEG cameras at 60 fps on the same machine, decoding off-thread will become necessary.
-- **Failed control sets are only printed to stderr.** `applyControls()` continues silently on failure (`V4L2Producer.cpp:144`). With a capability descriptor and live-control API in place, failures should be propagated to the caller / surfaced via telemetry.
-- **No device enumeration.** The UI cannot ask "what cameras are plugged in?" — the user has to know `/dev/v4l/by-id/...` paths up front. This is part of the same gap as the capability descriptor.
-- **No `start()` re-entrancy.** Calling `start()` twice on a `CameraProducer` after a deliberate `stop()` works (each call goes through `openDevice` again), but there are no tests for it; should be added once reconnect logic lands.
 
 ---
 
@@ -319,17 +320,19 @@ The wart: `CameraConfig::device` is just a string and its meaning is backend-def
 | Backend-agnostic rest of app | ✅ Complete | One factory branch; everything else uses `IFrameProducer` + `CameraConfig`. |
 | Frame retrieval / init / teardown | ✅ Complete | `CameraProducer` lifecycle, V4L2 implementation. |
 | Auto/manual exposure, gain, WB, etc. (config-time) | ✅ Complete | UVC control vocabulary, `applyControls()`. |
-| **Live (runtime) control updates** | ❌ Missing | No `setControl()`/`getControl()` API. |
-| **Reinitialization on unplug** | ❌ Missing | Capture thread silently exits on disconnect. |
-| **Hardware-trigger declaration / control** | ❌ Missing | No `TriggerMode` field, no API. |
-| **Capability descriptor for UI** | ❌ Missing | UI cannot introspect what a backend supports. |
+| Live (runtime) control updates | ✅ Complete | `setControl()` / `getControl()` on `CameraProducer`; V4L2 uses `VIDIOC_S_CTRL` / `VIDIOC_G_CTRL` under `fd_mu_`. |
+| Reinitialization on unplug | ✅ Complete | `GrabResult::TransientError` + `ReconnectPolicy` + `attemptReconnect()` ladder with interruptible backoff. |
+| Hardware-trigger declaration / control | ✅ Complete | `TriggerMode { FreeRun, External, Software }`, `setTriggerMode()`, capability-descriptor surfaced. |
+| Capability descriptor for UI | ✅ Complete | `CameraCapabilities` enumerates formats, controls, trigger modes, live stats, and `DeviceHint`. |
 | Stable timestamp domain (`steady_clock`) | ✅ Complete | Enforced by `ProducerBase`, V4L2 honors monotonic flag. |
 | Drop-oldest, never-stall mailbox | ✅ Complete | `LatestFrameSlot`. |
-| Pixel-format coverage | ⚠️ Limited | Only MJPEG and YUYV. |
-| Device enumeration | ❌ Missing | No way to discover devices for the UI. |
-| Negotiated-format readback | ❌ Missing | Held internally, not exposed. |
+| Pixel-format coverage | ✅ Complete | MJPEG, YUYV, GREY, NV12, BGR3, and four Bayer variants (9 total). |
+| Device enumeration | ✅ Complete | `posest::v4l2::enumerateDevices()` returns `CameraCapabilities[]` for every usable `/dev/video*`. |
+| Negotiated-format readback | ✅ Complete | `currentFormat()` + `capabilities().current_format`. |
+| Failed-control propagation | ✅ Complete | `applyControls()` returns `std::vector<ControlSetError>`; surfaced via `lastApplyErrors()` + `live.last_error`. |
+| Connection-state telemetry | ✅ Complete | `ConnectionState` + disconnect/reconnect counters in `LiveStats`. |
 
-**Overall:** the core architecture and the V4L2 implementation are solid and the abstraction does not leak. The missing pieces are all on the **introspection / runtime-control / resilience** axis — exactly the surface a configuration UI needs. Before writing the camera-config UI, the four ❌ items in §6.1–§6.4 (capability descriptor, live `setControl`/`getControl`, hardware-trigger abstraction, reconnect-on-unplug) should land. None of them require restructuring the existing code; they are all additive on `CameraProducer`.
+**Overall:** feature-complete against the stated requirements. The architecture did not need restructuring — every addition slotted in as a `virtual` on `CameraProducer` with a safe default, keeping non-V4L2 backends free to opt in incrementally. The camera-config UI can now be built directly against `CameraCapabilities` without any per-backend branching.
 
 ---
 
@@ -343,10 +346,14 @@ The wart: `CameraConfig::device` is just a string and its meaning is backend-def
 | `include/posest/ProducerBase.h` / `src/core/ProducerBase.cpp` | Capture-thread + fan-out base. |
 | `include/posest/ConsumerBase.h` / `src/core/ConsumerBase.cpp` | Mailbox-driven consumer base. |
 | `include/posest/LatestFrameSlot.h` / `src/core/LatestFrameSlot.cpp` | Drop-oldest single-slot mailbox. |
-| `include/posest/CameraConfig.h` | `CameraConfig` / `CameraFormatConfig` / `CameraControlEntry`. |
-| `include/posest/CameraProducer.h` / `src/camera/CameraProducer.cpp` | Camera lifecycle abstraction layered over `ProducerBase`. |
-| `include/posest/V4L2Producer.h` / `src/v4l2/V4L2Producer.cpp` | V4L2 backend (Linux). |
+| `include/posest/CameraConfig.h` / `src/camera/CameraConfig.cpp` | `CameraConfig`, `TriggerMode`, `ReconnectPolicy`, and `triggerMode*` helpers. |
+| `include/posest/CameraCapabilities.h` | Capability descriptor types (`CameraCapabilities`, `ControlDescriptor`, `PixelFormatOption`, `DeviceHint`, `LiveStats`, `ConnectionState`). |
+| `include/posest/CameraProducer.h` / `src/camera/CameraProducer.cpp` | Camera lifecycle abstraction, reconnect ladder, live-control API, `capabilities()`. |
+| `include/posest/V4L2Producer.h` / `src/v4l2/V4L2Producer.cpp` | V4L2 backend (Linux) — grab, live controls, capability enumeration. |
+| `include/posest/V4L2DeviceEnumerator.h` / `src/v4l2/V4L2DeviceEnumerator.cpp` | Device discovery for the UI picker. |
+| `include/posest/MockCameraProducer.h` / `src/mock/MockCameraProducer.cpp` | Test double used by `test_camera_producer.cpp` to exercise lifecycle + reconnect paths without a real device. |
 | `src/runtime/ProductionFactories.cpp` | The single backend-dispatch site (`type` → concrete class). |
 | `src/runtime/RuntimeGraph.cpp` | Wires cameras → pipelines via the generic interfaces only. |
 | `test/test_producer_base.cpp` | ProducerBase / fan-out / sequencing / drop tests. |
-| `test/test_v4l2_producer.cpp` | V4L2 static helpers (CID mapping, timestamp conversion). |
+| `test/test_camera_producer.cpp` | Lifecycle, `start()` re-entrancy, reconnect ladder, `setControl` / `setTriggerMode` defaults. |
+| `test/test_v4l2_producer.cpp` | V4L2 static helpers (CID mapping, timestamp conversion, pixel-format table). |
