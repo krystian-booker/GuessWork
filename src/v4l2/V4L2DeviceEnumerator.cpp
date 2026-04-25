@@ -105,7 +105,6 @@ std::vector<CameraCapabilities> enumerateDevices() {
         caps.supports_reconnect = true;
         caps.supports_set_trigger_mode = false;
         if (!sysfs_name.empty()) {
-            caps.live.last_error.clear();
             caps.camera_id = sysfs_name;
         } else if (!human_name.empty()) {
             caps.camera_id = human_name;

@@ -70,25 +70,25 @@ public:
     // Default implementation reports camera_id / current_format_ / live_stats_
     // / current_trigger_mode and trigger_modes={FreeRun}. Backends override
     // to fill pixel_formats / controls / supports_* flags.
-    virtual CameraCapabilities capabilities() const;
+    [[nodiscard]] virtual CameraCapabilities capabilities() const;
 
     // --- Live (runtime) control ------------------------------------------
     // Defaults throw NotSupportedError. V4L2 backend implements both with
     // VIDIOC_S_CTRL / VIDIOC_G_CTRL under fd_mu_.
     virtual void setControl(const std::string& name, std::int32_t value);
-    virtual std::optional<std::int32_t> getControl(const std::string& name) const;
+    [[nodiscard]] virtual std::optional<std::int32_t> getControl(const std::string& name) const;
 
     // --- Trigger mode -----------------------------------------------------
     // Default accepts FreeRun (no-op), throws NotSupportedError otherwise.
     virtual void setTriggerMode(TriggerMode mode);
 
     // Read-only accessors for snapshots taken under caps_mu_. Useful for tests.
-    LiveStats liveStats() const;
-    std::optional<CameraFormatConfig> currentFormat() const;
+    [[nodiscard]] LiveStats liveStats() const;
+    [[nodiscard]] std::optional<CameraFormatConfig> currentFormat() const;
 
     // Failures from the most recent applyControls() call (cleared each
     // start/reconnect cycle). Empty means every entry succeeded.
-    std::vector<ControlSetError> lastApplyErrors() const;
+    [[nodiscard]] std::vector<ControlSetError> lastApplyErrors() const;
 
 protected:
     virtual void openDevice() = 0;
@@ -141,10 +141,17 @@ private:
     CameraConfig config_;
     bool device_open_{false};
 
+    // Lock order across the subsystem (acquire outer → inner; never invert):
+    //   1. fd_mu_       (V4L2Producer; serializes ioctls / open-close)
+    //   2. caps_mu_     (this class; guards live_stats_ / current_format_)
+    //   3. reconnect_mu_ (this class; guards stop_signaled_)
+    // Backends must release fd_mu_ before calling setCurrentFormat /
+    // recordFrameDelivered / recordLastError / setConnectionState, all of
+    // which take caps_mu_.
     mutable std::mutex caps_mu_;
-    std::optional<CameraFormatConfig> current_format_;
-    LiveStats live_stats_;
-    std::vector<ControlSetError> last_apply_errors_;
+    std::optional<CameraFormatConfig> current_format_{};
+    LiveStats live_stats_{};
+    std::vector<ControlSetError> last_apply_errors_{};
 
     // Interruptible sleep used by attemptReconnect.
     std::mutex reconnect_mu_;

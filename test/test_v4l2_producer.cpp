@@ -170,9 +170,9 @@ TEST(V4L2Producer, PixelFormatCatalogCoversCanonicalNames) {
     EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bayer_gbrg8"));
     EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bayer_bggr8"));
     EXPECT_FALSE(V4L2Producer::isPixelFormatSupported("not_a_format"));
-    EXPECT_THROW(V4L2Producer::pixelFormatFourcc("not_a_format"),
+    EXPECT_THROW((void)V4L2Producer::pixelFormatFourcc("not_a_format"),
                  std::runtime_error);
-    EXPECT_NO_THROW(V4L2Producer::pixelFormatFourcc("MJPEG"));   // case-insensitive
+    EXPECT_NO_THROW((void)V4L2Producer::pixelFormatFourcc("MJPEG"));   // case-insensitive
 }
 
 TEST(V4L2Producer, CapabilitiesBackendIsV4l2) {

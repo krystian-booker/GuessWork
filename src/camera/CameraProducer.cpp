@@ -26,7 +26,7 @@ CameraProducer::~CameraProducer() {
 void CameraProducer::start() {
     resetReconnectSignal();
     {
-        std::lock_guard<std::mutex> g(caps_mu_);
+        std::scoped_lock g(caps_mu_);
         live_stats_.state = ConnectionState::Connecting;
     }
 
@@ -36,7 +36,7 @@ void CameraProducer::start() {
         applyFormat();
         auto errors = applyControls();
         {
-            std::lock_guard<std::mutex> g(caps_mu_);
+            std::scoped_lock g(caps_mu_);
             last_apply_errors_ = std::move(errors);
             if (!last_apply_errors_.empty()) {
                 live_stats_.last_error =
@@ -48,13 +48,13 @@ void CameraProducer::start() {
     } catch (...) {
         closeDevice();
         device_open_ = false;
-        std::lock_guard<std::mutex> g(caps_mu_);
+        std::scoped_lock g(caps_mu_);
         live_stats_.state = ConnectionState::Failed;
         throw;
     }
 
     {
-        std::lock_guard<std::mutex> g(caps_mu_);
+        std::scoped_lock g(caps_mu_);
         live_stats_.state = ConnectionState::Streaming;
         ++live_stats_.successful_connects;
     }
@@ -70,7 +70,7 @@ void CameraProducer::stop() {
         try { closeDevice(); } catch (...) {}
         device_open_ = false;
     }
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     if (live_stats_.state != ConnectionState::Failed) {
         live_stats_.state = ConnectionState::Disconnected;
     }
@@ -87,7 +87,7 @@ CameraCapabilities CameraProducer::capabilities() const {
     caps.supports_reconnect = config_.reconnect.interval_ms > 0;
     caps.current_trigger_mode = config_.trigger_mode;
     {
-        std::lock_guard<std::mutex> g(caps_mu_);
+        std::scoped_lock g(caps_mu_);
         caps.current_format = current_format_;
         caps.live = live_stats_;
     }
@@ -114,23 +114,23 @@ void CameraProducer::setTriggerMode(TriggerMode mode) {
 }
 
 LiveStats CameraProducer::liveStats() const {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     return live_stats_;
 }
 
 std::optional<CameraFormatConfig> CameraProducer::currentFormat() const {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     return current_format_;
 }
 
 void CameraProducer::setCurrentFormat(CameraFormatConfig fmt) {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     current_format_ = std::move(fmt);
 }
 
 void CameraProducer::recordFrameDelivered(
     std::chrono::steady_clock::time_point ts) {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     if (fps_warmed_) {
         const auto delta_s =
             std::chrono::duration<double>(ts - fps_last_ts_).count();
@@ -149,17 +149,17 @@ void CameraProducer::recordFrameDelivered(
 }
 
 void CameraProducer::recordLastError(std::string error) {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     live_stats_.last_error = std::move(error);
 }
 
 void CameraProducer::setConnectionState(ConnectionState state) {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     live_stats_.state = state;
 }
 
 std::vector<ControlSetError> CameraProducer::lastApplyErrors() const {
-    std::lock_guard<std::mutex> g(caps_mu_);
+    std::scoped_lock g(caps_mu_);
     return last_apply_errors_;
 }
 
@@ -169,17 +169,18 @@ bool CameraProducer::captureOne(
     while (isRunning()) {
         const auto result = grabFrame(out, out_capture_time);
         switch (result) {
-            case GrabResult::Ok: {
+            using enum GrabResult;
+            case Ok: {
                 const auto ts =
                     out_capture_time.value_or(std::chrono::steady_clock::now());
                 recordFrameDelivered(ts);
                 return true;
             }
-            case GrabResult::Stopping:
+            case Stopping:
                 return false;
-            case GrabResult::EndOfStream:
+            case EndOfStream:
                 return false;
-            case GrabResult::TransientError:
+            case TransientError:
                 if (!attemptReconnect()) {
                     return false;
                 }
@@ -209,7 +210,7 @@ bool CameraProducer::attemptReconnect() {
     while (isRunning()) {
         ++attempt;
         {
-            std::lock_guard<std::mutex> g(caps_mu_);
+            std::scoped_lock g(caps_mu_);
             ++live_stats_.reconnect_attempts;
         }
 
@@ -231,11 +232,11 @@ bool CameraProducer::attemptReconnect() {
             applyFormat();
             auto errors = applyControls();
             {
-                std::lock_guard<std::mutex> g(caps_mu_);
+                std::scoped_lock g(caps_mu_);
                 last_apply_errors_ = std::move(errors);
             }
             startStream();
-            std::lock_guard<std::mutex> g(caps_mu_);
+            std::scoped_lock g(caps_mu_);
             live_stats_.state = ConnectionState::Streaming;
             ++live_stats_.successful_connects;
             live_stats_.last_error.clear();
@@ -243,19 +244,19 @@ bool CameraProducer::attemptReconnect() {
         } catch (const std::exception& e) {
             try { closeDevice(); } catch (...) {}
             device_open_ = false;
-            std::lock_guard<std::mutex> g(caps_mu_);
+            std::scoped_lock g(caps_mu_);
             live_stats_.last_error = e.what();
             ++live_stats_.disconnect_count;
         } catch (...) {
             try { closeDevice(); } catch (...) {}
             device_open_ = false;
-            std::lock_guard<std::mutex> g(caps_mu_);
+            std::scoped_lock g(caps_mu_);
             live_stats_.last_error = "unknown reconnect failure";
             ++live_stats_.disconnect_count;
         }
 
         if (policy.max_attempts > 0 && attempt >= policy.max_attempts) {
-            std::lock_guard<std::mutex> g(caps_mu_);
+            std::scoped_lock g(caps_mu_);
             live_stats_.state = ConnectionState::Failed;
             return false;
         }
@@ -264,13 +265,13 @@ bool CameraProducer::attemptReconnect() {
 }
 
 void CameraProducer::resetReconnectSignal() {
-    std::lock_guard<std::mutex> lk(reconnect_mu_);
+    std::scoped_lock lk(reconnect_mu_);
     stop_signaled_ = false;
 }
 
 void CameraProducer::signalReconnectStop() {
     {
-        std::lock_guard<std::mutex> lk(reconnect_mu_);
+        std::scoped_lock lk(reconnect_mu_);
         stop_signaled_ = true;
     }
     reconnect_cv_.notify_all();
