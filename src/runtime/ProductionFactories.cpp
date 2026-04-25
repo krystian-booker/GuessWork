@@ -1,19 +1,19 @@
 #include "posest/runtime/ProductionFactories.h"
 
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 #include "posest/pipelines/AprilTagPipeline.h"
 #include "posest/pipelines/PlaceholderPipelines.h"
+#include "posest/runtime/PipelineContextHelpers.h"
 
 #if defined(POSEST_HAS_V4L2)
 #include "posest/V4L2DeviceEnumerator.h"
 #include "posest/V4L2Producer.h"
 #endif
 
-namespace posest::runtime {
-
-namespace {
+namespace posest::runtime::detail {
 
 void applyCameraCalibrationContext(
     const RuntimeConfig& runtime_config,
@@ -33,11 +33,35 @@ void applyCameraCalibrationContext(
             calibration.fy,
             calibration.cx,
             calibration.cy,
+            calibration.distortion_model,
+            calibration.distortion_coefficients,
         };
     }
 }
 
-}  // namespace
+void applyFieldLayoutContext(
+    const RuntimeConfig& runtime_config,
+    pipelines::AprilTagPipelineConfig& pipeline_config) {
+    const std::string& target_id = pipeline_config.field_layout_id.empty()
+        ? runtime_config.active_field_layout_id
+        : pipeline_config.field_layout_id;
+    if (target_id.empty()) {
+        return;
+    }
+    for (const auto& layout : runtime_config.field_layouts) {
+        if (layout.id != target_id) {
+            continue;
+        }
+        for (const auto& tag : layout.tags) {
+            pipeline_config.field_to_tags[tag.tag_id] = tag.field_to_tag;
+        }
+        break;
+    }
+}
+
+}  // namespace posest::runtime::detail
+
+namespace posest::runtime {
 
 std::shared_ptr<IFrameProducer> ProductionCameraFactory::createCamera(
     const CameraConfig& config) {
@@ -71,7 +95,8 @@ std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(
     const RuntimeConfig& runtime_config) {
     if (config.type == "apriltag") {
         auto pipeline_config = pipelines::parseAprilTagPipelineConfig(config);
-        applyCameraCalibrationContext(runtime_config, pipeline_config);
+        detail::applyCameraCalibrationContext(runtime_config, pipeline_config);
+        detail::applyFieldLayoutContext(runtime_config, pipeline_config);
         return std::make_shared<pipelines::AprilTagPipeline>(
             config.id,
             measurement_sink,

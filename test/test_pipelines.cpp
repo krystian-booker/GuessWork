@@ -14,6 +14,7 @@
 #include "posest/pipelines/AprilTagPipeline.h"
 #include "posest/pipelines/PlaceholderPipelines.h"
 #include "posest/pipelines/VisionPipelineBase.h"
+#include "posest/runtime/PipelineContextHelpers.h"
 #include "posest/runtime/ProductionFactories.h"
 #include "posest/runtime/RuntimeGraph.h"
 
@@ -138,8 +139,8 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
 
     const auto defaults = posest::pipelines::parseAprilTagPipelineConfig(config);
     EXPECT_EQ(defaults.family, "tag36h11");
-    EXPECT_EQ(defaults.nthreads, 1);
-    EXPECT_DOUBLE_EQ(defaults.quad_decimate, 2.0);
+    EXPECT_EQ(defaults.nthreads, 4);
+    EXPECT_DOUBLE_EQ(defaults.quad_decimate, 1.0);
     EXPECT_DOUBLE_EQ(defaults.tag_size_m, 0.1651);
     EXPECT_TRUE(defaults.refine_edges);
 
@@ -218,6 +219,8 @@ TEST(AprilTagPipeline, PopulatesCameraToTagWhenCalibrationIsAvailable) {
             .fy = 500.0,
             .cx = 160.0,
             .cy = 160.0,
+            .distortion_model = {},
+            .distortion_coefficients = {},
         });
     posest::pipelines::AprilTagPipeline pipeline(
         "tags",
@@ -335,4 +338,125 @@ TEST(Pipelines, RuntimeGraphFlowsCameraFramesToMeasurementBus) {
     ASSERT_TRUE(std::holds_alternative<posest::AprilTagObservation>(*measurement));
     const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
     EXPECT_EQ(observation.camera_id, "cam0");
+}
+
+namespace {
+
+posest::runtime::CameraCalibrationConfig makeRadtanCalibration(
+    std::string camera_id,
+    std::string version) {
+    posest::runtime::CameraCalibrationConfig calibration;
+    calibration.camera_id = std::move(camera_id);
+    calibration.version = std::move(version);
+    calibration.active = true;
+    calibration.source_file_path = "cam.yaml";
+    calibration.created_at = "now";
+    calibration.image_width = 320;
+    calibration.image_height = 320;
+    calibration.camera_model = "pinhole";
+    calibration.distortion_model = "radtan";
+    calibration.fx = 500.0;
+    calibration.fy = 500.0;
+    calibration.cx = 160.0;
+    calibration.cy = 160.0;
+    calibration.distortion_coefficients = {0.1, -0.05, 0.001, 0.002, 0.0};
+    return calibration;
+}
+
+posest::runtime::FieldLayoutConfig makeFieldLayout(
+    std::string id,
+    std::vector<std::pair<int, posest::Pose3d>> tags) {
+    posest::runtime::FieldLayoutConfig layout;
+    layout.id = std::move(id);
+    layout.name = layout.id;
+    for (auto& entry : tags) {
+        posest::runtime::FieldTagConfig tag;
+        tag.tag_id = entry.first;
+        tag.field_to_tag = entry.second;
+        layout.tags.push_back(tag);
+    }
+    return layout;
+}
+
+}  // namespace
+
+TEST(AprilTagPipelineContext, CalibrationCopiesDistortionFields) {
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.calibrations.push_back(makeRadtanCalibration("cam0", "v1"));
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    posest::runtime::detail::applyCameraCalibrationContext(runtime_config, pipeline_config);
+
+    ASSERT_EQ(pipeline_config.camera_calibrations.count("cam0"), 1u);
+    const auto& calibration = pipeline_config.camera_calibrations.at("cam0");
+    EXPECT_DOUBLE_EQ(calibration.fx, 500.0);
+    EXPECT_EQ(calibration.distortion_model, "radtan");
+    ASSERT_EQ(calibration.distortion_coefficients.size(), 5u);
+    EXPECT_DOUBLE_EQ(calibration.distortion_coefficients[0], 0.1);
+    EXPECT_DOUBLE_EQ(calibration.distortion_coefficients[1], -0.05);
+    EXPECT_DOUBLE_EQ(calibration.distortion_coefficients[2], 0.001);
+    EXPECT_DOUBLE_EQ(calibration.distortion_coefficients[3], 0.002);
+    EXPECT_DOUBLE_EQ(calibration.distortion_coefficients[4], 0.0);
+}
+
+TEST(AprilTagPipelineContext, FieldLayoutPopulatesActiveLayout) {
+    posest::Pose3d pose_a;
+    pose_a.translation_m = {1.0, 2.0, 3.0};
+    posest::Pose3d pose_b;
+    pose_b.translation_m = {-4.0, 5.0, -6.0};
+
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.field_layouts.push_back(
+        makeFieldLayout("2026-field", {{1, pose_a}, {2, pose_b}}));
+    runtime_config.active_field_layout_id = "2026-field";
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    posest::runtime::detail::applyFieldLayoutContext(runtime_config, pipeline_config);
+
+    ASSERT_EQ(pipeline_config.field_to_tags.size(), 2u);
+    EXPECT_DOUBLE_EQ(pipeline_config.field_to_tags.at(1).translation_m.x, 1.0);
+    EXPECT_DOUBLE_EQ(pipeline_config.field_to_tags.at(2).translation_m.z, -6.0);
+}
+
+TEST(AprilTagPipelineContext, FieldLayoutPipelineOverrideWinsOverActive) {
+    posest::Pose3d practice_pose;
+    practice_pose.translation_m = {7.0, 0.0, 0.0};
+    posest::Pose3d match_pose;
+    match_pose.translation_m = {-7.0, 0.0, 0.0};
+
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.field_layouts.push_back(makeFieldLayout("practice", {{9, practice_pose}}));
+    runtime_config.field_layouts.push_back(makeFieldLayout("match", {{9, match_pose}}));
+    runtime_config.active_field_layout_id = "match";
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    pipeline_config.field_layout_id = "practice";
+    posest::runtime::detail::applyFieldLayoutContext(runtime_config, pipeline_config);
+
+    ASSERT_EQ(pipeline_config.field_to_tags.size(), 1u);
+    EXPECT_DOUBLE_EQ(pipeline_config.field_to_tags.at(9).translation_m.x, 7.0);
+}
+
+TEST(AprilTagPipelineContext, FieldLayoutEmptyWhenUnresolved) {
+    posest::runtime::RuntimeConfig runtime_config;
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    posest::runtime::detail::applyFieldLayoutContext(runtime_config, pipeline_config);
+
+    EXPECT_TRUE(pipeline_config.field_to_tags.empty());
+}
+
+TEST(AprilTagPipelineContext, FieldLayoutUnknownIdIsSilentNoop) {
+    posest::Pose3d match_pose;
+    match_pose.translation_m = {1.0, 2.0, 3.0};
+
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.field_layouts.push_back(makeFieldLayout("match", {{1, match_pose}}));
+    runtime_config.active_field_layout_id = "match";
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    pipeline_config.field_layout_id = "ghost";
+    posest::runtime::detail::applyFieldLayoutContext(runtime_config, pipeline_config);
+
+    EXPECT_TRUE(pipeline_config.field_to_tags.empty());
 }
