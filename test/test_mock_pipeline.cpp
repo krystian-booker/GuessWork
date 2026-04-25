@@ -127,3 +127,45 @@ TEST(MockPipeline, StopJoinsAllThreadsWithinTimeout) {
     // waits for current process() call (instant here). 500ms is generous.
     EXPECT_LT(elapsed, 500ms);
 }
+
+TEST(MockPipeline, HotPreviewAttachDoesNotDisturbPrimary) {
+    // The motivating use case for dynamic subscription: a slow auxiliary
+    // consumer (mimicking a JPEG-encoding preview) attaches mid-stream and
+    // detaches later. The primary consumer's FPS must stay close to target
+    // throughout, and the auxiliary must receive at least some frames.
+    MockProducer prod(MockProducerConfig{.id = "cam", .target_fps = 60.0});
+    auto primary = std::make_shared<MockConsumer>(MockConsumerConfig{.id = "primary"});
+    auto aux = std::make_shared<MockConsumer>(MockConsumerConfig{
+        .id = "aux",
+        .processing_delay = 30ms,
+    });
+    prod.addConsumer(primary);
+
+    primary->start();
+    aux->start();
+    const auto t0 = std::chrono::steady_clock::now();
+    prod.start();
+
+    runFor(400ms);
+    prod.addConsumer(aux);
+    runFor(400ms);
+    EXPECT_TRUE(prod.removeConsumer(aux));
+    runFor(400ms);
+
+    prod.stop();
+    const auto t1 = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(50ms);
+    primary->stop();
+    aux->stop();
+
+    const double seconds = std::chrono::duration<double>(t1 - t0).count();
+    const auto ps = primary->snapshot();
+    const auto as = aux->snapshot();
+
+    const double primary_fps =
+        static_cast<double>(ps.frames_received) / seconds;
+    EXPECT_GE(primary_fps, 60.0 * 0.7)
+        << "primary should have run unimpeded across attach/detach";
+    EXPECT_GT(as.frames_received, 0u)
+        << "auxiliary attached mid-stream should have received frames";
+}

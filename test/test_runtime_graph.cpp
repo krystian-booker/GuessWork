@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -21,13 +22,31 @@ public:
         consumers.push_back(std::move(consumer));
     }
 
-    void start() override { started = true; }
-    void stop() override { stopped = true; }
+    bool removeConsumer(const std::shared_ptr<posest::IFrameConsumer>& consumer) override {
+        auto it = std::find(consumers.begin(), consumers.end(), consumer);
+        if (it == consumers.end()) {
+            return false;
+        }
+        consumers.erase(it);
+        return true;
+    }
+
+    void start() override {
+        started = true;
+        state_ = posest::ProducerState::Running;
+    }
+    void stop() override {
+        stopped = true;
+        state_ = posest::ProducerState::Idle;
+    }
+
+    posest::ProducerState state() const override { return state_; }
 
     std::string id_;
     std::vector<std::shared_ptr<posest::IFrameConsumer>> consumers;
     bool started{false};
     bool stopped{false};
+    posest::ProducerState state_{posest::ProducerState::Idle};
 };
 
 class RecordingPipeline final : public posest::runtime::IVisionPipeline {

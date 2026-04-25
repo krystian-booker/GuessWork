@@ -15,7 +15,7 @@ namespace posest {
 // Subclasses implement process(const Frame&), which runs on the consumer's
 // own worker thread. Subclasses must NOT assume they see every frame: the
 // mailbox drops unread frames when a newer one arrives.
-class ConsumerBase : public IFrameConsumer {
+class ConsumerBase : public virtual IFrameConsumer {
 public:
     explicit ConsumerBase(std::string id);
     ~ConsumerBase() override;

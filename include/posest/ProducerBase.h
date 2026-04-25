@@ -33,11 +33,15 @@ public:
 
     const std::string& id() const override { return id_; }
 
-    // Must be called before start(). Safe to call multiple times.
+    // Safe to call at any time, including while the producer is running.
+    // The capture loop refreshes its subscriber snapshot every frame.
     void addConsumer(std::shared_ptr<IFrameConsumer> consumer) override;
+    bool removeConsumer(const std::shared_ptr<IFrameConsumer>& consumer) override;
 
     void start() override;
     void stop() override;
+
+    ProducerState state() const override { return state_.load(std::memory_order_acquire); }
 
     std::uint64_t producedCount() const { return produced_.load(); }
 
@@ -69,17 +73,19 @@ protected:
 
     // Hook for subclasses that want to check the running flag themselves
     // (e.g. to break out of a blocking read). Base calls this in the loop.
-    bool isRunning() const { return running_.load(std::memory_order_acquire); }
+    bool isRunning() const {
+        return state_.load(std::memory_order_acquire) == ProducerState::Running;
+    }
 
 private:
     void runLoop();
 
     std::string id_;
     std::vector<std::shared_ptr<IFrameConsumer>> consumers_;
-    std::mutex consumers_mu_;  // guards only addConsumer vs. runLoop's snapshot
+    std::mutex consumers_mu_;  // guards consumers_ across add/remove and the per-frame snapshot in runLoop
 
     std::thread worker_;
-    std::atomic<bool> running_{false};
+    std::atomic<ProducerState> state_{ProducerState::Idle};
     std::atomic<std::uint64_t> produced_{0};
     std::uint64_t next_sequence_{0};
 };

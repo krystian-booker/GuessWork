@@ -36,6 +36,11 @@ public:
     // capabilities()/setControl() without sprinkling dynamic_pointer_cast.
     std::vector<std::shared_ptr<CameraProducer>> cameraProducers() const;
 
+    // Ids of cameras whose capture loops have exited on their own
+    // (EndOfStream or Failed). Empty when every camera is Idle or Running.
+    // Cheap; intended for periodic health polling.
+    std::vector<std::string> deadProducers() const;
+
 private:
     RuntimeConfig config_;
     ICameraBackendFactory& camera_factory_;

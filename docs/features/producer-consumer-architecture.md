@@ -1,6 +1,6 @@
 # Producer/Consumer Architecture
 
-**Status:** Core plumbing is feature-complete for static graphs. The multi-threading model, drop-oldest mailbox, and 1-to-many fan-out all match the stated latency and topology requirements. The primary gap is **dynamic subscription** — the subscriber list is frozen at `start()`, which blocks the "attach a live video feed consumer on demand" use case without a restart.
+**Status:** Core plumbing is feature-complete and now supports **dynamic subscription**: `addConsumer()` / `removeConsumer()` may be called at any time, including while a producer is running. `ProducerBase` also exposes a `state()` enum so the graph can detect a capture loop that exited on its own. The remaining gap is the user-facing **video-preview consumer** (`PreviewConsumer`) and its declarative binding entry — both deferred until an HTTP server is wired into `WebService`.
 
 This document covers the subsystem that moves `Frame` objects from any source (camera, mock, future file replay) to any sink (vision pipelines, calibration recorder, future video-preview feed). Camera-specific lifecycle and backend details live in [`camera-producer.md`](camera-producer.md); this document stays one layer up — the generic plumbing that all producers and consumers share.
 
@@ -161,13 +161,13 @@ The fan-out mechanics are the same whether there's 1 or 10 consumers: the produc
 
 ### 4.2 The "attach a video preview" use case
 
-The explicit motivating case is a **display consumer** that streams frames to the web UI for live preview. The architecture supports this semantically: the preview is just another `IFrameConsumer` subscribed to the camera. The display consumer would:
+The explicit motivating case is a **display consumer** that streams frames to the web UI for live preview. The architecture now supports this end-to-end: the preview is just another `IFrameConsumer` subscribed to the camera, and §5.1's live subscriber list lets it attach/detach on demand without restarting the camera. The display consumer would:
 
 - Accept a frame in `deliver()` → put it in its own `LatestFrameSlot`.
 - A worker thread takes the latest frame, JPEG-encodes it (or hands it to an MJPEG HTTP endpoint), and streams it.
 - If encoding is slow, its mailbox drops stale frames; the primary vision pipeline attached to the same camera is untouched.
 
-**Today this is not wired up.** There is no `DisplayConsumer` / `VideoPreviewConsumer` implementation and no binding in `RuntimeConfig` for non-pipeline consumers. See §6.
+**The plumbing is ready; the consumer itself isn't.** There is still no `PreviewConsumer` / `DisplayConsumer` implementation, and `WebService` has no HTTP server to host an MJPEG endpoint. Both are deferred together (see §6.2).
 
 ---
 
@@ -188,22 +188,25 @@ The explicit motivating case is a **display consumer** that streams frames to th
 
 This ordering is what the test suite uses (`test/test_mock_pipeline.cpp`). Base destructors (`ProducerBase::~ProducerBase`, `ConsumerBase::~ConsumerBase`) both call `stop()` as a safety net, but explicit ordering is required for deterministic teardown — destruction order of members in `RuntimeGraph` is not what you want to rely on.
 
-### 5.1 Wiring contract: addConsumer before start
+### 5.1 Subscriber list is live (hot attach/detach supported)
 
-`ProducerBase::runLoop()` snapshots the consumer list once at the top of the loop:
+`ProducerBase::runLoop()` refreshes the subscriber snapshot under `consumers_mu_` *each frame*:
 
 ```cpp
 std::vector<std::shared_ptr<IFrameConsumer>> subscribers;
-{
-    std::lock_guard<std::mutex> g(consumers_mu_);
-    subscribers = consumers_;
+while (state_.load(std::memory_order_acquire) == ProducerState::Running) {
+    // captureOne() / timestamp / sequence ...
+    {
+        std::lock_guard<std::mutex> g(consumers_mu_);
+        subscribers = consumers_;
+    }
+    for (auto& c : subscribers) c->deliver(pub);
 }
-while (running_.load(std::memory_order_acquire)) { ... }
 ```
 
-After `start()` returns, **hot-adding or removing consumers is not supported.** `addConsumer()` still takes the lock, so calling it during capture won't corrupt memory — it just won't have any effect on the live snapshot. This is the design choice referenced in `CLAUDE.md` and documented in `IFrameProducer.h:13`: "Wiring (addConsumer) must happen before start()."
+Cost: one uncontended mutex acquisition + a small `vector<shared_ptr>` copy per captured frame. At 6 cameras × 60 FPS this is ~360 acquires/sec — well below any threshold that affects capture latency.
 
-This is the primary gap for the "attach a live preview on demand" use case (see §6.1).
+`addConsumer()` and `removeConsumer()` are safe to call at any time, including from another thread while the producer is running. Consumer identity is by `shared_ptr` equality (`removeConsumer()` returns `false` if the pointer is unknown). Frames already pushed into a removed consumer's mailbox are not recalled — the caller still owns the consumer's `start()` / `stop()` lifecycle. The end-to-end attach/detach behavior is exercised by `MockPipeline.HotPreviewAttachDoesNotDisturbPrimary` and three `ProducerBase.HotAdd…` / `HotRemove…` / `AddRemoveDuringCaptureDoesNotDeadlock` tests.
 
 ---
 
@@ -212,68 +215,91 @@ This is the primary gap for the "attach a live preview on demand" use case (see 
 | Requirement | Status | Notes |
 |-------------|--------|-------|
 | One thread per producer | ✅ Complete | `ProducerBase::worker_` per producer. |
-| One thread per consumer | ✅ Complete | `ConsumerBase::worker_` (and `VisionPipelineBase::worker_`, `CalibrationRecorder::worker_`). |
+| One thread per consumer | ✅ Complete | `ConsumerBase::worker_` (now also serves `VisionPipelineBase`; see §6.4). `CalibrationRecorder` still rolls its own worker. |
 | Minimal latency — only keep newest frame | ✅ Complete | `LatestFrameSlot` drop-oldest, per-consumer. |
 | Producer never blocked by slow consumer | ✅ Complete | Enforced by `put()` non-blocking + `deliver()` contract. Verified in `test_mock_pipeline.cpp`. |
 | Scales to ~6 producers | ✅ Complete | Independent, no shared state between producers. No structural limit. |
-| 1-to-many fan-out | ✅ Complete for static graphs | Subscriber list is fixed at `start()`. |
-| **Dynamic subscribe/unsubscribe (e.g. live preview attach)** | ❌ Missing | Snapshot-at-start is explicit non-goal today. |
-| **Video-preview consumer implementation** | ❌ Missing | No `DisplayConsumer` class, no config binding for non-pipeline consumers. |
+| 1-to-many fan-out | ✅ Complete | Static and dynamic. Per-frame mutex-protected snapshot in `runLoop`. |
+| Dynamic subscribe/unsubscribe (e.g. live preview attach) | ✅ Complete | `addConsumer()` / `removeConsumer()` are safe at any time. See §6.1. |
+| Plumbing dedupe (`VisionPipelineBase` ↔ `ConsumerBase`) | ✅ Complete | `VisionPipelineBase` now inherits `ConsumerBase`. See §6.4. |
+| Producer-died telemetry | 🚧 Partial | `ProducerState` enum + `state()` and the `ProducerBase` state machine are wired; `RuntimeGraph::deadProducers()` is declared but its implementation, the warn-log on graph stop, and dedicated tests are still pending. See §6.5. |
+| **Video-preview consumer implementation** | ❌ Deferred | No `PreviewConsumer` class; `WebService` has no HTTP server to host MJPEG yet. Co-deferred with non-pipeline binding scaffolding (§6.3). |
+| Declarative non-pipeline bindings in `RuntimeConfig` | ❌ Deferred | Co-motivated by preview; design once a concrete consumer exists. |
 | Cross-camera timestamp domain | ✅ Complete | `steady_clock` enforced by `ProducerBase`. |
 | Shutdown ordering / clean teardown | ✅ Complete | `RuntimeGraph` + base destructors + tests. |
 
-### 6.1 Dynamic subscription for live preview — **MISSING**
+### 6.1 Dynamic subscription for live preview — **DONE**
 
-The limiting factor for a user-facing video feed is §5.1. A preview consumer that attaches when the frontend opens a page and detaches when it closes cannot be done today without stopping and restarting the camera. There are two reasonable shapes for the fix:
+Resolved with **Option A** (mutex-protected live list). `IFrameProducer` gained `removeConsumer(const std::shared_ptr<IFrameConsumer>&) -> bool`, and `ProducerBase::runLoop` now refreshes its subscriber snapshot under `consumers_mu_` once per captured frame (see §5.1 for the body). Identity is by `shared_ptr` equality; double-removes return `false`.
 
-**Option A — mutex-protected live list.** Make `ProducerBase::runLoop` re-read the subscriber list each iteration under the mutex. Cost: one lock per frame per producer (~500 ns). Benefit: simplest API. `addConsumer()` and a new `removeConsumer()` just work, no restart needed.
+Test coverage:
 
-**Option B — RCU-style snapshot swap.** Keep the snapshot in the hot loop, but publish an atomic `shared_ptr<vector<shared_ptr<IFrameConsumer>>>` that `runLoop` loads once per frame with `std::memory_order_acquire`. `addConsumer` / `removeConsumer` allocate a new vector and store it. No lock on the hot path.
+- `ProducerBase.HotAddConsumerSeesOnlyFramesAfterAttach` — late-attaching consumer's first observed sequence is ≥ the producer's frame count at the moment of attach.
+- `ProducerBase.HotRemoveConsumerStopsReceiving` — after `removeConsumer` returns and a brief drain window, the removed consumer receives no further frames.
+- `ProducerBase.RemoveConsumerNotPresentReturnsFalse` — bool contract.
+- `ProducerBase.AddRemoveDuringCaptureDoesNotDeadlock` — random attach/detach churn at 240 FPS for 300 ms; primary consumer's FPS stays ≥ 50 % of target, no deadlock.
+- `MockPipeline.HotPreviewAttachDoesNotDisturbPrimary` — end-to-end: a slow auxiliary consumer attaches mid-stream, runs 400 ms, detaches; the primary consumer's FPS stays ≥ 70 % of 60 FPS across both windows.
 
-Either is a small change — the harder work is the API question (should `removeConsumer` be by-id or by-pointer? what is the contract for frames already in flight to the removed consumer?).
-
-Once this lands, the "attach a preview" feature becomes:
+The "attach a preview on demand" sequence the architecture now permits:
 
 1. UI opens video feed page.
-2. Web service creates a `DisplayConsumer` (new class), starts it, and calls `camera->addConsumer(display)`.
-3. UI closes page. Web service calls `camera->removeConsumer(display)`, stops it.
+2. Web service creates a `PreviewConsumer` (still to be built — see §6.2), starts it, and calls `camera->addConsumer(preview)`.
+3. UI closes page. Web service calls `camera->removeConsumer(preview)`, stops it.
 4. Camera keeps running; the primary pipeline is untouched.
 
-### 6.2 Video-preview consumer — **MISSING**
+### 6.2 Video-preview consumer — **DEFERRED**
 
-No `DisplayConsumer` / `VideoPreviewConsumer` / MJPEG-over-HTTP streamer exists in the codebase. `posest::runtime::WebService` exists but serves config and telemetry, not frames. Building this is a small implementation once §6.1 lands.
+No `PreviewConsumer` / MJPEG-over-HTTP streamer exists yet. `posest::runtime::WebService` is currently a thin holder for config + telemetry state — it has no HTTP server, no route table, and no streaming endpoint. The implementation is deferred until that HTTP layer lands; without it, a `PreviewConsumer` would have no way to expose its encoded frames.
 
-Suggested shape:
+§6.1 has unblocked the plumbing side: a future `PreviewConsumer` can attach/detach against a running camera at will. The remaining work is:
 
-```cpp
-class PreviewConsumer final : public ConsumerBase {
-public:
-    explicit PreviewConsumer(std::string id, int jpeg_quality = 70);
-    // Called by HTTP handlers; blocks until next frame or timeout.
-    std::optional<std::vector<unsigned char>> nextEncodedFrame(
-        std::chrono::milliseconds timeout);
-protected:
-    void process(const Frame& f) override;  // encode to JPEG, stash in mailbox
-};
-```
+1. Pick and add an HTTP library (cpp-httplib is the lightest fit) to `conanfile.txt`.
+2. Extend `WebService` with route registration and a chunked / `multipart/x-mixed-replace` response path.
+3. Implement the `PreviewConsumer` itself. Suggested shape:
 
-This keeps encoding on the consumer's own thread, off the producer thread — consistent with the latency contract.
+   ```cpp
+   class PreviewConsumer final : public ConsumerBase {
+   public:
+       explicit PreviewConsumer(std::string id, int jpeg_quality = 70);
+       // Called by HTTP handlers; blocks until next frame or timeout.
+       std::optional<std::vector<unsigned char>> nextEncodedFrame(
+           std::chrono::milliseconds timeout);
+   protected:
+       void process(const Frame& f) override;  // encode to JPEG, stash in mailbox
+   };
+   ```
 
-### 6.3 Non-pipeline bindings in `RuntimeConfig` — **MISSING**
+   Encoding stays on the consumer's own thread, off the producer thread — consistent with the latency contract.
 
-`RuntimeConfig::bindings` only supports camera → vision pipeline. Auxiliary consumers like the calibration recorder are wired up imperatively in `Daemon.cpp:606` (they bypass `RuntimeGraph`). A preview consumer could follow the same pattern, but if we want preview consumers to be declarative (e.g. always-on low-res thumbnail stream per camera), the binding model needs a second consumer category.
+### 6.3 Non-pipeline bindings in `RuntimeConfig` — **DEFERRED (with §6.2)**
 
-Low priority: the imperative attach path from the web service is probably the right primary mode for preview anyway.
+`RuntimeConfig::bindings` still only models camera → vision pipeline. Auxiliary consumers like the calibration recorder are wired imperatively in `Daemon.cpp:613–664` (the `RecordKalibrDataset` one-shot CLI), and that pattern is the right home for them — they're not part of the long-running runtime graph.
 
-### 6.4 Plumbing-level duplication: `ConsumerBase` vs. `VisionPipelineBase`
+The only motivation for a declarative non-pipeline binding category is preview ("always-on low-res thumbnail stream per camera"). Without `PreviewConsumer` (§6.2), there is no concrete consumer to bind, so the data-model design is deferred alongside §6.2. Note that the imperative attach path from a future web service is probably the right primary mode for preview anyway.
 
-`VisionPipelineBase` (`src/pipelines/VisionPipelineBase.cpp`) reimplements the exact same `thread + LatestFrameSlot + deliver/put/take/process` pattern that `ConsumerBase` already provides. The only real difference is `VisionPipelineBase` also carries an `IMeasurementSink&` and exposes `type()`. This should probably inherit from `ConsumerBase` and drop the duplicated plumbing.
+### 6.4 Plumbing-level duplication: `ConsumerBase` vs. `VisionPipelineBase` — **DONE**
 
-Not a correctness issue, but a cleanup that would pay off every time we add a new kind of consumer. Low priority.
+`VisionPipelineBase` now inherits `ConsumerBase` and only carries `type_` and `IMeasurementSink&`. The duplicated `thread + LatestFrameSlot + deliver/put/take/process` plumbing was removed; `process()` is overridden once with `final` to forward to the existing `processFrame()` hook so concrete pipelines (`AprilTagPipeline`, placeholder pipelines) compile unchanged. To resolve the diamond on `IFrameConsumer` between `ConsumerBase` and `runtime::IVisionPipeline`, both bases now use `public virtual IFrameConsumer`. The `posest_pipelines` and `posest_runtime_graph` test suites pass without modification.
 
-### 6.5 No producer-side telemetry for "I died"
+### 6.5 Producer-side telemetry for "I died" — **PARTIAL**
 
-When a producer's `captureOne()` returns `false` (end-of-stream, disconnect), the capture thread exits silently. Consumers continue to wait on empty mailboxes forever. There is no `IFrameProducer::isAlive()` / `connectionState()` method and no callback to the graph. This is discussed in more depth in [`camera-producer.md`](camera-producer.md) §6.2 — it's a camera-lifecycle concern more than a plumbing one, but the plumbing could help by exposing a "producer stopped on its own" signal.
+`IFrameProducer` now exposes `ProducerState state() const`, with values `Idle | Running | EndOfStream | Failed`. `ProducerBase` owns a `std::atomic<ProducerState>` that:
+
+- starts at `Idle`,
+- transitions `Idle → Running` via CAS in `start()` (rejecting restart from terminal states),
+- writes `EndOfStream` (via `Running → EndOfStream` CAS) when `captureOne()` returns `false`,
+- writes `Failed` (via `Running → Failed` CAS) when `captureOne()` propagates an exception,
+- returns to `Idle` in `stop()`, joining the worker thread either way (terminal-state stops still join cleanly).
+
+The CAS guards ensure that a concurrent `stop()` always wins — operators who explicitly stopped don't see a spurious `EndOfStream`/`Failed` afterwards. Consumers' mailboxes still need to be `stop()`'d by the owner; `state()` is what surfaces "the producer left on its own" to the polling caller.
+
+**Still pending (small):**
+
+- `RuntimeGraph::deadProducers()` is declared in the header but the body is not implemented yet; once implemented it will scan `cameras_` and return the ids whose `state()` is `EndOfStream` or `Failed`.
+- `RuntimeGraph::stop()` should warn-log when a camera is already in a terminal state at shutdown so silent deaths surface even when nothing was polling.
+- Dedicated tests for the new state machine (`StateRunningWhileCapturing`, `StateBecomesEndOfStreamWhenCaptureOneReturnsFalse`, `StateBecomesFailedOnException`, `StopJoinsCleanlyAfterEndOfStream`).
+
+The deeper camera-lifecycle discussion still lives in [`camera-producer.md`](camera-producer.md) §6.2; this section covers only the plumbing-level signal.
 
 ### 6.6 Decode-on-producer-thread tradeoff (informational, not a gap)
 
@@ -285,9 +311,9 @@ MJPEG decode happens on the producer thread (`V4L2Producer::grabFrame`), so the 
 
 The core plumbing (interfaces, base classes, drop-oldest mailbox, fan-out, startup/shutdown, timestamp discipline) implements the stated requirements cleanly. Multi-producer scales trivially because nothing is shared between producers; 1-to-many fan-out is a first-class feature and its isolation properties are covered by tests.
 
-The meaningful gap for the planned product is **dynamic subscription** — the subscriber list is frozen at `start()` by design. This blocks the "attach a live preview on demand" use case without a camera restart. Fixing it is a small, localized change to `ProducerBase::runLoop` plus a `removeConsumer()` method on `IFrameProducer`. Once that lands, building the video-preview consumer is a straightforward consumer implementation that encodes frames off the producer thread and streams them over HTTP.
+Dynamic subscription (§6.1) and the `VisionPipelineBase` / `ConsumerBase` dedupe (§6.4) have landed. Producer-side state telemetry (§6.5) is partially in: the `ProducerState` enum and the `ProducerBase` state machine are wired and CAS-safe against concurrent `stop()`, but the `RuntimeGraph::deadProducers()` body, the warn-log on graph stop, and the dedicated tests are still pending.
 
-Everything else flagged (plumbing duplication, producer-death telemetry, declarative non-pipeline bindings) is cleanup rather than capability.
+The remaining product-visible gap is the user-facing **video-preview consumer** (§6.2). The plumbing is ready for it, but it can't ship until `WebService` grows an HTTP server to host an MJPEG endpoint. Declarative non-pipeline bindings (§6.3) are co-deferred with §6.2 — without a concrete preview consumer there's nothing to bind.
 
 ---
 

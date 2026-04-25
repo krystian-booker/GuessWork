@@ -12,6 +12,7 @@
 
 #include "posest/ConsumerBase.h"
 #include "posest/Frame.h"
+#include "posest/MockProducer.h"
 #include "posest/ProducerBase.h"
 
 using namespace std::chrono_literals;
@@ -272,4 +273,134 @@ TEST(ProducerBase, FallbackStampsWithSteadyClockNowWhenSubclassOmits) {
         EXPECT_GE(o.capture_time, before);
         EXPECT_LE(o.capture_time, after);
     }
+}
+
+TEST(ProducerBase, HotAddConsumerSeesOnlyFramesAfterAttach) {
+    // Attach a consumer after start() has already begun fanning out. Its first
+    // observed sequence must be strictly greater than the producer's frame
+    // count at the moment it was attached.
+    posest::mock::MockProducer prod(
+        posest::mock::MockProducerConfig{.id = "cam", .target_fps = 240.0});
+    auto pre = std::make_shared<RecordingConsumer>("pre");
+    prod.addConsumer(pre);
+
+    pre->start();
+    prod.start();
+    std::this_thread::sleep_for(50ms);
+
+    const auto produced_at_attach = prod.producedCount();
+    auto late = std::make_shared<RecordingConsumer>("late");
+    late->start();
+    prod.addConsumer(late);
+
+    std::this_thread::sleep_for(100ms);
+    prod.stop();
+    std::this_thread::sleep_for(10ms);
+    pre->stop();
+    late->stop();
+
+    const auto late_obs = late->take();
+    ASSERT_FALSE(late_obs.empty()) << "hot-attached consumer received nothing";
+    EXPECT_GE(late_obs.front().sequence, produced_at_attach)
+        << "hot-attached consumer must not see frames captured before attach";
+}
+
+TEST(ProducerBase, HotRemoveConsumerStopsReceiving) {
+    posest::mock::MockProducer prod(
+        posest::mock::MockProducerConfig{.id = "cam", .target_fps = 240.0});
+    auto a = std::make_shared<RecordingConsumer>("a");
+    auto b = std::make_shared<RecordingConsumer>("b");
+    prod.addConsumer(a);
+    prod.addConsumer(b);
+
+    a->start();
+    b->start();
+    prod.start();
+    std::this_thread::sleep_for(50ms);
+
+    const bool removed = prod.removeConsumer(a);
+    EXPECT_TRUE(removed);
+
+    // Drain window: at most one frame may have been mid-fan-out when remove
+    // returned, and one frame may sit in a's mailbox waiting for its worker.
+    std::this_thread::sleep_for(50ms);
+    const std::size_t a_count_after_drain = a->take().size();
+
+    std::this_thread::sleep_for(200ms);
+    prod.stop();
+    std::this_thread::sleep_for(10ms);
+    a->stop();
+    b->stop();
+
+    const auto a_final = a->take();
+    const auto b_final = b->take();
+    EXPECT_EQ(a_final.size(), a_count_after_drain)
+        << "removed consumer kept receiving frames";
+    EXPECT_GT(b_final.size(), a_count_after_drain + 30u)
+        << "remaining consumer should have kept receiving";
+}
+
+TEST(ProducerBase, RemoveConsumerNotPresentReturnsFalse) {
+    CountingProducer prod("cam", 1);
+    auto a = std::make_shared<RecordingConsumer>("a");
+    auto stranger = std::make_shared<RecordingConsumer>("stranger");
+    prod.addConsumer(a);
+
+    EXPECT_FALSE(prod.removeConsumer(stranger));
+    EXPECT_TRUE(prod.removeConsumer(a));
+    EXPECT_FALSE(prod.removeConsumer(a)) << "double-remove must report false";
+}
+
+TEST(ProducerBase, AddRemoveDuringCaptureDoesNotDeadlock) {
+    posest::mock::MockProducer prod(
+        posest::mock::MockProducerConfig{.id = "cam", .target_fps = 240.0});
+    auto primary = std::make_shared<RecordingConsumer>("primary");
+    prod.addConsumer(primary);
+
+    primary->start();
+    const auto t0 = std::chrono::steady_clock::now();
+    prod.start();
+
+    std::atomic<bool> stop_churn{false};
+    std::thread churn([&] {
+        std::vector<std::shared_ptr<RecordingConsumer>> live;
+        std::uint64_t i = 0;
+        while (!stop_churn.load(std::memory_order_acquire)) {
+            // Toggle between attach and detach.
+            if ((i & 1u) == 0) {
+                auto c = std::make_shared<RecordingConsumer>(
+                    "transient_" + std::to_string(i));
+                c->start();
+                prod.addConsumer(c);
+                live.push_back(c);
+            } else if (!live.empty()) {
+                auto c = live.back();
+                live.pop_back();
+                prod.removeConsumer(c);
+                c->stop();
+            }
+            ++i;
+            std::this_thread::sleep_for(2ms);
+        }
+        for (auto& c : live) {
+            prod.removeConsumer(c);
+            c->stop();
+        }
+    });
+
+    std::this_thread::sleep_for(300ms);
+    stop_churn.store(true, std::memory_order_release);
+    churn.join();
+
+    prod.stop();
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    std::this_thread::sleep_for(10ms);
+    primary->stop();
+
+    const double seconds = std::chrono::duration<double>(elapsed).count();
+    const double primary_fps =
+        static_cast<double>(primary->take().size()) / seconds;
+    // Concurrent add/remove must not throttle the producer below ~80% of target.
+    EXPECT_GE(primary_fps, 240.0 * 0.5)
+        << "subscriber churn starved the primary consumer";
 }

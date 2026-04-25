@@ -1,5 +1,6 @@
 #include "posest/runtime/RuntimeGraph.h"
 
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
 

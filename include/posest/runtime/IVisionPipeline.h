@@ -6,7 +6,7 @@
 
 namespace posest::runtime {
 
-class IVisionPipeline : public IFrameConsumer {
+class IVisionPipeline : public virtual IFrameConsumer {
 public:
     ~IVisionPipeline() override = default;
 
