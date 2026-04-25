@@ -93,6 +93,19 @@ void RuntimeGraph::start() {
     running_ = true;
 }
 
+std::vector<std::shared_ptr<posest::CameraProducer>>
+RuntimeGraph::cameraProducers() const {
+    std::vector<std::shared_ptr<posest::CameraProducer>> out;
+    out.reserve(cameras_.size());
+    for (const auto& entry : cameras_) {
+        if (auto camera =
+                std::dynamic_pointer_cast<posest::CameraProducer>(entry.second)) {
+            out.push_back(std::move(camera));
+        }
+    }
+    return out;
+}
+
 void RuntimeGraph::stop() {
     if (!running_) {
         return;

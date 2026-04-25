@@ -66,6 +66,13 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
             require(controls.insert(control.name).second,
                     "camera '" + camera.id + "' has duplicate control: " + control.name);
         }
+
+        // trigger_mode is a typed enum so any in-range value is acceptable;
+        // round-tripping through the canonical string vocabulary catches a
+        // bit-pattern that would not survive serialization.
+        require(triggerModeFromString(triggerModeToString(camera.trigger_mode))
+                    .has_value(),
+                "camera '" + camera.id + "' has invalid trigger_mode");
     }
 
     std::unordered_map<std::string, bool> pipelines_enabled;

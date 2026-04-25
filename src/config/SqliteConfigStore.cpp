@@ -219,7 +219,8 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
     {
         Statement stmt(
             db_,
-            "SELECT id, backend_type, device, enabled, width, height, fps, pixel_format "
+            "SELECT id, backend_type, device, enabled, width, height, fps, pixel_format, "
+            "trigger_mode, reconnect_interval_ms, reconnect_max_attempts "
             "FROM cameras ORDER BY id");
         while (stmt.stepRow()) {
             CameraConfig camera;
@@ -231,6 +232,17 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             camera.format.height = stmt.columnInt(5);
             camera.format.fps = stmt.columnDouble(6);
             camera.format.pixel_format = stmt.columnText(7);
+            const std::string trigger_text = stmt.columnText(8);
+            const auto parsed_trigger = triggerModeFromString(trigger_text);
+            if (!parsed_trigger) {
+                throw std::runtime_error(
+                    "SQLite cameras row has invalid trigger_mode: " + trigger_text);
+            }
+            camera.trigger_mode = *parsed_trigger;
+            camera.reconnect.interval_ms =
+                checkedUint32(stmt.columnInt64(9), "reconnect_interval_ms");
+            camera.reconnect.max_attempts =
+                checkedUint32(stmt.columnInt64(10), "reconnect_max_attempts");
             camera_index.emplace(camera.id, config.cameras.size());
             config.cameras.push_back(std::move(camera));
         }
@@ -512,8 +524,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         Statement insert(
             db_,
             "INSERT INTO cameras "
-            "(id, backend_type, device, enabled, width, height, fps, pixel_format) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            "(id, backend_type, device, enabled, width, height, fps, pixel_format, "
+            " trigger_mode, reconnect_interval_ms, reconnect_max_attempts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, camera.id);
         insert.bindText(2, camera.type);
         insert.bindText(3, camera.device);
@@ -522,6 +535,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindInt(6, camera.format.height);
         insert.bindDouble(7, camera.format.fps);
         insert.bindText(8, camera.format.pixel_format);
+        insert.bindText(9, triggerModeToString(camera.trigger_mode));
+        insert.bindInt64(10, static_cast<sqlite3_int64>(camera.reconnect.interval_ms));
+        insert.bindInt64(11, static_cast<sqlite3_int64>(camera.reconnect.max_attempts));
         insert.stepDone();
     }
 

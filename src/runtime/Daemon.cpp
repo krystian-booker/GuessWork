@@ -456,11 +456,26 @@ std::string healthToJson(const DaemonHealth& health) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(now - *timestamp).count();
     };
 
+    nlohmann::json cameras_json = nlohmann::json::array();
+    for (const auto& camera : health.cameras) {
+        cameras_json.push_back({
+            {"camera_id", camera.camera_id},
+            {"state", connectionStateToString(camera.live.state)},
+            {"disconnect_count", camera.live.disconnect_count},
+            {"reconnect_attempts", camera.live.reconnect_attempts},
+            {"successful_connects", camera.live.successful_connects},
+            {"measured_fps", camera.live.measured_fps},
+            {"last_frame_age_ms", ageMs(camera.live.last_frame_time)},
+            {"last_error", camera.live.last_error},
+        });
+    }
+
     nlohmann::json out = {
         {"state", daemonStateName(health.state)},
         {"config_path", health.config_path},
         {"camera_count", health.camera_count},
         {"pipeline_count", health.pipeline_count},
+        {"cameras", cameras_json},
         {"measurements_dropped", health.measurements_dropped},
         {"measurements_processed", health.measurements_processed},
         {"stale_measurements", health.stale_measurements},
@@ -851,6 +866,15 @@ DaemonHealth DaemonController::health() const {
 }
 
 void DaemonController::refreshHealth() {
+    std::vector<CameraLiveStats> camera_stats;
+    if (graph_) {
+        const auto camera_producers = graph_->cameraProducers();
+        camera_stats.reserve(camera_producers.size());
+        for (const auto& camera : camera_producers) {
+            camera_stats.push_back({camera->id(), camera->liveStats()});
+        }
+    }
+
     std::lock_guard<std::mutex> g(mu_);
     if (graph_) {
         health_.camera_count = graph_->cameraCount();
@@ -868,6 +892,7 @@ void DaemonController::refreshHealth() {
     if (teensy_) {
         health_.teensy = teensy_->stats();
     }
+    health_.cameras = std::move(camera_stats);
 }
 
 void DaemonController::markFailed(const std::string& error) {

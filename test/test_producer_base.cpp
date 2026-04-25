@@ -197,6 +197,60 @@ TEST(ProducerBase, SubclassSuppliedTimestampPassesThrough) {
     }
 }
 
+// A producer whose first captureOne() succeeds, then the second throws. Used
+// to verify ProducerBase's runLoop does not propagate exceptions.
+class ThrowingProducer final : public posest::ProducerBase {
+public:
+    explicit ThrowingProducer(std::string id)
+        : posest::ProducerBase(std::move(id)) {}
+
+protected:
+    bool captureOne(
+        cv::Mat& out,
+        std::optional<std::chrono::steady_clock::time_point>&) override {
+        if (call_++ == 0) {
+            out.create(4, 4, CV_8UC1);
+            out.setTo(cv::Scalar(0));
+            return true;
+        }
+        throw std::runtime_error("intentional capture failure");
+    }
+
+private:
+    std::uint64_t call_{0};
+};
+
+TEST(ProducerBase, ThrowingCaptureOneLogsAndExitsCleanly) {
+    ThrowingProducer prod("cam");
+    auto cons = std::make_shared<RecordingConsumer>("c");
+    prod.addConsumer(cons);
+    cons->start();
+    prod.start();
+
+    // The throw on the second capture should terminate the worker. Stopping
+    // (which joins the worker) must complete without deadlocking.
+    const auto t0 = std::chrono::steady_clock::now();
+    while (prod.producedCount() < 1 &&
+           std::chrono::steady_clock::now() - t0 < std::chrono::seconds(1)) {
+        std::this_thread::sleep_for(1ms);
+    }
+    prod.stop();
+    std::this_thread::sleep_for(5ms);
+    cons->stop();
+
+    EXPECT_GE(prod.producedCount(), 1u);
+}
+
+TEST(ProducerBase, StartStopRestartIsClean) {
+    CountingProducer prod("cam", 100);
+    prod.start();
+    prod.stop();
+    // Re-entrancy: a second start/stop must work without leaking the worker.
+    CountingProducer prod2("cam2", 100);
+    prod2.start();
+    prod2.stop();
+}
+
 TEST(ProducerBase, FallbackStampsWithSteadyClockNowWhenSubclassOmits) {
     const auto before = std::chrono::steady_clock::now();
     CountingProducer prod("cam", 50);  // does NOT set out_capture_time

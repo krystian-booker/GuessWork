@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "posest/CameraProducer.h"
 #include "posest/MeasurementBus.h"
 #include "posest/runtime/Factories.h"
 #include "posest/runtime/RuntimeConfig.h"
@@ -29,6 +30,11 @@ public:
 
     std::size_t cameraCount() const { return cameras_.size(); }
     std::size_t pipelineCount() const { return pipelines_.size(); }
+
+    // Returns the subset of producers that are CameraProducer subclasses so
+    // callers (Daemon telemetry, future web facade) can query
+    // capabilities()/setControl() without sprinkling dynamic_pointer_cast.
+    std::vector<std::shared_ptr<CameraProducer>> cameraProducers() const;
 
 private:
     RuntimeConfig config_;

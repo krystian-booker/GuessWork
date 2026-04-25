@@ -1,6 +1,8 @@
 #include "posest/ProducerBase.h"
 
 #include <chrono>
+#include <cstdio>
+#include <exception>
 #include <utility>
 
 namespace posest {
@@ -47,7 +49,24 @@ void ProducerBase::runLoop() {
     while (running_.load(std::memory_order_acquire)) {
         cv::Mat image;
         std::optional<std::chrono::steady_clock::time_point> subclass_ts;
-        if (!captureOne(image, subclass_ts)) {
+        bool ok = false;
+        try {
+            ok = captureOne(image, subclass_ts);
+        } catch (const std::exception& e) {
+            // Defensive: capture loops must never propagate. Log and exit
+            // cleanly so the worker can be joined; subclasses (e.g.
+            // CameraProducer) own their own retry/reconnect policy.
+            std::fprintf(stderr,
+                         "%s: capture loop terminated by exception: %s\n",
+                         id_.c_str(), e.what());
+            break;
+        } catch (...) {
+            std::fprintf(stderr,
+                         "%s: capture loop terminated by unknown exception\n",
+                         id_.c_str());
+            break;
+        }
+        if (!ok) {
             break;
         }
 

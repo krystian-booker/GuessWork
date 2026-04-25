@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
+#include "posest/CameraCapabilities.h"
 #include "posest/CameraConfig.h"
 #include "posest/IFrameProducer.h"
 #include "posest/MeasurementBus.h"
@@ -15,6 +17,11 @@ class ICameraBackendFactory {
 public:
     virtual ~ICameraBackendFactory() = default;
     virtual std::shared_ptr<IFrameProducer> createCamera(const CameraConfig& config) = 0;
+
+    // Discover what cameras are physically available without requiring the
+    // user to hand-edit config first. Default returns {} so backends that
+    // don't support discovery (or test stubs) need not implement it.
+    virtual std::vector<CameraCapabilities> enumerateAvailable() { return {}; }
 };
 
 class IPipelineFactory {

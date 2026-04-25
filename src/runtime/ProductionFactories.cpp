@@ -7,6 +7,7 @@
 #include "posest/pipelines/PlaceholderPipelines.h"
 
 #if defined(POSEST_HAS_V4L2)
+#include "posest/V4L2DeviceEnumerator.h"
 #include "posest/V4L2Producer.h"
 #endif
 
@@ -48,6 +49,14 @@ std::shared_ptr<IFrameProducer> ProductionCameraFactory::createCamera(
 #endif
     }
     throw std::runtime_error("Unsupported camera backend: " + config.type);
+}
+
+std::vector<CameraCapabilities> ProductionCameraFactory::enumerateAvailable() {
+#if defined(POSEST_HAS_V4L2)
+    return v4l2::enumerateDevices();
+#else
+    return {};
+#endif
 }
 
 std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(

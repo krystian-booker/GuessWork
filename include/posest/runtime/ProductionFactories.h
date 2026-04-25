@@ -9,6 +9,7 @@ namespace posest::runtime {
 class ProductionCameraFactory final : public ICameraBackendFactory {
 public:
     std::shared_ptr<IFrameProducer> createCamera(const CameraConfig& config) override;
+    std::vector<CameraCapabilities> enumerateAvailable() override;
 };
 
 class ProductionPipelineFactory final : public IPipelineFactory {

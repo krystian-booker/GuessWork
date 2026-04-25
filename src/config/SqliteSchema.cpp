@@ -205,6 +205,24 @@ COMMIT;
 )sql";
 }
 
+const char* migration5Sql() {
+    return R"sql(
+BEGIN;
+
+ALTER TABLE cameras
+    ADD COLUMN trigger_mode TEXT NOT NULL DEFAULT 'free_run';
+
+ALTER TABLE cameras
+    ADD COLUMN reconnect_interval_ms INTEGER NOT NULL DEFAULT 1000;
+
+ALTER TABLE cameras
+    ADD COLUMN reconnect_max_attempts INTEGER NOT NULL DEFAULT 0;
+
+PRAGMA user_version = 5;
+COMMIT;
+)sql";
+}
+
 const char* migration4Sql() {
     return R"sql(
 BEGIN;
@@ -260,7 +278,7 @@ COMMIT;
 }  // namespace
 
 int currentSchemaVersion() {
-    return 4;
+    return 5;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -287,6 +305,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 3) {
         exec(db, migration4Sql());
+        migrated_version = 4;
+    }
+    if (migrated_version == 4) {
+        exec(db, migration5Sql());
     }
 }
 

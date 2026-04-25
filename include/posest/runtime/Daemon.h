@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "posest/CameraCapabilities.h"
 #include "posest/MeasurementTypes.h"
 #include "posest/MeasurementBus.h"
 #include "posest/config/IConfigStore.h"
@@ -102,6 +103,7 @@ struct DaemonHealth {
     std::uint64_t stale_measurements{0};
     bool has_latest_pose{false};
     teensy::TeensyStats teensy;
+    std::vector<CameraLiveStats> cameras;
     std::string last_error;
     int shutdown_signal{0};
 };

@@ -42,6 +42,7 @@ target_compile_features(posest_core PUBLIC cxx_std_20)
 
 # --- posest_camera: generic camera abstractions
 add_library(posest_camera
+    src/camera/CameraConfig.cpp
     src/camera/CameraProducer.cpp
 )
 target_link_libraries(posest_camera PUBLIC posest_core)
@@ -108,6 +109,7 @@ target_link_libraries(posest_pipelines PUBLIC
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(posest_v4l2
         src/v4l2/V4L2Producer.cpp
+        src/v4l2/V4L2DeviceEnumerator.cpp
     )
     target_link_libraries(posest_v4l2 PUBLIC posest_camera)
 endif()
@@ -135,12 +137,13 @@ endif()
 add_executable(posest_daemon app/posest_daemon.cpp)
 target_link_libraries(posest_daemon PRIVATE posest_daemon_lib)
 
-# --- posest_mock: MockProducer / MockConsumer (used by tests)
+# --- posest_mock: MockProducer / MockConsumer / MockCameraProducer (used by tests)
 add_library(posest_mock
     src/mock/MockProducer.cpp
     src/mock/MockConsumer.cpp
+    src/mock/MockCameraProducer.cpp
 )
-target_link_libraries(posest_mock PUBLIC posest_core)
+target_link_libraries(posest_mock PUBLIC posest_core posest_camera)
 
 # --- tests
 enable_testing()
@@ -155,6 +158,7 @@ add_executable(posest_tests
     test/test_teensy_service.cpp
     test/test_calibration_recorder.cpp
     test/test_config_schema.cpp
+    test/test_camera_producer.cpp
     test/test_fusion_service.cpp
     test/test_daemon.cpp
 )

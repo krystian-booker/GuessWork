@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <stdexcept>
+
 #include <linux/videodev2.h>
 
+#include "posest/CameraConfig.h"
+#include "posest/CameraProducer.h"
 #include "posest/V4L2Producer.h"
 
 using posest::v4l2::V4L2Producer;
@@ -106,4 +110,78 @@ TEST(V4L2Producer, TimevalToSteadyClockLargeTimestamp) {
     auto dur = tp.time_since_epoch();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(dur);
     EXPECT_EQ(us.count(), 1700000000123456LL);
+}
+
+namespace {
+
+posest::CameraConfig makeV4l2Config() {
+    posest::CameraConfig cfg;
+    cfg.id = "v4l2_test";
+    cfg.type = "v4l2";
+    cfg.device = "/dev/null";   // never opened in these tests
+    cfg.format.width = 640;
+    cfg.format.height = 480;
+    cfg.format.fps = 30.0;
+    cfg.format.pixel_format = "yuyv";
+    return cfg;
+}
+
+}  // namespace
+
+TEST(V4L2Producer, SetTriggerModeFreeRunIsNoop) {
+    V4L2Producer producer(makeV4l2Config());
+    EXPECT_NO_THROW(producer.setTriggerMode(posest::TriggerMode::FreeRun));
+}
+
+TEST(V4L2Producer, SetTriggerModeExternalRejected) {
+    V4L2Producer producer(makeV4l2Config());
+    EXPECT_THROW(producer.setTriggerMode(posest::TriggerMode::External),
+                 posest::NotSupportedError);
+    EXPECT_THROW(producer.setTriggerMode(posest::TriggerMode::Software),
+                 posest::NotSupportedError);
+}
+
+TEST(V4L2Producer, SetControlOnUnopenedDeviceThrows) {
+    V4L2Producer producer(makeV4l2Config());
+    EXPECT_THROW(producer.setControl("brightness", 50), std::runtime_error);
+}
+
+TEST(V4L2Producer, SetControlUnknownNameThrowsInvalidArgument) {
+    V4L2Producer producer(makeV4l2Config());
+    EXPECT_THROW(producer.setControl("not_a_real_control", 1),
+                 std::invalid_argument);
+}
+
+TEST(V4L2Producer, GetControlOnUnopenedDeviceReturnsNullopt) {
+    V4L2Producer producer(makeV4l2Config());
+    EXPECT_FALSE(producer.getControl("brightness").has_value());
+    EXPECT_FALSE(producer.getControl("not_a_real_control").has_value());
+}
+
+TEST(V4L2Producer, PixelFormatCatalogCoversCanonicalNames) {
+    // The expanded catalog from the camera-producer subsystem audit.
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("mjpeg"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("yuyv"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("grey"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("nv12"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bgr3"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bayer_rggb8"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bayer_grbg8"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bayer_gbrg8"));
+    EXPECT_TRUE(V4L2Producer::isPixelFormatSupported("bayer_bggr8"));
+    EXPECT_FALSE(V4L2Producer::isPixelFormatSupported("not_a_format"));
+    EXPECT_THROW(V4L2Producer::pixelFormatFourcc("not_a_format"),
+                 std::runtime_error);
+    EXPECT_NO_THROW(V4L2Producer::pixelFormatFourcc("MJPEG"));   // case-insensitive
+}
+
+TEST(V4L2Producer, CapabilitiesBackendIsV4l2) {
+    V4L2Producer producer(makeV4l2Config());
+    const auto caps = producer.capabilities();
+    EXPECT_EQ(caps.backend, "v4l2");
+    EXPECT_TRUE(caps.supports_set_control);
+    EXPECT_TRUE(caps.supports_get_control);
+    EXPECT_FALSE(caps.supports_set_trigger_mode);
+    ASSERT_EQ(caps.trigger_modes.size(), 1u);
+    EXPECT_EQ(caps.trigger_modes[0], posest::TriggerMode::FreeRun);
 }

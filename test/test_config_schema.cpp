@@ -82,6 +82,9 @@ posest::runtime::RuntimeConfig makeValidConfig() {
     cam0.format.pixel_format = "mjpeg";
     cam0.controls.push_back({"exposure_absolute", 120});
     cam0.controls.push_back({"gain", 20});
+    cam0.trigger_mode = posest::TriggerMode::External;
+    cam0.reconnect.interval_ms = 250;
+    cam0.reconnect.max_attempts = 5;
     config.cameras.push_back(cam0);
 
     posest::CameraConfig cam1;
@@ -273,8 +276,15 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
     EXPECT_EQ(loaded.cameras[0].format.width, 1280);
     ASSERT_EQ(loaded.cameras[0].controls.size(), 2u);
     EXPECT_EQ(loaded.cameras[0].controls[0].name, "exposure_absolute");
+    EXPECT_EQ(loaded.cameras[0].trigger_mode, posest::TriggerMode::External);
+    EXPECT_EQ(loaded.cameras[0].reconnect.interval_ms, 250u);
+    EXPECT_EQ(loaded.cameras[0].reconnect.max_attempts, 5u);
     EXPECT_EQ(loaded.cameras[1].id, "cam1");
     EXPECT_FALSE(loaded.cameras[1].enabled);
+    // Defaults survive on unset cameras.
+    EXPECT_EQ(loaded.cameras[1].trigger_mode, posest::TriggerMode::FreeRun);
+    EXPECT_EQ(loaded.cameras[1].reconnect.interval_ms, 1000u);
+    EXPECT_EQ(loaded.cameras[1].reconnect.max_attempts, 0u);
 
     ASSERT_EQ(loaded.pipelines.size(), 2u);
     EXPECT_EQ(loaded.pipelines[0].id, "tags");
@@ -336,6 +346,164 @@ TEST(SqliteConfigStore, FailedValidationDoesNotOverwriteExistingData) {
     const auto loaded = store.loadRuntimeConfig();
     ASSERT_EQ(loaded.cameras.size(), 2u);
     EXPECT_EQ(loaded.cameras[0].id, "cam0");
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, Migration5AddsTriggerModeAndReconnectColumnsWithDefaults) {
+    const auto path = tempDbPath("v4_to_v5");
+    std::filesystem::remove(path);
+
+    // Build a v4 database (current_version-1) with one camera, no new columns,
+    // then let SqliteConfigStore migrate it forward and confirm defaults.
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &db), SQLITE_OK);
+    execSql(db, R"sql(
+CREATE TABLE cameras (
+    id TEXT PRIMARY KEY NOT NULL,
+    backend_type TEXT NOT NULL,
+    device TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    fps REAL NOT NULL,
+    pixel_format TEXT NOT NULL
+);
+CREATE TABLE camera_controls (
+    camera_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (camera_id, name),
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+CREATE TABLE pipelines (
+    id TEXT PRIMARY KEY NOT NULL,
+    type TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    parameters_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE camera_pipeline_bindings (
+    camera_id TEXT NOT NULL,
+    pipeline_id TEXT NOT NULL,
+    PRIMARY KEY (camera_id, pipeline_id),
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE,
+    FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
+);
+CREATE TABLE calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    image_width INTEGER NOT NULL,
+    image_height INTEGER NOT NULL,
+    camera_model TEXT NOT NULL,
+    distortion_model TEXT NOT NULL,
+    fx REAL NOT NULL,
+    fy REAL NOT NULL,
+    cx REAL NOT NULL,
+    cy REAL NOT NULL,
+    distortion_coefficients_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (camera_id, version),
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+CREATE TABLE camera_extrinsics (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    tx_m REAL NOT NULL,
+    ty_m REAL NOT NULL,
+    tz_m REAL NOT NULL,
+    roll_rad REAL NOT NULL,
+    pitch_rad REAL NOT NULL,
+    yaw_rad REAL NOT NULL,
+    PRIMARY KEY (camera_id, version),
+    FOREIGN KEY (camera_id, version) REFERENCES calibrations(camera_id, version) ON DELETE CASCADE
+);
+CREATE TABLE field_layouts (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    source_file_path TEXT NOT NULL,
+    field_length_m REAL NOT NULL,
+    field_width_m REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE field_tags (
+    layout_id TEXT NOT NULL,
+    tag_id INTEGER NOT NULL,
+    tx_m REAL NOT NULL,
+    ty_m REAL NOT NULL,
+    tz_m REAL NOT NULL,
+    roll_rad REAL NOT NULL,
+    pitch_rad REAL NOT NULL,
+    yaw_rad REAL NOT NULL,
+    PRIMARY KEY (layout_id, tag_id),
+    FOREIGN KEY (layout_id) REFERENCES field_layouts(id) ON DELETE CASCADE
+);
+CREATE TABLE camera_triggers (
+    camera_id TEXT PRIMARY KEY NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    teensy_pin INTEGER NOT NULL,
+    rate_hz REAL NOT NULL,
+    pulse_width_us INTEGER NOT NULL DEFAULT 1000,
+    phase_offset_us INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+CREATE TABLE teensy_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    serial_port TEXT NOT NULL,
+    fused_pose_can_id INTEGER NOT NULL,
+    status_can_id INTEGER NOT NULL,
+    pose_publish_hz REAL NOT NULL,
+    baud_rate INTEGER NOT NULL DEFAULT 115200,
+    reconnect_interval_ms INTEGER NOT NULL DEFAULT 1000,
+    read_timeout_ms INTEGER NOT NULL DEFAULT 20
+);
+CREATE TABLE calibration_tool_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    docker_image TEXT NOT NULL DEFAULT 'kalibr:latest'
+);
+INSERT INTO calibration_tool_config (id, docker_image) VALUES (1, 'kalibr:latest');
+CREATE TABLE kalibr_datasets (
+    id TEXT PRIMARY KEY NOT NULL,
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    duration_s REAL NOT NULL,
+    camera_ids_json TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE camera_imu_calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    cam_imu_tx_m REAL NOT NULL,
+    cam_imu_ty_m REAL NOT NULL,
+    cam_imu_tz_m REAL NOT NULL,
+    cam_imu_roll_rad REAL NOT NULL,
+    cam_imu_pitch_rad REAL NOT NULL,
+    cam_imu_yaw_rad REAL NOT NULL,
+    imu_cam_tx_m REAL NOT NULL,
+    imu_cam_ty_m REAL NOT NULL,
+    imu_cam_tz_m REAL NOT NULL,
+    imu_cam_roll_rad REAL NOT NULL,
+    imu_cam_pitch_rad REAL NOT NULL,
+    imu_cam_yaw_rad REAL NOT NULL,
+    time_shift_s REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (camera_id, version),
+    FOREIGN KEY (camera_id) REFERENCES cameras(id) ON DELETE CASCADE
+);
+INSERT INTO cameras VALUES ('cam0', 'v4l2', '/dev/video0', 1, 1280, 720, 60.0, 'mjpeg');
+PRAGMA user_version = 4;
+)sql");
+    sqlite3_close(db);
+
+    posest::config::SqliteConfigStore store(path);
+    const auto config = store.loadRuntimeConfig();
+    ASSERT_EQ(readUserVersion(path), posest::config::currentSchemaVersion());
+    ASSERT_EQ(config.cameras.size(), 1u);
+    EXPECT_EQ(config.cameras[0].trigger_mode, posest::TriggerMode::FreeRun);
+    EXPECT_EQ(config.cameras[0].reconnect.interval_ms, 1000u);
+    EXPECT_EQ(config.cameras[0].reconnect.max_attempts, 0u);
+
     std::filesystem::remove(path);
 }
 
