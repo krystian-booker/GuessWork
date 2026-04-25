@@ -1,8 +1,8 @@
 # AprilTag Pipeline
 
-**Status:** Partially implemented. The pipeline is wired end-to-end as a `VisionPipelineBase` consumer that runs libapriltag's `tag36h11` detector on each frame, publishes `AprilTagObservation` messages to the `MeasurementBus`, and is consumed by `FusionService`. The core detector parameters are already configurable from the database via `PipelineConfig::parameters_json`. The remaining gaps are all on the **pose-estimation side**: the pipeline still relies on libapriltag's per-tag homography solver (no multi-tag SQPNP, no LM refinement, no distortion model, no aggregated robot pose), it produces no per-measurement covariance, and `FusionService` therefore applies a static vision noise model. None of the configurability work depends on the (not-yet-built) web server — the parsing path already accepts arbitrary JSON parameters from SQLite.
+**Status:** Feature-complete on the pose-estimation path. The pipeline runs libapriltag's `tag36h11` detector, then hands the corner detections to `AprilTagPoseSolver`, which performs a multi-tag SQPNP + Levenberg–Marquardt solve (with distortion applied), or a single-tag fallback using libapriltag's orthogonal-iteration solver gated on the standard `err1/err2` pose-ambiguity ratio. Camera intrinsics, distortion coefficients, the active field layout, and the `camera_to_robot` extrinsic are all injected from SQLite at construction time, so the pipeline emits a `field_to_robot` pose plus a 6×6 covariance per frame. `FusionService` consumes that as a single `PriorFactor<Pose3>` per observation with a per-measurement Gaussian noise model. Detector defaults (`quad_decimate=1.0`, `nthreads=4`) are aligned with the high-precision target. Remaining gaps are now off the critical path: the web/HTTP layer is not yet implemented, live reconfigure requires a graph rebuild, only `tag36h11` is wired up, and the Teensy-stamped shutter timestamp is not yet joined to the AprilTag observation.
 
-This document covers the AprilTag detection consumer end-to-end: how a frame arrives, what gets computed, what gets published, how the database drives configuration, and what is missing to be feature-complete against the stated requirements (low-latency, independent-per-camera, multi-tag SQPNP + LM, dynamic covariance, web-configurable).
+This document covers the AprilTag detection consumer end-to-end: how a frame arrives, what gets computed, what gets published, how the database drives configuration, and what is still open.
 
 The plumbing-level architecture (threading, mailbox, fan-out) is *not* repeated here — see [`producer-consumer-architecture.md`](producer-consumer-architecture.md). This document only talks about what `AprilTagPipeline` does *inside* `process()`.
 
@@ -48,25 +48,22 @@ The bar this implementation is reviewed against:
                                                                                        (GTSAM / ISAM2)
 ```
 
-`AprilTagPipeline` (`src/pipelines/AprilTagPipeline.cpp:159`) is a `VisionPipelineBase`, which is a `ConsumerBase` that also holds an `IMeasurementSink&`. The threading model, drop-oldest mailbox, and 1-to-many fan-out are inherited unchanged — see [`producer-consumer-architecture.md`](producer-consumer-architecture.md) §2 for the contract. What's specific to this document:
+`AprilTagPipeline` (`src/pipelines/AprilTagPipeline.cpp`) is a `VisionPipelineBase`, which is a `ConsumerBase` that also holds an `IMeasurementSink&`. The threading model, drop-oldest mailbox, and 1-to-many fan-out are inherited unchanged — see [`producer-consumer-architecture.md`](producer-consumer-architecture.md) §2 for the contract. What's specific to this document:
 
 - **Each camera that has an AprilTag pipeline binding gets its own pipeline instance.** Wiring lives in `RuntimeGraph::build()`, which walks `RuntimeConfig::bindings` and calls `camera->addConsumer(pipeline)`. Two cameras → two pipelines → two worker threads. They share no state except the `MeasurementBus` they publish to (which is itself thread-safe).
 - **The pipeline's `process()` is allowed to be slow.** If detection takes 25 ms, the producer keeps capturing at 60 FPS regardless; the pipeline simply observes sequence gaps because `LatestFrameSlot` drops stale frames in front of it. This is what makes the latency contract work without backpressure.
 
 ### 2.2 The pipeline's `process()` today
 
-`AprilTagPipeline::processFrame` (`src/pipelines/AprilTagPipeline.cpp:191`):
+`AprilTagPipeline::processFrame` (`src/pipelines/AprilTagPipeline.cpp:178`):
 
 1. Convert the frame's `cv::Mat` to 8-bit grayscale. Already-grayscale frames pass through; BGR/BGRA are converted with `cvtColor`. Anything else throws.
-2. Wrap the gray buffer as an `image_u8_t` (zero-copy, just header fields pointing at `cv::Mat::data`).
+2. Wrap the gray buffer as an `image_u8_t` (zero-copy, just header fields pointing at `cv::Mat::data` — with a `clone()` fallback if the Mat is non-continuous).
 3. Call `apriltag_detector_detect(detector_, &image)`.
-4. For each detection, populate an `AprilTagDetection`:
-   - `tag_id` from `detection->id`,
-   - 4 image corners from `detection->p`,
-   - if a calibration entry exists for the camera, call libapriltag's `estimate_tag_pose()` to fill `camera_to_tag` (a `Pose3d`) and the per-tag reprojection error,
-   - `ambiguity` is currently set to `detection->hamming` (this is **wrong** — see §6.4),
-   - `reprojection_error_px` is whatever `estimate_tag_pose` returned for that single tag.
-5. Stuff all detections into an `AprilTagObservation` along with `camera_id`, `frame.sequence`, and `frame.capture_time`, and `publish()` it on the bus.
+4. For each detection, populate an `AprilTagDetection` (tag id + 4 image corners). The per-tag `ambiguity` and `reprojection_error_px` fields stay at `0.0` here; ambiguity is only filled in by the single-tag fallback path of the solver.
+5. Look up the active `AprilTagCameraCalibration` and `camera_to_robot` for `frame.camera_id`. If both are present, every detection that also has a known `field_to_tag` entry from the active field layout is appended to an `AprilTagPoseSolveInput`.
+6. If at least one detection passed those filters, call `solveAprilTagPose(input)`. The solver returns either a `field_to_robot` pose + 6×6 covariance + RMS + solved-tag-count, or an empty result if the solve failed / a single-tag detection was dropped on ambiguity.
+7. Stuff per-tag detections, the optional `field_to_robot`, the covariance, RMS, and `solved_tag_count` into an `AprilTagObservation`, and `publish()` it on the bus. The single-tag `ambiguity` ratio (when computed) is written back onto the originating detection for diagnostics.
 
 The detector is constructed once in the constructor with the parsed configuration applied directly to the libapriltag struct fields:
 
@@ -80,17 +77,39 @@ detector_->debug             = config_.debug;
 apriltag_detector_add_family(detector_, family_);
 ```
 
-`tag36h11` is the only family wired up. Other libapriltag families (`tag25h9`, `tagStandard41h12`, etc.) are explicitly rejected by `parseAprilTagPipelineConfig` (`src/pipelines/AprilTagPipeline.cpp:137`).
+`tag36h11` is the only family wired up. Other libapriltag families (`tag25h9`, `tagStandard41h12`, etc.) are explicitly rejected by `parseAprilTagPipelineConfig` (`src/pipelines/AprilTagPipeline.cpp:48`).
 
-### 2.3 What happens downstream
+### 2.3 The pose solver
 
-`FusionService` (`src/fusion/FusionService.cpp`) subscribes to the bus and consumes `AprilTagObservation` measurements. For each detection that has a `camera_to_tag` pose, it computes:
+`AprilTagPoseSolver` (`src/pipelines/AprilTagPoseSolver.cpp`) owns all of the geometry. It is intentionally a free function so it can be unit-tested without a running pipeline. There are two paths:
 
-```
-field_to_robot = field_to_tag · camera_to_tag⁻¹ · camera_to_robot
-```
+**Multi-tag (`solveMultiTag`, ≥ 2 tags):**
 
-…and adds **one `gtsam::PriorFactor<Pose3>` per detection** to ISAM2, all keyed at the current pose. The noise model is the static `vision_sigmas` array on `FusionConfig`. There is no aggregation across detections in the pipeline — each tag is a separate prior. This is exactly the "average per-tag" anti-pattern that requirement (4) calls out, just expressed as N priors rather than an arithmetic mean. With ISAM2 the optimization will find a least-squares fit, but that fit is fundamentally constrained by the same per-tag flip ambiguity problem because each per-tag pose was produced independently from a 4-corner homography.
+1. Build the 4 tag-frame corner positions from `tag_size_m`, then transform each by the tag's `field_to_tag` to get **field-frame** 3D object points. Concatenate across all detections (3 tags → 12 points).
+2. Build the intrinsic matrix `K` and distortion coefficients `D` from the active calibration. If the distortion model is `equidistant`/`fisheye`/`kannala_brandt`, undistort the corners up-front with `cv::fisheye::undistortPoints` and pass empty distortion to `solvePnP`. For `radtan` (or no model), pass `D` directly to `solvePnP` so the solver projects through the distortion model itself.
+3. `cv::solvePnP(..., SOLVEPNP_SQPNP)` for the initial guess (handles coplanar tags, common when tags are wall-mounted).
+4. `cv::solvePnPRefineLM(...)` to drive reprojection error to its minimum. Refinement failure falls back to the SQPNP result.
+5. Project the 3D points back through `(rvec, tvec)` and compute the RMS reprojection residual.
+6. `cam_T_field = (rvec, tvec)`; invert to get `field_T_camera`; compose with `camera_T_robot` to get `field_T_robot`.
+7. Compute the mean detected-tag depth from the camera-frame Z of the object points and feed it, the RMS, and the tag count into `computeCovariance`.
+
+**Single-tag (`solveSingleTag`, exactly 1 tag):**
+
+1. Call libapriltag's `estimate_tag_pose_orthogonal_iteration` with a 50-iteration cap. This returns **two** pose hypotheses (`pose1`, `pose2`) and their reprojection errors (`err1`, `err2`).
+2. Compute the standard tag-pose ambiguity ratio `err1 / err2` (clamped to `[0, 1]`). When `err2 ≈ 0` there is no alternative, so `ambiguity = 0`.
+3. If `ambiguity > covariance.ambiguity_drop_threshold` (default 0.4), **drop the pose** — the observation is published with detections only, so fusion will not ingest a flippy single-tag pose. The ratio is still written back on the per-tag detection for diagnostics.
+4. Otherwise convert `pose1` to `camera_to_tag`, compose `field_to_tag · (camera_to_tag)⁻¹ · camera_to_robot` to get `field_to_robot`, project the four corners back to compute the RMS, and compute the covariance using the per-tag depth.
+
+The solver is bypassed entirely (returns empty) if no calibration is plumbed for the camera (`fx`/`fy` are zero). That makes context-less unit tests safe by construction.
+
+### 2.4 What happens downstream
+
+`FusionService::addAprilTags` (`src/fusion/FusionService.cpp:121`) now does the right thing:
+
+1. If `observation.field_to_robot` is unset, it sets `kFusionStatusVisionUnavailable` and falls back to the current pose estimate — no factor added.
+2. Otherwise it builds a `gtsam::Matrix6` from `observation.covariance`, wraps it in `gtsam::noiseModel::Gaussian::Covariance`, and adds **one** `PriorFactor<Pose3>` keyed at the current pose. If the noise model rejects the covariance (e.g. not positive-definite), the update fails gracefully with `kFusionStatusOptimizerError`.
+
+This is the "single prior per frame" behavior the requirement called for. The per-tag prior path (and the static `vision_sigmas` it depended on) is gone.
 
 ---
 
@@ -105,133 +124,124 @@ field_to_robot = field_to_tag · camera_to_tag⁻¹ · camera_to_robot
 - `enabled`,
 - `parameters_json` — free-form JSON object holding the AprilTag-specific parameters.
 
-The `parameters_json` object is parsed by `parseAprilTagPipelineConfig` (`src/pipelines/AprilTagPipeline.cpp:112`) and accepts the following keys (all optional; defaults shown):
+`parseAprilTagPipelineConfig` (`src/pipelines/AprilTagPipeline.cpp:48`) accepts the following keys (all optional; defaults shown):
 
 | Key | Default | Validation |
 |-----|---------|------------|
 | `family` | `"tag36h11"` | Only `tag36h11` is accepted today. |
-| `nthreads` | `1` | Must be `> 0`. |
-| `quad_decimate` | `2.0` | Must be `> 0`. |
+| `nthreads` | `4` | Must be `> 0`. |
+| `quad_decimate` | `1.0` | Must be `> 0`. |
 | `quad_sigma` | `0.0` | Must be `>= 0`. |
 | `refine_edges` | `true` | — |
 | `decode_sharpening` | `0.25` | Must be `>= 0`. |
 | `debug` | `false` | — |
-| `calibration_version` | `""` | If set, only that version of the camera's calibration is selected. |
-| `field_layout_id` | `""` | Stored but **not currently read by the pipeline** (only `FusionService` reads `active_field_layout_id`). |
+| `calibration_version` | `""` | If set, only that version of the camera's calibration (and matching extrinsic row) is selected. |
+| `field_layout_id` | `""` | If empty, falls back to `RuntimeConfig::active_field_layout_id`. Now actively read by the factory. |
 | `tag_size_m` | `0.1651` | Must be `> 0`. WPILib FRC tag size by default. |
+| `covariance` | (object) | Object holding the covariance-tuning knobs below. |
 
-Camera intrinsics are **not** in `parameters_json`. They live in their own `calibrations` table (`CameraCalibrationConfig`), keyed by `camera_id` + `version`. `ProductionPipelineFactory::createPipeline` (`src/runtime/ProductionFactories.cpp:68`) takes the active calibration row(s) for each camera and injects them into `AprilTagPipelineConfig::camera_calibrations` before constructing the pipeline. If a `calibration_version` is given in `parameters_json`, only that version is selected; otherwise every active row is taken.
+Covariance tuning sub-object (`covariance.*`):
+
+| Key | Default | Validation |
+|-----|---------|------------|
+| `base_sigma_translation_m` | `0.02` | Must be `> 0`. Reference translation σ at `reference_distance_m` and `reference_rms_px`. |
+| `base_sigma_rotation_rad` | `0.02` | Must be `> 0`. Reference rotation σ at the same reference operating point. |
+| `reference_distance_m` | `1.0` | Must be `> 0`. The "free" distance — beyond this, σ scales as Z²/Z_ref². |
+| `reference_rms_px` | `1.0` | Must be `> 0`. RMS scaling reference — σ scales linearly with `rms / rms_ref` once over 1.0. |
+| `single_tag_translation_mult` | `1.5` | Must be `> 0`. Multiplier applied to translation σ when only one tag was solved. |
+| `single_tag_rotation_mult` | `5.0` | Must be `> 0`. Multiplier on rotation σ when only one tag was solved (the optical-axis ambiguity case). |
+| `ambiguity_drop_threshold` | `0.4` | Must be in `(0, 1]`. Single-tag observations with `err1/err2 >` threshold are not emitted. |
+
+Camera intrinsics, distortion, extrinsics, and field layout are **not** in `parameters_json`. They live in their own tables and are injected by the factory:
+
+- `applyCameraCalibrationContext` (`src/runtime/ProductionFactories.cpp:18`) copies `fx/fy/cx/cy/distortion_model/distortion_coefficients` per camera from the active `calibrations` row.
+- `applyCameraExtrinsicsContext` (`src/runtime/ProductionFactories.cpp:62`) copies `camera_to_robot` from `camera_extrinsics` whose `version` matches the active calibration version (or the pipeline's `calibration_version` filter, if set).
+- `applyFieldLayoutContext` (`src/runtime/ProductionFactories.cpp:42`) copies all `field_to_tag` poses for the resolved layout id into `pipeline_config.field_to_tags`.
 
 The persistence path is:
 
 ```
-sqlite (calibrations + pipelines tables)
+sqlite (calibrations + camera_extrinsics + field_layouts + pipelines)
     │
     ▼
 SqliteConfigStore::loadRuntimeConfig()  →  RuntimeConfig
-    │                                          │
-    │                                          ▼
-    │                          ProductionPipelineFactory::createPipeline
-    │                                          │
-    │                                          ▼
-    │                        parseAprilTagPipelineConfig + applyCameraCalibrationContext
-    │                                          │
-    └──────────────────────────────────────────▶ AprilTagPipeline (constructed with applied config)
+    │
+    ▼
+ProductionPipelineFactory::createPipeline
+    │
+    ▼
+parseAprilTagPipelineConfig
+  + applyCameraCalibrationContext
+  + applyCameraExtrinsicsContext
+  + applyFieldLayoutContext
+    │
+    ▼
+AprilTagPipeline (constructed with applied config)
 ```
 
 ### 3.2 Independence per camera
 
-Each `AprilTagPipeline` is constructed with its own `AprilTagPipelineConfig`. Two cameras can run with completely different `quad_decimate` / `nthreads` / `tag_size_m` values just by having two different `pipelines` rows in the database. There is no shared detector, no shared mutable state.
+Each `AprilTagPipeline` is constructed with its own `AprilTagPipelineConfig`. Two cameras can run with completely different `quad_decimate` / `nthreads` / `tag_size_m` / covariance tuning values just by having two different `pipelines` rows in the database. There is no shared detector, no shared mutable state.
 
 ### 3.3 What happens when settings change
 
-Currently: **nothing live**. The detector struct is initialized once in the `AprilTagPipeline` constructor and never rewritten. To pick up a settings change, the runtime graph has to be torn down and rebuilt (`RuntimeGraph::stop()` → re-`build()` → `start()`). This is acceptable for the V1 web flow ("save settings → restart pipeline"), but a future "tweak knobs while running" UX would need either a `reconfigure()` method on the pipeline or a destroy-and-replace path that doesn't restart the camera. Not yet built.
+Currently: **nothing live**. The detector struct, the calibration map, and the field layout map are all initialized once in the `AprilTagPipeline` constructor and never rewritten. To pick up a settings change, the runtime graph has to be torn down and rebuilt (`RuntimeGraph::stop()` → re-`build()` → `start()`). This is acceptable for the V1 web flow ("save settings → restart pipeline"), but a future "tweak knobs while running" UX would need either a `reconfigure()` method on the pipeline or a destroy-and-replace path that doesn't restart the camera. Not yet built.
 
 ---
 
 ## 4. What's implemented vs. what's missing
 
-### 4.1 Detector tuning — partially aligned
-
-What works:
+### 4.1 Detector tuning — complete
 
 - Every parameter from the requirement table is reachable from the database via `parameters_json`.
 - The validation layer rejects nonsense values (negative numbers, zero, unknown families) at parse time.
 - Per-pipeline `nthreads` is honored and isolates CPU usage to that camera's pipeline.
+- **Defaults are now aligned with the high-precision target** (`quad_decimate=1.0`, `nthreads=4`, `refine_edges=true`, `decode_sharpening=0.25`, `quad_sigma=0.0`).
+- Only `tag36h11` is wired up. Other families are explicitly rejected. Adding more is mechanical (libapriltag has `tag25h9_create()`, `tagStandard41h12_create()`, etc.) but not done. Track as a deferred enhancement.
 
-What's wrong / missing:
+### 4.2 Multi-tag PnP — complete
 
-- **Defaults are not aligned with the high-precision target.** `quad_decimate` defaults to `2.0`; the target is `1.0` or `1.5`. `nthreads` defaults to `1`; the target is `3` or `4`. These are *configurable*, so they're not blockers, but the out-of-the-box defaults will produce visibly worse pose accuracy than the target. The fix is one-line per parameter in `AprilTagPipelineConfig`.
-- **No live reconfigure** (see §3.3).
-- **Only `tag36h11`** is wired up. Adding more families is mechanical (libapriltag has `tag25h9_create()`, `tagStandard41h12_create()`, etc.) but not done.
+`solveMultiTag` performs the full SQPNP + LM pipeline described in the requirements:
 
-### 4.2 Multi-tag PnP — not implemented
+1. ✅ Aggregates all 2D corners across detections (3 tags → 12 points).
+2. ✅ Looks up corresponding 3D world coordinates from `field_to_tags` (the active field layout) and the configured `tag_size_m`.
+3. ✅ Distortion is honored. `radtan` coefficients are passed straight to `solvePnP`; `equidistant`/`fisheye`/`kannala_brandt` is undistorted up-front via `cv::fisheye::undistortPoints` and the solver runs on the rectified points.
+4. ✅ `cv::solvePnP(..., SOLVEPNP_SQPNP)` for the initial guess.
+5. ✅ `cv::solvePnPRefineLM(...)` for refinement; falls back gracefully if refinement throws.
+6. ✅ `(rvec, tvec)` → `cam_T_field` → `field_T_camera` → `field_T_robot = field_T_camera · camera_T_robot`.
+7. ✅ RMS reprojection residual is computed from a fresh `cv::projectPoints` pass.
 
-This is the largest gap. The current path is:
+The single-tag path uses libapriltag's `estimate_tag_pose_orthogonal_iteration` plus the `err1/err2` ambiguity ratio (option **B** from the original design choice). Single-tag observations with ambiguity above `covariance.ambiguity_drop_threshold` (default 0.4) are emitted with no `field_to_robot` so fusion will not ingest a flippy hypothesis. The diagnostic ratio is still written to the per-tag detection.
 
-1. libapriltag detects each tag and reports its 4 image corners.
-2. The pipeline calls libapriltag's `estimate_tag_pose()` **once per detection**, which internally solves a 4-point P3P/IPPE-square problem from the homography. This is single-tag-only by construction.
-3. Each per-tag pose flows independently to `FusionService` as a separate `PriorFactor`.
+### 4.3 Distortion model — complete
 
-What the requirement calls for:
+`AprilTagCameraCalibration` carries `distortion_model` and `distortion_coefficients`, and `applyCameraCalibrationContext` copies them out of the active `CameraCalibrationConfig` row. The solver consumes them on every multi-tag solve. Tested by `AprilTagPipelineContext.CalibrationCopiesDistortionFields`.
 
-1. Collect all 2D corners across **all** detections in the frame: 3 tags → 12 `(u, v)` points.
-2. Look up the corresponding 3D world coordinates from the active field layout. Each tag's `field_to_tag` pose plus the known tag size gives the 4 corner positions in field coordinates; concatenate across tags.
-3. **Undistort** the 2D corners using the active calibration's distortion model + coefficients.
-4. `cv::solvePnP(objectPoints, imagePoints, K, distCoeffs, rvec, tvec, false, cv::SOLVEPNP_SQPNP)` to get an initial camera pose. SQPNP is fast, robust on coplanar inputs (common when tags share a wall), and resolves the flip ambiguity that plagues single-tag P3P.
-5. `cv::solvePnPRefineLM(objectPoints, imagePoints, K, distCoeffs, rvec, tvec)` to drive the reprojection error to its mathematical minimum.
-6. Convert (rvec, tvec) → `field_to_camera` (or `camera_to_field`, depending on point convention), then apply `camera_to_robot` to get **`field_to_robot`**.
-7. Compute the RMS reprojection residual from the refined solve (cv returns it; otherwise project + compare).
+### 4.4 Camera-to-robot extrinsic — applied in the pipeline
 
-Single-tag frames still need a path. Two reasonable options:
+`applyCameraExtrinsicsContext` injects `camera_to_robot` per camera at construction time, version-matched against the active calibration row (or against the pipeline's `calibration_version` filter when one is set). The solver applies it after the PnP solve, so the published observation already carries `field_to_robot`. `FusionService` no longer derives the robot pose itself — it just trusts the published value.
 
-- **(A)** Run the same SQPNP + LM with just 4 points. Works, but the pose's rotational uncertainty around the tag's optical axis is large — that uncertainty must be reflected in the covariance (§4.5).
-- **(B)** Fall back to libapriltag's `estimate_tag_pose_orthogonal_iteration()`, which returns *both* pose hypotheses and their reprojection errors. The ratio `err_A / err_B` is the standard "tag pose ambiguity" metric — feed it into the covariance as a confidence weight, and only emit the pose if the ratio is below a threshold.
+### 4.5 Dynamic covariance — complete
 
-(A) is simpler and uniform; (B) is more conservative on pathological single-tag-far-away cases. Both are reasonable; pick one and document the choice.
+`computeCovariance` (`src/pipelines/AprilTagPoseSolver.cpp:129`) produces a 6×6 diagonal covariance using:
 
-### 4.3 Distortion model — not applied
+- **Distance.** `distance_factor = max(1, (mean_distance / reference_distance)²)`. Below the reference distance the covariance is left at the base value; beyond, it scales as Z² as required.
+- **RMS reprojection error.** `rms_factor = max(1, rms / reference_rms_px)`. Same "no shrinkage below reference" rule.
+- **Tag count.** Currently a binary distinction: `single_tag_translation_mult` and `single_tag_rotation_mult` are applied when exactly one tag was solved; otherwise `1.0`. (Default rotation multiplier is 5×, reflecting the optical-axis rotational ambiguity inherent to single-tag PnP.)
 
-`CameraCalibrationConfig` already carries `distortion_model` (e.g. `radtan`, `equidistant`) and `distortion_coefficients`, parsed by `parseKalibrYaml` and persisted by `SqliteConfigStore`. The AprilTag pipeline ignores both. With the current libapriltag-only path this is silently OK because `estimate_tag_pose` operates on raw pixel corners and does not attempt to undistort them — it just bakes the distortion error into the homography solve.
+The published 6×6 follows GTSAM's `Pose3` tangent ordering `[rx, ry, rz, tx, ty, tz]` with diagonal entries only. `FusionService` consumes the matrix directly via `gtsam::noiseModel::Gaussian::Covariance`. The static `vision_sigmas` array is no longer used on the AprilTag path.
 
-Once SQPNP enters the picture, distortion coefficients **must** be passed to `solvePnP` (or the corners must be undistorted via `cv::undistortPoints` first), otherwise the refinement converges on the wrong pose for any non-pinhole lens.
+Open refinements (nice-to-have, not blockers):
 
-The data is already in `RuntimeConfig`; the wiring is the missing piece. `applyCameraCalibrationContext` (`src/runtime/ProductionFactories.cpp:18`) currently copies only `fx/fy/cx/cy` into the pipeline config — extend it to also copy `distortion_model` + `distortion_coefficients`, and extend `AprilTagCameraCalibration` with those fields.
-
-### 4.4 Camera-to-robot extrinsic — applied in the wrong layer
-
-The data exists: `RuntimeConfig::camera_extrinsics` (`CameraExtrinsicsConfig::camera_to_robot`), persisted in the `camera_extrinsics` table, populated from Kalibr camera-IMU calibration. `FusionService` reads it (`buildFusionConfig` walks the active calibrations and copies `camera_to_robot` into `FusionConfig::camera_to_robot`).
-
-But the requirement is for the **AprilTag pipeline** to publish the **robot's** field pose, not the camera's. The pipeline therefore needs:
-
-- The active `camera_to_robot` extrinsic injected at construction time (mirroring how intrinsics are injected today). `applyCameraCalibrationContext` is the natural place to do it.
-- After SQPNP + LM produces `field_to_camera`, multiply by `camera_to_robot` and emit `field_to_robot` in the published observation.
-
-This also simplifies fusion: `FusionService` would just take the published robot pose at face value instead of re-deriving it from per-tag camera poses.
-
-### 4.5 Dynamic covariance — not implemented anywhere
-
-Today the noise model handed to GTSAM is the static `FusionConfig::vision_sigmas` array, default `{0.15 m, 0.15 m, 0.12 m, 0.10 rad, 0.10 rad, 0.20 rad}`. This is identical for one blurry tag at 5 m and four crisp tags at 1 m. At 5 m/s the difference between those two cases is the difference between trusting vision and trusting the IMU.
-
-The requirement is for the pipeline to compute, per frame, a **6×6 covariance matrix** that scales with:
-
-- **Distance (Z).** Reprojection error in pixels translates to Z² metric error (textbook pinhole math). Use the mean detected-tag depth as the scale factor.
-- **Tag count.** With 1 tag visible, rotational uncertainty around the optical axis is poorly constrained — inflate the rotational diagonal heavily. With ≥ 2 tags, both translation and rotation are well constrained — keep the covariance tight. With ≥ 4 well-spread tags, it can shrink further still.
-- **RMS reprojection error.** `solvePnPRefineLM` returns the residual; high RMS means the corners didn't agree on a coherent pose (motion blur, bad calibration, partial occlusion) — inflate proportionally.
-
-Plumbing changes required:
-
-1. Extend `AprilTagObservation` with a `field_to_robot` pose (optional, set when the multi-tag solve succeeded) and a `std::array<double, 36> covariance`.
-2. Compute both inside `AprilTagPipeline::processFrame` after the LM refinement.
-3. In `FusionService::addAprilTags`, when the observation carries a `field_to_robot` + covariance, build a per-measurement `gtsam::noiseModel::Gaussian::Covariance(...)` and attach **one** `PriorFactor<Pose3>` (not N — the multi-tag solve already aggregated them). The existing per-detection-prior path becomes the fallback for legacy/single-tag-only outputs.
-
-This change is what makes vision automatically fall back to IMU during high-speed motion blur or distant-tag viewing — the fusion layer just respects the covariance, no special-cased "trust vision unless …" logic.
+- **Cross-terms are zero.** A full per-corner uncertainty propagation through the PnP Jacobian would produce off-diagonal terms, especially in the rotation/translation coupling for a tag observed at the image edge. Diagonal-only is the standard practical compromise and it matches the requirement; revisit only if downstream diagnostics show the fusion overconfidently agreeing on a clearly wrong pose.
+- **Tag-count gradient is binary, not continuous.** The requirement hints that "≥ 4 well-spread tags" should shrink the covariance further than 2 tags. Currently both produce the same `1.0` multiplier. A small lookup or `1/sqrt(N)` term would close this.
+- **Single-tag rotational inflation is isotropic.** All three rotation diagonals get the same `single_tag_rotation_mult`, even though the actual ambiguity is concentrated around the tag's optical axis. Projecting the optical axis into the world frame and inflating only that component would be tighter.
 
 ### 4.6 Timestamp and time domain
 
 `Frame::capture_time` is in `steady_clock` (V4L2 buffer timestamp converted to monotonic, see [`producer-consumer-architecture.md`](producer-consumer-architecture.md) §2.5). The pipeline propagates it unchanged into `AprilTagObservation::capture_time`, and `FusionService` uses it to time-order measurements. This is correct for the host-only fusion case.
 
-What's open: the requirement mentions "the exact teensy time the shutter opened." `CameraTriggerEvent` already publishes Teensy-stamped trigger pulses on the bus (`include/posest/MeasurementTypes.h:81`), and `posest_teensy` populates `teensy_time_us` per pulse. Stitching the trigger event to the frame (and therefore to the AprilTag observation) at sub-millisecond precision is a separate piece of work; today the host steady_clock timestamp is the only time field on the observation.
+What's still open: the requirement mentions "the exact teensy time the shutter opened." `CameraTriggerEvent` already publishes Teensy-stamped trigger pulses on the bus (`include/posest/MeasurementTypes.h:90`), and `posest_teensy` populates `teensy_time_us` per pulse. Stitching the trigger event to the frame (and therefore to the AprilTag observation) at sub-millisecond precision is a separate piece of work; today the host steady_clock timestamp is the only time field on the observation.
 
 ### 4.7 Latency posture
 
@@ -240,14 +250,14 @@ The pipeline already meets the "lowest latency per camera" rule, with two caveat
 - **Grayscale conversion is on the pipeline thread.** If the V4L2 producer is configured with a Y8/Y16/GREY pixel format, `toGray8` is a no-op. If it's MJPEG or BGR, `cvtColor` runs once per frame on the pipeline worker (microseconds at typical resolutions, but it's there). For a fully optimized path, configure the camera to emit grayscale natively when AprilTag is the only consumer.
 - **`cv::Mat::isContinuous()` cloning.** The pipeline `clone()`s the gray Mat if it isn't already continuous in memory. For V4L2 MMAP-backed Mats this is normally already continuous, so this branch shouldn't fire in production. Worth keeping the branch — safer than a libapriltag scan over a non-continuous buffer — but worth being aware of if profiling shows surprise allocations.
 
-The blocking pieces (libapriltag detection + future SQPNP + LM) all run on the pipeline's own worker thread. None of it can stall the V4L2 producer thread.
+The blocking pieces (libapriltag detection, SQPNP, LM, single-tag orthogonal iteration) all run on the pipeline's own worker thread. None of it can stall the V4L2 producer thread.
 
 ### 4.8 Web configurability
 
 The requirement is "configurable from the website but we haven't implemented the server yet." Status:
 
 - ✅ The pipeline already reads its parameters from SQLite at startup.
-- ✅ `parameters_json` is a free-form JSON object — no schema migration is needed to add new keys.
+- ✅ `parameters_json` is a free-form JSON object — no schema migration is needed to add new keys (covariance tuning was added without a migration).
 - ✅ `SqliteConfigStore::saveRuntimeConfig` is atomic and validated, so a future POST-from-website handler just hands a `RuntimeConfig` to `save()` and is done.
 - ❌ `WebService` (`include/posest/runtime/WebService.h`) is currently a thin holder for telemetry state. It has no HTTP server, no route table, no settings handler. This is co-deferred with the video preview consumer (see [`producer-consumer-architecture.md`](producer-consumer-architecture.md) §6.2).
 - ❌ No live reconfigure (§3.3). The web layer will need to either (a) trigger a graph rebuild on save, or (b) add a `reconfigure()` path on the pipeline.
@@ -260,60 +270,49 @@ The requirement is "configurable from the website but we haven't implemented the
 |-------------|--------|-------|
 | Per-camera independent AprilTag consumer | ✅ Complete | One `AprilTagPipeline` per binding, own thread, own mailbox, own config. |
 | Lowest-latency frame delivery | ✅ Complete | Inherited from `ConsumerBase` + `LatestFrameSlot`. Verified by core pipeline tests. |
-| DB-backed configuration per pipeline | ✅ Complete | `parameters_json` parsed by `parseAprilTagPipelineConfig`, calibrations injected by factory. |
-| Detector tuning surface (decimate/sigma/refine/sharpen/threads) | ✅ Complete (defaults misaligned) | All 5 keys are reachable from JSON. Defaults still set to libapriltag conservative values, not the high-precision targets — see §4.1. |
-| Tag family configurable | ⚠️ Partial | Only `tag36h11` is wired up; other families rejected. |
+| DB-backed configuration per pipeline | ✅ Complete | `parameters_json` parsed by `parseAprilTagPipelineConfig`, calibrations / extrinsics / field layout injected by factory. |
+| Detector tuning surface (decimate/sigma/refine/sharpen/threads) | ✅ Complete | Defaults aligned with high-precision target (`quad_decimate=1.0`, `nthreads=4`). |
+| Tag family configurable | ⚠️ Partial | Only `tag36h11` is wired up; other families rejected at parse time. Mechanical to add. |
 | Camera intrinsics from active DB calibration | ✅ Complete | `applyCameraCalibrationContext` injects `fx/fy/cx/cy` per camera. |
-| Distortion model + coefficients applied before PnP | ❌ Missing | Data exists in `RuntimeConfig`; pipeline ignores it (§4.3). |
-| Multi-tag SQPNP solve | ❌ Missing | Currently per-tag homography via libapriltag `estimate_tag_pose` (§4.2). |
-| Levenberg-Marquardt refinement | ❌ Missing | (§4.2) |
-| Field layout consumed by the pipeline | ❌ Missing | `field_layout_id` is parsed but not read; only `FusionService` reads field tags. (§4.2 step 2.) |
-| Camera-to-robot extrinsic applied in pipeline | ❌ Missing | Currently applied in `FusionService`. Pipeline needs to publish robot pose, not camera-relative pose (§4.4). |
-| Dynamic 6×6 covariance per measurement | ❌ Missing | `AprilTagObservation` has no covariance field; fusion uses static `vision_sigmas` (§4.5). |
-| Single `PriorFactor` per frame (not per tag) | ❌ Missing | Fusion currently adds N priors, one per detection. Becomes one factor once the pipeline emits aggregated pose + covariance. |
-| Pose ambiguity metric correctly populated | ❌ Wrong field | `AprilTagDetection::ambiguity` is set to libapriltag's *Hamming distance*, not pose ambiguity. (§6.4 below.) |
+| Distortion model + coefficients applied before PnP | ✅ Complete | `radtan` passed to `solvePnP`; `equidistant`/fisheye undistorted via `cv::fisheye::undistortPoints` first. |
+| Multi-tag SQPNP solve | ✅ Complete | `solveMultiTag` aggregates corners across all tags in `field_to_tags`. |
+| Levenberg-Marquardt refinement | ✅ Complete | `cv::solvePnPRefineLM`; SQPNP result kept on refinement throw. |
+| Single-tag pose path | ✅ Complete | libapriltag orthogonal-iteration with `err1/err2` ambiguity ratio; gated by configurable threshold. |
+| Field layout consumed by the pipeline | ✅ Complete | `applyFieldLayoutContext` resolves `field_layout_id` (or `active_field_layout_id`) and copies tag poses. |
+| Camera-to-robot extrinsic applied in pipeline | ✅ Complete | `applyCameraExtrinsicsContext` injects per-camera; solver composes after PnP. |
+| Dynamic 6×6 covariance per measurement | ✅ Complete | Distance² + RMS + tag-count scaling. Diagonal-only; cross-terms left as future refinement. |
+| Single `PriorFactor` per frame (not per tag) | ✅ Complete | `FusionService::addAprilTags` uses `gtsam::noiseModel::Gaussian::Covariance` with the published 6×6. |
+| Pose ambiguity metric correctly populated | ✅ Complete (single-tag only) | Hamming-distance bug fixed. Multi-tag observations leave the per-tag `ambiguity` at `0.0`; that field is now diagnostic-only for single-tag fallback. |
 | Steady_clock timestamp on observation | ✅ Complete | Inherited from frame; same domain as IMU/wheel/Teensy. |
 | Teensy-clock shutter timestamp on observation | ⚠️ Partial | `CameraTriggerEvent` carries `teensy_time_us`, but it isn't joined to the AprilTag observation today. |
-| Web layer to drive configuration | ❌ Deferred | `WebService` has no HTTP server (§4.8). DB path is ready. |
-| Live reconfigure of detector params | ❌ Missing | Detector built once at construction; settings change requires graph restart (§3.3). |
+| Web layer to drive configuration | ❌ Deferred | `WebService` has no HTTP server. DB path is ready. |
+| Live reconfigure of detector params | ❌ Missing | Detector built once at construction; settings change requires graph restart. |
+| Tag-count gradient finer than 1 vs N | ⚠️ Partial | Currently binary (1 vs >1). Doc requirement hints at finer scaling for ≥4 well-spread tags. |
+| Direction-aware single-tag rotational covariance | ⚠️ Partial | All rotation diagonals inflated by `single_tag_rotation_mult`. Optical-axis-only inflation is the textbook tighter version. |
+| Per-corner uncertainty → off-diagonal covariance | ⚠️ Partial | Diagonal-only. Acceptable per current requirements; revisit if fusion shows overconfidence. |
 
 ---
 
-## 6. Suggested implementation order
+## 6. Suggested next work
 
-If the goal is "ship the minimum viable accuracy upgrade first," a reasonable order:
+The "feature complete" line for the AprilTag → fusion path has been crossed: the pipeline emits `field_to_robot` + 6×6 covariance, fusion ingests it as a single per-frame `PriorFactor` with a per-measurement Gaussian noise model. What remains is on a different track:
 
-1. **Fix the detector defaults** (`quad_decimate = 1.0` or `1.5`, `nthreads = 3`+) so the out-of-the-box behavior matches the target. One-line changes in `AprilTagPipelineConfig`. (§4.1)
-2. **Plumb distortion coefficients** from `CameraCalibrationConfig` → `AprilTagCameraCalibration`. Required before any OpenCV PnP path is correct. (§4.3)
-3. **Plumb the active field layout** into the pipeline (mirroring how intrinsics are injected). Resolve `field_layout_id` against `RuntimeConfig::field_layouts`. Required for multi-tag PnP. (§4.2)
-4. **Plumb `camera_to_robot`** into the pipeline. Required to emit robot pose from the pipeline. (§4.4)
-5. **Replace `estimate_tag_pose` with multi-tag SQPNP + LM.** Aggregate corners across detections, undistort, solve, refine, transform to robot frame, compute RMS. Emit `field_to_robot` on the observation. (§4.2)
-6. **Compute and emit dynamic covariance.** Distance + tag-count + RMS scaling. Add covariance field to `AprilTagObservation`. (§4.5)
-7. **Update `FusionService::addAprilTags`** to consume the aggregated pose + covariance as a single `PriorFactor` with a per-measurement noise model. Keep the per-tag fallback for backwards compatibility / single-tag-only frames if needed.
-8. **Web layer** (separate work track, blocked on `WebService` HTTP).
-9. **Live reconfigure** (separate work track, only useful with the web layer).
+1. **Web/HTTP service.** Stand up `WebService` with a route table that reads/writes `RuntimeConfig` through `IConfigStore::save()`. The DB schema is ready; this is HTTP plumbing, not pipeline work. Co-blocked with the video preview consumer.
+2. **Live reconfigure.** Either (a) "save → graph rebuild" (cheap to implement, ~1 s of camera downtime per change), or (b) `AprilTagPipeline::reconfigure(AprilTagPipelineConfig)` that swaps the detector struct, calibration map, and field-tag map under a mutex without restarting the camera. (a) unblocks the web flow immediately; (b) is the production-quality version.
+3. **Additional tag families.** Lift the `family != "tag36h11"` rejection. Each family needs a `<family>_create()` / `<family>_destroy()` mapping in `AprilTagPipeline`'s constructor/destructor. One-time effort.
+4. **Teensy-stamped shutter time on the observation.** Subscribe `AprilTagPipeline` (or a small adapter) to `CameraTriggerEvent`, pair it with the matching frame by `trigger_sequence` ↔ `frame.sequence`, and add a `teensy_time_us` field to `AprilTagObservation`. Useful for sub-ms cross-camera and IMU-vision time alignment once VIO comes online.
+5. **Covariance refinements.** In rough cost-benefit order:
+   - Continuous tag-count scaling (e.g. multipliers `{1.0, 0.7, 0.55}` for `{1, 2, ≥4}` tags).
+   - Optical-axis-only rotational inflation for single-tag (project the camera's view direction into world frame, inflate the rotational diagonal aligned with that axis only).
+   - Off-diagonal terms from per-corner Jacobian propagation. Only worth doing if downstream telemetry shows the fusion ingesting clearly-wrong vision priors with high confidence.
 
-Steps 1–4 are pure plumbing and unblock step 5; step 5 unblocks step 6; steps 5–7 together are the "feature complete" line for the AprilTag → fusion path.
+### 6.1 Implementation notes (for whoever picks this up)
 
-### 6.1–6.3 Notes for implementers
+**Live reconfigure ordering.** The detector's `nthreads`, `quad_decimate`, `quad_sigma`, `refine_edges`, `decode_sharpening`, `debug` fields can all be rewritten between `apriltag_detector_detect` calls — libapriltag rebuilds its internal scratch buffers per detect call. So a `reconfigure()` that grabs a mutex and rewrites those fields plus `config_.camera_calibrations`, `config_.field_to_tags`, `config_.camera_to_robot` is safe with the existing single-worker thread model.
 
-**6.1 SQPNP requires `≥ 3` correspondences.** With one tag (4 corners) it works; with zero detections, skip the solve and emit an empty observation. Don't degrade to the homography path for single-tag frames just to keep the code paths uniform — SQPNP handles 4-point input fine.
+**Multi-family wiring.** `apriltag_detector_clear_families()` removes all attached families; then call the new family's `*_create()` and `apriltag_detector_add_family()`. Don't forget to track the owned family pointer for destruction.
 
-**6.2 Coplanar tags are common.** Tags mounted on a flat wall produce a coplanar 3D point set, which is the exact failure mode P3P-style solvers hit. SQPNP is specifically chosen because it handles coplanar inputs correctly. Don't substitute `SOLVEPNP_ITERATIVE` or `SOLVEPNP_EPNP` here.
-
-**6.3 LM refinement is a hot path.** `cv::solvePnPRefineLM` will converge in 5–20 iterations for a good initial guess from SQPNP. Limit iterations and tolerance via `cv::TermCriteria` if profiling shows it eating the latency budget.
-
-### 6.4 The `ambiguity` field bug
-
-`AprilTagPipeline::processFrame` (`src/pipelines/AprilTagPipeline.cpp:230`) currently sets:
-
-```cpp
-out.ambiguity = static_cast<double>(detection->hamming);
-```
-
-`detection->hamming` is the number of bit errors corrected during AprilTag decoding — it's a *decoding* quality metric, not a *pose* quality metric. For a clean detection it's `0` regardless of how flippy the pose is.
-
-The correct pose-ambiguity metric is the ratio of the two `estimate_tag_pose_orthogonal_iteration` reprojection errors (`err_A / err_B`). When that ratio is close to 1.0, both pose hypotheses fit the corners equally well and the detection is ambiguous; when it's small (e.g. `< 0.4`), one hypothesis dominates and the detection is reliable. Once the multi-tag SQPNP path lands, per-tag ambiguity stops mattering for the published pose, but the field is still useful for diagnostics and for single-tag fallback.
+**Trigger ↔ frame join.** Today neither `Frame` nor `CameraTriggerEvent` carries enough state to pair them deterministically — `CameraTriggerEvent::trigger_sequence` exists, but the frame side has no matching field. Adding `Frame::trigger_sequence` (populated by `V4L2Producer` from the kernel sequence counter) is the cleanest path; a fallback would be nearest-`steady_clock` matching with a small lookback window.
 
 ---
 
@@ -321,15 +320,17 @@ The correct pose-ambiguity metric is the ratio of the two `estimate_tag_pose_ort
 
 | File | Role |
 |------|------|
-| `include/posest/pipelines/AprilTagPipeline.h` | Class declaration + `AprilTagPipelineConfig` + `parseAprilTagPipelineConfig`. |
-| `src/pipelines/AprilTagPipeline.cpp` | Detector construction, per-frame `processFrame`, libapriltag pose helper. |
+| `include/posest/pipelines/AprilTagPipeline.h` | Class declaration + `AprilTagPipelineConfig` + `AprilTagCovarianceTuning` + `parseAprilTagPipelineConfig`. |
+| `src/pipelines/AprilTagPipeline.cpp` | Detector construction, per-frame `processFrame`, JSON parsing/validation. |
+| `include/posest/pipelines/AprilTagPoseSolver.h` | Solver input/output structs. |
+| `src/pipelines/AprilTagPoseSolver.cpp` | Multi-tag SQPNP + LM, single-tag orthogonal-iteration fallback, covariance computation. |
 | `include/posest/pipelines/VisionPipelineBase.h` | `ConsumerBase`-derived base; provides the worker thread + mailbox. |
-| `include/posest/MeasurementTypes.h` | `AprilTagDetection`, `AprilTagObservation` payloads. |
+| `include/posest/MeasurementTypes.h` | `AprilTagDetection`, `AprilTagObservation` (with `field_to_robot`, `covariance`, `reprojection_rms_px`, `solved_tag_count`). |
 | `include/posest/MeasurementBus.h` | Typed pub/sub the pipeline publishes onto. |
 | `include/posest/runtime/PipelineConfig.h` | DB-row shape (`parameters_json` lives here). |
 | `include/posest/runtime/RuntimeConfig.h` | `CameraCalibrationConfig`, `CameraExtrinsicsConfig`, `FieldLayoutConfig` (intrinsics, extrinsics, field tags). |
-| `src/runtime/ProductionFactories.cpp` | `applyCameraCalibrationContext` — injects active calibrations into the pipeline config. |
-| `src/fusion/FusionService.cpp` | Consumer of `AprilTagObservation`; per-tag `PriorFactor` path (current) + static noise model. |
+| `src/runtime/ProductionFactories.cpp` | `applyCameraCalibrationContext` / `applyCameraExtrinsicsContext` / `applyFieldLayoutContext` — inject DB context into the pipeline config. |
+| `src/fusion/FusionService.cpp` | `addAprilTags`: single `PriorFactor<Pose3>` per observation with per-measurement Gaussian noise model. |
 | `src/config/SqliteConfigStore.cpp` | Persistence of pipelines, calibrations, extrinsics, field layouts. |
-| `test/test_pipelines.cpp` | `AprilTagPipeline` config-parsing tests, blank-image test, rendered-tag detection test, intrinsics-injection test. |
-| `test/test_fusion_service.cpp` | End-to-end fusion behavior (covers the per-tag prior path). |
+| `test/test_pipelines.cpp` | Config-parsing tests, blank-image / rendered-tag tests, single-tag-with-context test, calibration/extrinsics/field-layout context tests. |
+| `test/test_fusion_service.cpp` | End-to-end fusion behavior including the per-measurement vision prior path. |

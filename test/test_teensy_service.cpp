@@ -1,14 +1,17 @@
 #include <chrono>
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "posest/CameraTriggerCache.h"
 #include "posest/MeasurementBus.h"
 #include "posest/teensy/FakeSerialTransport.h"
 #include "posest/teensy/TeensyService.h"
@@ -505,6 +508,69 @@ TEST(TeensyService, TimeSyncResponseEstablishesClockOffset) {
     EXPECT_EQ(odom.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
     EXPECT_EQ(odom.rio_time_us, 1234u);
     EXPECT_DOUBLE_EQ(odom.field_to_robot.theta_rad, 6.0);
+
+    service.stop();
+}
+
+TEST(TeensyService, CameraTriggerEventIsRecordedInCacheAfterTimeSync) {
+    posest::MeasurementBus bus(4);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    auto cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{6, "cam0"}}, 500ms);
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); },
+        cache);
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+    ASSERT_TRUE(fake.waitForWriteCount(2, 500ms));
+
+    const auto request_frame = decodeWrittenFrame(
+        fake.writes(),
+        posest::teensy::MessageType::TimeSyncRequest);
+    const auto request = posest::teensy::decodeTimeSyncRequestPayload(request_frame.payload);
+    ASSERT_TRUE(request.has_value());
+
+    posest::teensy::TimeSyncResponsePayload response;
+    response.request_sequence = request->request_sequence;
+    response.teensy_receive_time_us = request->host_send_time_us + 100;
+    response.teensy_transmit_time_us = request->host_send_time_us + 200;
+    posest::teensy::Frame sync_frame;
+    sync_frame.type = posest::teensy::MessageType::TimeSyncResponse;
+    sync_frame.sequence = 0;
+    sync_frame.payload = posest::teensy::encodeTimeSyncResponsePayload(response);
+    fake.pushReadBytes(posest::teensy::encodeFrame(sync_frame));
+    ASSERT_TRUE(waitFor([&] { return service.stats().time_sync_established; }));
+
+    posest::teensy::CameraTriggerEventPayload trig_payload;
+    trig_payload.teensy_time_us = response.teensy_transmit_time_us;
+    trig_payload.pin = 6;
+    trig_payload.trigger_sequence = 17;
+    trig_payload.status_flags = 0;
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::CameraTriggerEvent,
+        1,
+        posest::teensy::encodeCameraTriggerEventPayload(trig_payload));
+
+    ASSERT_TRUE(waitFor([&] {
+        return service.stats().inbound_camera_trigger_events == 1u;
+    }));
+
+    // Drain the bus so subsequent tests on the same harness aren't surprised.
+    auto measurement = bus.take();
+    ASSERT_TRUE(measurement.has_value());
+
+    // Cache lookup at the host time of the recorded event must succeed.
+    const auto& event = std::get<posest::CameraTriggerEvent>(*measurement);
+    const auto stamp = cache->lookup("cam0", event.timestamp);
+    ASSERT_TRUE(stamp.has_value());
+    EXPECT_EQ(stamp->trigger_sequence, 17u);
+    EXPECT_EQ(stamp->teensy_time_us, response.teensy_transmit_time_us);
 
     service.stop();
 }

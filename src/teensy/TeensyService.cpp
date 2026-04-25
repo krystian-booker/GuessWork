@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "posest/CameraTriggerCache.h"
+
 namespace posest::teensy {
 
 namespace {
@@ -41,11 +43,13 @@ TeensyService::TeensyService(
     runtime::TeensyConfig config,
     std::vector<runtime::CameraTriggerConfig> camera_triggers,
     IMeasurementSink& measurement_sink,
-    SerialTransportFactory transport_factory)
+    SerialTransportFactory transport_factory,
+    std::shared_ptr<CameraTriggerCache> trigger_cache)
     : config_(std::move(config)),
       camera_triggers_(std::move(camera_triggers)),
       measurement_sink_(measurement_sink),
-      transport_factory_(std::move(transport_factory)) {
+      transport_factory_(std::move(transport_factory)),
+      trigger_cache_(std::move(trigger_cache)) {
     if (!transport_factory_) {
         throw std::invalid_argument("TeensyService requires a serial transport factory");
     }
@@ -348,6 +352,9 @@ void TeensyService::handleFrame(const Frame& frame) {
             }
             if (!time_sync_established) {
                 event.status_flags |= kStatusUnsynchronizedTime;
+            }
+            if (trigger_cache_) {
+                trigger_cache_->recordEvent(event);
             }
             const bool published = measurement_sink_.publish(event);
             std::lock_guard<std::mutex> g(mu_);

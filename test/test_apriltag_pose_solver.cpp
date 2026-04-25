@@ -369,6 +369,154 @@ TEST(AprilTagPoseSolver, SingleTagPathReportsAmbiguityFromOrthogonalIteration) {
     tag36h11_destroy(family);
 }
 
+namespace {
+
+posest::pipelines::AprilTagPoseSolveInput makeNTagInput(int n) {
+    auto input = makeBaseInput(makePinholeCalibration());
+    const cv::Mat K = makeIntrinsicMat();
+    const cv::Affine3d cam_T_field = cv::Affine3d::Identity();
+    for (int i = 0; i < n; ++i) {
+        const double x = -0.4 + 0.2 * static_cast<double>(i % 5);
+        const double y = -0.2 + 0.2 * static_cast<double>(i / 5);
+        input.tags.push_back(makeProjectedTagInput(
+            i,
+            posest::Pose3d{.translation_m = {x, y, 1.0}},
+            cam_T_field, K, {}));
+    }
+    return input;
+}
+
+}  // namespace
+
+TEST(AprilTagPoseSolver, CovarianceShrinksWithMoreTags) {
+    const auto out_2 = posest::pipelines::solveAprilTagPose(makeNTagInput(2));
+    const auto out_4 = posest::pipelines::solveAprilTagPose(makeNTagInput(4));
+    const auto out_8 = posest::pipelines::solveAprilTagPose(makeNTagInput(8));
+    ASSERT_TRUE(out_2.field_to_robot.has_value());
+    ASSERT_TRUE(out_4.field_to_robot.has_value());
+    ASSERT_TRUE(out_8.field_to_robot.has_value());
+    // Translation diagonal monotonically non-increasing as N grows.
+    EXPECT_GE(out_2.covariance[3 * 6 + 3], out_4.covariance[3 * 6 + 3]);
+    EXPECT_GE(out_4.covariance[3 * 6 + 3], out_8.covariance[3 * 6 + 3]);
+    // Rotation diagonal monotonically non-increasing as N grows.
+    EXPECT_GE(out_2.covariance[0 * 6 + 0], out_4.covariance[0 * 6 + 0]);
+    EXPECT_GE(out_4.covariance[0 * 6 + 0], out_8.covariance[0 * 6 + 0]);
+}
+
+TEST(AprilTagPoseSolver, CovarianceFloorAsymptoteWithLargeN) {
+    auto input = makeNTagInput(8);
+    // Fast decay so N=8 is essentially at the asymptote.
+    input.covariance.multi_tag_decay_k = 0.5;
+    const double base_t = input.covariance.base_sigma_translation_m;
+    const double floor_mult = input.covariance.well_spread_floor_mult;
+    const auto out = posest::pipelines::solveAprilTagPose(input);
+    ASSERT_TRUE(out.field_to_robot.has_value());
+    // At zero RMS / reference distance, distance/rms factors clamp to 1, so
+    // sigma_t ≈ base_sigma_translation_m * floor_mult, variance equals that
+    // squared. Compare with a generous tolerance to absorb solver residuals.
+    const double expected_var = (base_t * floor_mult) * (base_t * floor_mult);
+    const double observed_var = out.covariance[3 * 6 + 3];
+    EXPECT_GT(observed_var, expected_var * 0.5);
+    EXPECT_LT(observed_var, expected_var * 4.0);
+}
+
+namespace {
+
+// Build a minimal Output and run the public `computeSingleTagCovariance`.
+posest::pipelines::AprilTagPoseSolveOutput runSingleTagCov(
+    const cv::Affine3d& field_T_camera,
+    posest::pipelines::AprilTagCovarianceTuning tuning = {}) {
+    posest::pipelines::AprilTagPoseSolveOutput out;
+    posest::pipelines::computeSingleTagCovariance(
+        out,
+        /*mean_distance_m=*/0.0,  // forces distance_factor to clamp at 1.0
+        /*rms_px=*/0.0,           // forces rms_factor to clamp at 1.0
+        tuning,
+        field_T_camera);
+    return out;
+}
+
+}  // namespace
+
+TEST(AprilTagPoseSolver, SingleTagOpticalAxisInflationCameraAlignedWithWorldZ) {
+    posest::pipelines::AprilTagCovarianceTuning t;
+    const double sigma_r = t.base_sigma_rotation_rad;
+    const double k = t.single_tag_rotation_mult;
+    const cv::Affine3d field_T_camera = cv::Affine3d::Identity();  // camera +Z = world +Z
+
+    const auto out = runSingleTagCov(field_T_camera, t);
+
+    EXPECT_NEAR(out.covariance[0 * 6 + 0], sigma_r * sigma_r, 1e-12);
+    EXPECT_NEAR(out.covariance[1 * 6 + 1], sigma_r * sigma_r, 1e-12);
+    EXPECT_NEAR(out.covariance[2 * 6 + 2], k * k * sigma_r * sigma_r, 1e-12);
+}
+
+TEST(AprilTagPoseSolver, SingleTagOpticalAxisInflationCameraAlignedWithWorldX) {
+    posest::pipelines::AprilTagCovarianceTuning t;
+    const double sigma_r = t.base_sigma_rotation_rad;
+    const double k = t.single_tag_rotation_mult;
+    // Rotate so camera +Z -> world +X. A pitch of -90° about the camera's
+    // y-axis maps Z_cam -> X_world, X_cam -> -Z_world, Y_cam -> Y_world.
+    const cv::Matx33d R(
+        0.0, 0.0, 1.0,
+        0.0, 1.0, 0.0,
+       -1.0, 0.0, 0.0);
+    const cv::Affine3d field_T_camera(R, cv::Vec3d(0.0, 0.0, 0.0));
+
+    const auto out = runSingleTagCov(field_T_camera, t);
+
+    EXPECT_NEAR(out.covariance[0 * 6 + 0], k * k * sigma_r * sigma_r, 1e-12);
+    EXPECT_NEAR(out.covariance[1 * 6 + 1], sigma_r * sigma_r, 1e-12);
+    EXPECT_NEAR(out.covariance[2 * 6 + 2], sigma_r * sigma_r, 1e-12);
+}
+
+TEST(AprilTagPoseSolver, SingleTagInflationDegradesGracefullyAcrossObliqueAxes) {
+    posest::pipelines::AprilTagCovarianceTuning t;
+    const double sigma_r = t.base_sigma_rotation_rad;
+    const double k = t.single_tag_rotation_mult;
+    // Oblique rotation about (1,1,1)/sqrt(3) by 30°.
+    const double angle = 30.0 * M_PI / 180.0;
+    const double inv_sqrt3 = 1.0 / std::sqrt(3.0);
+    const cv::Vec3d axis(inv_sqrt3, inv_sqrt3, inv_sqrt3);
+    cv::Mat rvec = (cv::Mat_<double>(3, 1) << axis[0] * angle, axis[1] * angle, axis[2] * angle);
+    cv::Mat Rmat;
+    cv::Rodrigues(rvec, Rmat);
+    cv::Matx33d R(
+        Rmat.at<double>(0, 0), Rmat.at<double>(0, 1), Rmat.at<double>(0, 2),
+        Rmat.at<double>(1, 0), Rmat.at<double>(1, 1), Rmat.at<double>(1, 2),
+        Rmat.at<double>(2, 0), Rmat.at<double>(2, 1), Rmat.at<double>(2, 2));
+    const cv::Affine3d field_T_camera(R, cv::Vec3d(0.0, 0.0, 0.0));
+
+    const auto out = runSingleTagCov(field_T_camera, t);
+
+    const double low = sigma_r * sigma_r;
+    const double high = k * k * sigma_r * sigma_r;
+    for (int i = 0; i < 3; ++i) {
+        const double v = out.covariance[static_cast<std::size_t>(i * 6 + i)];
+        EXPECT_GE(v, low - 1e-12) << "axis " << i;
+        EXPECT_LE(v, high + 1e-12) << "axis " << i;
+    }
+    // Trace invariance: sum of rotational diagonals equals (2 + k²)·σ_r²
+    // regardless of orientation (orthogonal change-of-basis preserves trace).
+    const double trace =
+        out.covariance[0 * 6 + 0] +
+        out.covariance[1 * 6 + 1] +
+        out.covariance[2 * 6 + 2];
+    EXPECT_NEAR(trace, (2.0 + k * k) * sigma_r * sigma_r, 1e-9);
+}
+
+TEST(AprilTagPoseSolver, SingleTagCovarianceOffDiagonalsStayZero) {
+    const auto out = runSingleTagCov(cv::Affine3d::Identity());
+    for (int i = 0; i < 6; ++i) {
+        for (int j = 0; j < 6; ++j) {
+            if (i == j) continue;
+            EXPECT_DOUBLE_EQ(
+                out.covariance[static_cast<std::size_t>(i * 6 + j)], 0.0)
+                << "[" << i << "," << j << "]";
+        }
+    }
+}
+
 TEST(AprilTagPoseSolver, SingleTagDropsWhenThresholdBelowReportedAmbiguity) {
     apriltag_family_t* family = tag36h11_create();
     image_u8_t* rendered = apriltag_to_image(family, 0u);

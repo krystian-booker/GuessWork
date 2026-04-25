@@ -126,8 +126,19 @@ void writeCovarianceDiagonal(
     out[5 * 6 + 5] = var_t;
 }
 
-void computeCovariance(
-    AprilTagPoseSolveOutput& out,
+double smoothTagCountMult(int tag_count, double single_mult, double floor_mult, double decay_k) {
+    const double N = static_cast<double>(std::max(1, tag_count));
+    return floor_mult + (single_mult - floor_mult) *
+        std::exp(-(N - 1.0) / std::max(1e-6, decay_k));
+}
+
+struct CovarianceFactors {
+    double sigma_t{0.0};
+    double sigma_r_base{0.0};
+    double rot_multiplier{1.0};
+};
+
+CovarianceFactors covarianceFactors(
     double mean_distance_m,
     double rms_px,
     int tag_count,
@@ -138,16 +149,35 @@ void computeCovariance(
         1.0,
         (mean_distance_m * mean_distance_m) / (ref_d * ref_d));
     const double rms_factor = std::max(1.0, rms_px / ref_rms);
-    const double trans_count_mult =
-        (tag_count == 1) ? tuning.single_tag_translation_mult : 1.0;
-    const double rot_count_mult =
-        (tag_count == 1) ? tuning.single_tag_rotation_mult : 1.0;
-    const double sigma_t =
+    const double trans_count_mult = smoothTagCountMult(
+        tag_count,
+        tuning.single_tag_translation_mult,
+        tuning.well_spread_floor_mult,
+        tuning.multi_tag_decay_k);
+    const double rot_count_mult = smoothTagCountMult(
+        tag_count,
+        tuning.single_tag_rotation_mult,
+        tuning.well_spread_floor_mult,
+        tuning.multi_tag_decay_k);
+    CovarianceFactors out;
+    out.sigma_t =
         tuning.base_sigma_translation_m * distance_factor * rms_factor * trans_count_mult;
-    const double sigma_r =
-        tuning.base_sigma_rotation_rad * distance_factor * rms_factor * rot_count_mult;
-    writeCovarianceDiagonal(out.covariance, sigma_r, sigma_t);
+    out.sigma_r_base =
+        tuning.base_sigma_rotation_rad * distance_factor * rms_factor;
+    out.rot_multiplier = rot_count_mult;
+    return out;
 }
+
+void computeCovariance(
+    AprilTagPoseSolveOutput& out,
+    double mean_distance_m,
+    double rms_px,
+    int tag_count,
+    const AprilTagCovarianceTuning& tuning) {
+    const auto f = covarianceFactors(mean_distance_m, rms_px, tag_count, tuning);
+    writeCovarianceDiagonal(out.covariance, f.sigma_r_base * f.rot_multiplier, f.sigma_t);
+}
+
 
 bool intrinsicsArePresent(const AprilTagCameraCalibration& calibration) {
     return calibration.fx > 0.0 && calibration.fy > 0.0;
@@ -329,11 +359,39 @@ AprilTagPoseSolveOutput solveSingleTag(const AprilTagPoseSolveInput& input) {
     out.field_to_robot = affineToPose3d(field_T_robot);
     out.reprojection_rms_px = rms_px;
     out.solved_tag_count = 1;
-    computeCovariance(out, mean_distance_m, rms_px, 1, input.covariance);
+    computeSingleTagCovariance(
+        out, mean_distance_m, rms_px, input.covariance, field_T_camera);
     return out;
 }
 
 }  // namespace
+
+void computeSingleTagCovariance(
+    AprilTagPoseSolveOutput& out,
+    double mean_distance_m,
+    double rms_px,
+    const AprilTagCovarianceTuning& tuning,
+    const cv::Affine3d& field_T_camera) {
+    const auto f = covarianceFactors(mean_distance_m, rms_px, /*tag_count=*/1, tuning);
+    out.covariance.fill(0.0);
+
+    const double var_xy = f.sigma_r_base * f.sigma_r_base;
+    const double var_z = (f.sigma_r_base * f.rot_multiplier) *
+                         (f.sigma_r_base * f.rot_multiplier);
+    const cv::Matx33d R = field_T_camera.rotation();
+    for (int i = 0; i < 3; ++i) {
+        const double r0 = R(i, 0);
+        const double r1 = R(i, 1);
+        const double r2 = R(i, 2);
+        out.covariance[static_cast<std::size_t>(i * 6 + i)] =
+            r0 * r0 * var_xy + r1 * r1 * var_xy + r2 * r2 * var_z;
+    }
+
+    const double var_t = f.sigma_t * f.sigma_t;
+    out.covariance[3 * 6 + 3] = var_t;
+    out.covariance[4 * 6 + 4] = var_t;
+    out.covariance[5 * 6 + 5] = var_t;
+}
 
 AprilTagPoseSolveOutput solveAprilTagPose(const AprilTagPoseSolveInput& input) {
     if (input.tags.empty()) {

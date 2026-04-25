@@ -6,6 +6,8 @@
 #include <exception>
 #include <utility>
 
+#include "posest/CameraTriggerCache.h"
+
 namespace posest {
 
 ProducerBase::ProducerBase(std::string id) : id_(std::move(id)) {}
@@ -30,6 +32,10 @@ ProducerBase::~ProducerBase() {
 void ProducerBase::addConsumer(std::shared_ptr<IFrameConsumer> consumer) {
     std::lock_guard<std::mutex> g(consumers_mu_);
     consumers_.push_back(std::move(consumer));
+}
+
+void ProducerBase::setTriggerCache(std::shared_ptr<const CameraTriggerCache> cache) {
+    std::atomic_store_explicit(&trigger_cache_, std::move(cache), std::memory_order_release);
 }
 
 bool ProducerBase::removeConsumer(const std::shared_ptr<IFrameConsumer>& consumer) {
@@ -120,6 +126,14 @@ void ProducerBase::runLoop() {
         frame->sequence = next_sequence_++;
         frame->camera_id = id_;
         frame->image = std::move(image);
+
+        if (auto cache = std::atomic_load_explicit(
+                &trigger_cache_, std::memory_order_acquire)) {
+            if (auto stamp = cache->lookup(id_, frame->capture_time)) {
+                frame->teensy_time_us = stamp->teensy_time_us;
+                frame->trigger_sequence = stamp->trigger_sequence;
+            }
+        }
 
         FramePtr pub = frame;
         produced_.fetch_add(1, std::memory_order_relaxed);

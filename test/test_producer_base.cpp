@@ -5,11 +5,13 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
 
+#include "posest/CameraTriggerCache.h"
 #include "posest/ConsumerBase.h"
 #include "posest/Frame.h"
 #include "posest/MockProducer.h"
@@ -198,6 +200,99 @@ TEST(ProducerBase, SubclassSuppliedTimestampPassesThrough) {
     for (const auto& o : obs) {
         EXPECT_EQ(o.capture_time, anchor)
             << "base must not overwrite subclass-supplied timestamp";
+    }
+}
+
+namespace {
+
+class TriggerRecordingConsumer final : public posest::ConsumerBase {
+public:
+    explicit TriggerRecordingConsumer(std::string id) : posest::ConsumerBase(std::move(id)) {}
+    ~TriggerRecordingConsumer() override { stop(); }
+
+    struct Stamp {
+        std::optional<std::uint64_t> teensy_time_us;
+        std::optional<std::uint32_t> trigger_sequence;
+    };
+
+    std::vector<Stamp> take() const {
+        std::lock_guard<std::mutex> g(mu_);
+        return stamps_;
+    }
+
+protected:
+    void process(const posest::Frame& f) override {
+        std::lock_guard<std::mutex> g(mu_);
+        stamps_.push_back({f.teensy_time_us, f.trigger_sequence});
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::vector<Stamp> stamps_;
+};
+
+}  // namespace
+
+TEST(ProducerBase, TriggerCacheStampsFrameWhenLookupHits) {
+    const auto anchor =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+
+    auto cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{4, "cam"}},
+        std::chrono::milliseconds(100));
+    posest::CameraTriggerEvent ev;
+    ev.pin = 4;
+    ev.trigger_sequence = 99u;
+    ev.teensy_time_us = 555444333u;
+    ev.timestamp = anchor;
+    cache->recordEvent(ev);
+
+    StampedProducer prod("cam", 50, anchor);
+    prod.setTriggerCache(cache);
+    auto cons = std::make_shared<TriggerRecordingConsumer>("c");
+    prod.addConsumer(cons);
+
+    cons->start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+    while (prod.producedCount() < 50) std::this_thread::sleep_for(1ms);
+    prod.stop();
+    std::this_thread::sleep_for(5ms);
+    cons->stop();
+
+    const auto stamps = cons->take();
+    ASSERT_FALSE(stamps.empty());
+    for (const auto& s : stamps) {
+        ASSERT_TRUE(s.teensy_time_us.has_value());
+        EXPECT_EQ(*s.teensy_time_us, 555444333u);
+        ASSERT_TRUE(s.trigger_sequence.has_value());
+        EXPECT_EQ(*s.trigger_sequence, 99u);
+    }
+}
+
+TEST(ProducerBase, TriggerCacheLeavesFrameUnstampedWhenLookupMisses) {
+    // Cache is empty → no stamp on any frame.
+    auto cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{4, "cam"}},
+        std::chrono::milliseconds(100));
+
+    StampedProducer prod("cam", 20,
+        std::chrono::steady_clock::now() - std::chrono::seconds(10));
+    prod.setTriggerCache(cache);
+    auto cons = std::make_shared<TriggerRecordingConsumer>("c");
+    prod.addConsumer(cons);
+
+    cons->start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+    while (prod.producedCount() < 20) std::this_thread::sleep_for(1ms);
+    prod.stop();
+    std::this_thread::sleep_for(5ms);
+    cons->stop();
+
+    const auto stamps = cons->take();
+    ASSERT_FALSE(stamps.empty());
+    for (const auto& s : stamps) {
+        EXPECT_FALSE(s.teensy_time_us.has_value());
+        EXPECT_FALSE(s.trigger_sequence.has_value());
     }
 }
 

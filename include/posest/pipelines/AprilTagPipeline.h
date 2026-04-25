@@ -31,6 +31,8 @@ struct AprilTagCovarianceTuning {
     double single_tag_translation_mult{1.5};
     double single_tag_rotation_mult{5.0};
     double ambiguity_drop_threshold{0.4};
+    double multi_tag_decay_k{2.0};
+    double well_spread_floor_mult{0.5};
 };
 
 struct AprilTagPipelineConfig {
@@ -68,6 +70,7 @@ private:
     AprilTagPipelineConfig config_;
     apriltag_detector* detector_{nullptr};
     apriltag_family* family_{nullptr};
+    void (*family_destroy_)(apriltag_family*){nullptr};
 };
 
 }  // namespace posest::pipelines

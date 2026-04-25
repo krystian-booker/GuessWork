@@ -6,7 +6,13 @@
 #include <apriltag/apriltag.h>
 #include <apriltag/common/image_types.h>
 #include <apriltag/common/zarray.h>
+#include <apriltag/tag25h9.h>
 #include <apriltag/tag36h11.h>
+#include <apriltag/tagCircle21h7.h>
+#include <apriltag/tagCustom48h12.h>
+#include <apriltag/tagStandard41h12.h>
+#include <array>
+#include <string_view>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -15,6 +21,29 @@
 namespace posest::pipelines {
 
 namespace {
+
+struct FamilyBinding {
+    std::string_view name;
+    apriltag_family_t* (*create)();
+    void (*destroy)(apriltag_family_t*);
+};
+
+constexpr std::array<FamilyBinding, 5> kFamilyBindings{{
+    {"tag36h11", &tag36h11_create, &tag36h11_destroy},
+    {"tag25h9", &tag25h9_create, &tag25h9_destroy},
+    {"tagStandard41h12", &tagStandard41h12_create, &tagStandard41h12_destroy},
+    {"tagCircle21h7", &tagCircle21h7_create, &tagCircle21h7_destroy},
+    {"tagCustom48h12", &tagCustom48h12_create, &tagCustom48h12_destroy},
+}};
+
+const FamilyBinding* findFamily(std::string_view name) {
+    for (const auto& binding : kFamilyBindings) {
+        if (binding.name == name) {
+            return &binding;
+        }
+    }
+    return nullptr;
+}
 
 cv::Mat toGray8(const cv::Mat& image) {
     if (image.empty()) {
@@ -90,10 +119,14 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
             cov, "single_tag_rotation_mult", config.covariance.single_tag_rotation_mult);
         config.covariance.ambiguity_drop_threshold = jsonValueOr<double>(
             cov, "ambiguity_drop_threshold", config.covariance.ambiguity_drop_threshold);
+        config.covariance.multi_tag_decay_k = jsonValueOr<double>(
+            cov, "multi_tag_decay_k", config.covariance.multi_tag_decay_k);
+        config.covariance.well_spread_floor_mult = jsonValueOr<double>(
+            cov, "well_spread_floor_mult", config.covariance.well_spread_floor_mult);
     }
 
-    if (config.family != "tag36h11") {
-        throw std::invalid_argument("Only AprilTag family tag36h11 is supported");
+    if (!findFamily(config.family)) {
+        throw std::invalid_argument("Unsupported AprilTag family: " + config.family);
     }
     if (config.nthreads <= 0) {
         throw std::invalid_argument("AprilTag nthreads must be > 0");
@@ -139,6 +172,15 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
         throw std::invalid_argument(
             "AprilTag covariance.ambiguity_drop_threshold must be in (0, 1]");
     }
+    if (config.covariance.multi_tag_decay_k <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.multi_tag_decay_k must be > 0");
+    }
+    if (config.covariance.well_spread_floor_mult <= 0.0 ||
+        config.covariance.well_spread_floor_mult > 1.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.well_spread_floor_mult must be in (0, 1]");
+    }
 
     return config;
 }
@@ -148,7 +190,12 @@ AprilTagPipeline::AprilTagPipeline(
     IMeasurementSink& sink,
     AprilTagPipelineConfig config)
     : VisionPipelineBase(std::move(id), "apriltag", sink), config_(std::move(config)) {
-    family_ = tag36h11_create();
+    const FamilyBinding* binding = findFamily(config_.family);
+    if (!binding) {
+        throw std::invalid_argument("Unsupported AprilTag family: " + config_.family);
+    }
+    family_ = binding->create();
+    family_destroy_ = binding->destroy;
     detector_ = apriltag_detector_create();
     if (!family_ || !detector_) {
         throw std::runtime_error("Failed to create AprilTag detector");
@@ -170,8 +217,11 @@ AprilTagPipeline::~AprilTagPipeline() {
         detector_ = nullptr;
     }
     if (family_) {
-        tag36h11_destroy(family_);
+        if (family_destroy_) {
+            family_destroy_(family_);
+        }
         family_ = nullptr;
+        family_destroy_ = nullptr;
     }
 }
 
@@ -180,6 +230,8 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
     observation.camera_id = frame.camera_id;
     observation.frame_sequence = frame.sequence;
     observation.capture_time = frame.capture_time;
+    observation.teensy_time_us = frame.teensy_time_us;
+    observation.trigger_sequence = frame.trigger_sequence;
 
     cv::Mat gray = toGray8(frame.image);
     if (gray.empty()) {

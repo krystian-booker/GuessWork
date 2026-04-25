@@ -19,6 +19,10 @@
 #include "posest/teensy/Protocol.h"
 #include "posest/teensy/SerialTransport.h"
 
+namespace posest {
+class CameraTriggerCache;
+}
+
 namespace posest::teensy {
 
 struct TeensyStats {
@@ -54,7 +58,8 @@ public:
         runtime::TeensyConfig config,
         std::vector<runtime::CameraTriggerConfig> camera_triggers,
         IMeasurementSink& measurement_sink,
-        SerialTransportFactory transport_factory = makePosixSerialTransport);
+        SerialTransportFactory transport_factory = makePosixSerialTransport,
+        std::shared_ptr<CameraTriggerCache> trigger_cache = nullptr);
     ~TeensyService() override;
 
     TeensyService(const TeensyService&) = delete;
@@ -92,6 +97,7 @@ private:
     std::vector<runtime::CameraTriggerConfig> camera_triggers_;
     IMeasurementSink& measurement_sink_;
     SerialTransportFactory transport_factory_;
+    std::shared_ptr<CameraTriggerCache> trigger_cache_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::optional<Frame> last_outbound_frame_;

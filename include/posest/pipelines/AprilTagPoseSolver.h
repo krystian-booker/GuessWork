@@ -4,6 +4,8 @@
 #include <optional>
 #include <vector>
 
+#include <opencv2/core/affine.hpp>
+
 #include "posest/MeasurementTypes.h"
 #include "posest/pipelines/AprilTagPipeline.h"
 
@@ -40,5 +42,17 @@ struct AprilTagPoseSolveOutput {
 };
 
 AprilTagPoseSolveOutput solveAprilTagPose(const AprilTagPoseSolveInput& input);
+
+// Single-tag covariance helper exposed for testing. Builds Σ_cam_R with the
+// optical-axis (camera +Z) variance inflated by `single_tag_rotation_mult²`,
+// rotates to world frame via `field_T_camera`, and writes the diagonal of the
+// resulting 3×3 rotational sub-block plus a uniform translational diagonal
+// (using the smooth tag-count multiplier evaluated at N=1).
+void computeSingleTagCovariance(
+    AprilTagPoseSolveOutput& out,
+    double mean_distance_m,
+    double rms_px,
+    const AprilTagCovarianceTuning& tuning,
+    const cv::Affine3d& field_T_camera);
 
 }  // namespace posest::pipelines

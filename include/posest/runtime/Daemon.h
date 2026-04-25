@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "posest/CameraCapabilities.h"
+#include "posest/CameraTriggerCache.h"
 #include "posest/MeasurementTypes.h"
 #include "posest/MeasurementBus.h"
 #include "posest/config/IConfigStore.h"
@@ -172,6 +173,7 @@ private:
 
     RuntimeConfig config_;
     std::unique_ptr<MeasurementBus> measurement_bus_;
+    std::shared_ptr<CameraTriggerCache> trigger_cache_;
     std::unique_ptr<fusion::FusionService> fusion_;
     std::shared_ptr<teensy::TeensyService> teensy_;
     std::unique_ptr<WebService> web_;

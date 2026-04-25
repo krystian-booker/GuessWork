@@ -17,6 +17,8 @@
 
 namespace posest {
 
+class CameraTriggerCache;
+
 // Reusable base for any frame source.
 //
 // Owns: the capture thread, the subscriber list, the sequence counter, and the
@@ -45,6 +47,13 @@ public:
     ProducerState state() const override { return state_.load(std::memory_order_acquire); }
 
     std::uint64_t producedCount() const { return produced_.load(); }
+
+    // Wire (or unwire) a CameraTriggerCache. When set, the capture loop looks
+    // up a Teensy-stamped trigger for each frame's capture_time and stamps
+    // the resulting Frame::teensy_time_us / trigger_sequence. Safe to call at
+    // any time; the load is atomic so the producer thread observes updates
+    // without locking.
+    void setTriggerCache(std::shared_ptr<const CameraTriggerCache> cache);
 
 protected:
     // Produce one frame. Return true on success (frame will be fanned out),
@@ -89,6 +98,7 @@ private:
     std::atomic<ProducerState> state_{ProducerState::Idle};
     std::atomic<std::uint64_t> produced_{0};
     std::uint64_t next_sequence_{0};
+    std::shared_ptr<const CameraTriggerCache> trigger_cache_;
 };
 
 }  // namespace posest

@@ -5,10 +5,13 @@
 
 #include <apriltag/apriltag.h>
 #include <apriltag/common/image_u8.h>
+#include <apriltag/tag25h9.h>
 #include <apriltag/tag36h11.h>
+#include <apriltag/tagStandard41h12.h>
 #include <gtest/gtest.h>
 #include <opencv2/imgproc.hpp>
 
+#include "posest/CameraTriggerCache.h"
 #include "posest/MeasurementBus.h"
 #include "posest/MockProducer.h"
 #include "posest/pipelines/AprilTagPipeline.h"
@@ -81,6 +84,40 @@ cv::Mat makeRenderedTag36h11(int tag_id) {
     return canvas;
 }
 
+cv::Mat renderTagFamily(const std::string& family_name, int tag_id) {
+    apriltag_family_t* family = nullptr;
+    void (*destroy_fn)(apriltag_family_t*) = nullptr;
+    if (family_name == "tag36h11") {
+        family = tag36h11_create();
+        destroy_fn = &tag36h11_destroy;
+    } else if (family_name == "tag25h9") {
+        family = tag25h9_create();
+        destroy_fn = &tag25h9_destroy;
+    } else if (family_name == "tagStandard41h12") {
+        family = tagStandard41h12_create();
+        destroy_fn = &tagStandard41h12_destroy;
+    } else {
+        throw std::invalid_argument("Unknown family for renderTagFamily: " + family_name);
+    }
+
+    image_u8_t* rendered = apriltag_to_image(family, static_cast<std::uint32_t>(tag_id));
+    cv::Mat tag(
+        rendered->height,
+        rendered->width,
+        CV_8UC1,
+        rendered->buf,
+        static_cast<std::size_t>(rendered->stride));
+    cv::Mat scaled;
+    cv::resize(tag, scaled, cv::Size(200, 200), 0.0, 0.0, cv::INTER_NEAREST);
+
+    cv::Mat canvas(320, 320, CV_8UC1, cv::Scalar(255));
+    scaled.copyTo(canvas(cv::Rect(60, 60, scaled.cols, scaled.rows)));
+
+    image_u8_destroy(rendered);
+    destroy_fn(family);
+    return canvas;
+}
+
 }  // namespace
 
 TEST(Pipelines, PlaceholderAprilTagPublishesEmptyObservation) {
@@ -150,6 +187,8 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_DOUBLE_EQ(defaults.covariance.single_tag_translation_mult, 1.5);
     EXPECT_DOUBLE_EQ(defaults.covariance.single_tag_rotation_mult, 5.0);
     EXPECT_DOUBLE_EQ(defaults.covariance.ambiguity_drop_threshold, 0.4);
+    EXPECT_DOUBLE_EQ(defaults.covariance.multi_tag_decay_k, 2.0);
+    EXPECT_DOUBLE_EQ(defaults.covariance.well_spread_floor_mult, 0.5);
 
     config.parameters_json =
         R"({"nthreads":2,"quad_decimate":1.5,"debug":true,"tag_size_m":0.2})";
@@ -167,6 +206,14 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_DOUBLE_EQ(custom_cov.covariance.base_sigma_rotation_rad, 0.02);
 
     config.parameters_json = R"({"family":"tagStandard41h12"})";
+    const auto std41h12 = posest::pipelines::parseAprilTagPipelineConfig(config);
+    EXPECT_EQ(std41h12.family, "tagStandard41h12");
+
+    config.parameters_json = R"({"family":"tag25h9"})";
+    const auto h25h9 = posest::pipelines::parseAprilTagPipelineConfig(config);
+    EXPECT_EQ(h25h9.family, "tag25h9");
+
+    config.parameters_json = R"({"family":"tag52h13"})";
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
 
     config.parameters_json = R"({"nthreads":"two"})";
@@ -182,6 +229,18 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
 
     config.parameters_json = R"({"covariance":"oops"})";
+    EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
+
+    config.parameters_json =
+        R"({"covariance":{"multi_tag_decay_k":3.0,"well_spread_floor_mult":0.25}})";
+    const auto custom_scale = posest::pipelines::parseAprilTagPipelineConfig(config);
+    EXPECT_DOUBLE_EQ(custom_scale.covariance.multi_tag_decay_k, 3.0);
+    EXPECT_DOUBLE_EQ(custom_scale.covariance.well_spread_floor_mult, 0.25);
+
+    config.parameters_json = R"({"covariance":{"multi_tag_decay_k":0.0}})";
+    EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
+
+    config.parameters_json = R"({"covariance":{"well_spread_floor_mult":1.5}})";
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
 }
 
@@ -230,6 +289,61 @@ TEST(AprilTagPipeline, DetectsRenderedTag36h11) {
     }
     EXPECT_FALSE(observation.field_to_robot.has_value());
     EXPECT_EQ(observation.solved_tag_count, 0);
+}
+
+class AprilTagPipelineFamilyTest : public ::testing::TestWithParam<std::string> {};
+
+TEST_P(AprilTagPipelineFamilyTest, DetectsRenderedTag) {
+    const std::string family = GetParam();
+    posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.family = family;
+    config.quad_decimate = 1.0;
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
+
+    pipeline.start();
+    pipeline.deliver(makeFrame(renderTagFamily(family, 0)));
+    auto measurement = bus.take();
+    pipeline.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    ASSERT_TRUE(std::holds_alternative<posest::AprilTagObservation>(*measurement));
+    const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
+    ASSERT_FALSE(observation.detections.empty()) << "family=" << family;
+    EXPECT_EQ(observation.detections[0].tag_id, 0);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SupportedFamilies,
+    AprilTagPipelineFamilyTest,
+    ::testing::Values("tag36h11", "tag25h9", "tagStandard41h12"),
+    [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
+
+TEST(AprilTagPipeline, PropagatesTeensyTriggerFieldsToObservation) {
+    posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
+
+    auto frame = std::make_shared<posest::Frame>();
+    frame->camera_id = "cam0";
+    frame->sequence = 7;
+    frame->capture_time = std::chrono::steady_clock::now();
+    frame->image = cv::Mat(64, 64, CV_8UC1, cv::Scalar(255));
+    frame->teensy_time_us = 1234567u;
+    frame->trigger_sequence = 42u;
+
+    pipeline.start();
+    pipeline.deliver(frame);
+    auto measurement = bus.take();
+    pipeline.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
+    ASSERT_TRUE(observation.teensy_time_us.has_value());
+    EXPECT_EQ(*observation.teensy_time_us, 1234567u);
+    ASSERT_TRUE(observation.trigger_sequence.has_value());
+    EXPECT_EQ(*observation.trigger_sequence, 42u);
 }
 
 TEST(AprilTagPipeline, MissingFieldLayoutLeavesFieldToRobotUnset) {

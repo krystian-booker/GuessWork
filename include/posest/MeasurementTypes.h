@@ -44,6 +44,10 @@ struct AprilTagObservation {
     std::string camera_id;
     std::uint64_t frame_sequence{0};
     Timestamp capture_time{};
+    // Teensy-stamped shutter time and trigger pulse sequence when a matching
+    // CameraTriggerEvent was paired with the source Frame; nullopt otherwise.
+    std::optional<std::uint64_t> teensy_time_us;
+    std::optional<std::uint32_t> trigger_sequence;
     std::vector<AprilTagDetection> detections;
 
     // Aggregated PnP solution. nullopt when no field-known tags were

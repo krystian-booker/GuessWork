@@ -775,16 +775,25 @@ void DaemonController::loadAndBuild() {
         }
 
         measurement_bus_ = std::make_unique<MeasurementBus>(kMeasurementBusCapacity);
+        std::unordered_map<std::int32_t, std::string> pin_to_camera;
+        for (const auto& trigger : config_.camera_triggers) {
+            pin_to_camera[trigger.teensy_pin] = trigger.camera_id;
+        }
+        trigger_cache_ = std::make_shared<CameraTriggerCache>(std::move(pin_to_camera));
         fusion_ = std::make_unique<fusion::FusionService>(
             *measurement_bus_,
             fusion::buildFusionConfig(config_));
         teensy_ = std::make_shared<teensy::TeensyService>(
-            config_.teensy, config_.camera_triggers, *measurement_bus_);
+            config_.teensy, config_.camera_triggers, *measurement_bus_,
+            teensy::makePosixSerialTransport, trigger_cache_);
         fusion_->addOutputSink(teensy_);
         web_ = std::make_unique<WebService>(*config_store_);
         graph_ = std::make_unique<RuntimeGraph>(
             config_, camera_factory_, pipeline_factory_, *measurement_bus_);
         graph_->build();
+        for (const auto& camera : graph_->cameraProducers()) {
+            camera->setTriggerCache(trigger_cache_);
+        }
         built_ = true;
 
         {
