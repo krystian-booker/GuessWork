@@ -28,20 +28,35 @@ Run a single GTest case directly (faster iteration than ctest):
 
 ### OpenCV + Conan on headless Linux
 
-`conanfile.txt` disables most optional OpenCV features (wayland/ffmpeg/gstreamer/tiff/webp/gtk/etc.). Adding further OpenCV features will likely reintroduce `xorg/system` and other system pulls — verify with `conan graph info .` before enabling.
+`conanfile.txt` disables most optional OpenCV features (wayland/ffmpeg/gstreamer/tiff/webp/gtk/etc.) and disables TBB on GTSAM. Adding further OpenCV features will likely reintroduce `xorg/system` and other system pulls — verify with `conan graph info .` before enabling. Top-level deps are: `opencv`, `gtest`, `sqlite3`, `nlohmann_json`, `apriltag`, `yaml-cpp`, `gtsam`.
+
+### Teensy 4.1 firmware
+
+Firmware lives under `firmware/teensy41/` (PlatformIO). The host-side wire format in `include/posest/teensy/Protocol.h` is authoritative — change it there first, then mirror in firmware. Build/upload/monitor:
+
+```bash
+pio run -d firmware/teensy41
+pio run -d firmware/teensy41 -t upload
+pio device monitor -d firmware/teensy41 -b 921600
+```
 
 ## Architecture
 
-The CMake libraries are split by runtime area:
+The CMake libraries are split by runtime area (see `CMakeLists.txt` for full link graph):
 
-- **`posest_core`** — the reusable pipeline plumbing: interfaces (`IFrameProducer`, `IFrameConsumer`), the `Frame` value type, the `LatestFrameSlot` mailbox, and the `ProducerBase` / `ConsumerBase` threaded base classes. Depends on OpenCV for `cv::Mat`.
+- **`posest_core`** — the reusable pipeline plumbing: interfaces (`IFrameProducer`, `IFrameConsumer`), the `Frame` value type, the `LatestFrameSlot` mailbox, the `ProducerBase` / `ConsumerBase` threaded base classes, and the `MeasurementBus` (typed pub/sub for non-frame measurements like IMU/wheel/odometry). Depends on OpenCV for `cv::Mat`.
 - **`posest_camera`** — generic camera abstractions: `CameraConfig` structs and the `CameraProducer` abstract base class that sits between `ProducerBase` and concrete backends. The `CameraProducer` enforces an open → configure → stream → grab → stop → close lifecycle.
-- **`posest_config`** — runtime configuration persistence and validation. SQLite is the only persistent config backend; `SqliteConfigStore` creates/migrates the schema and atomically saves/loads `RuntimeConfig`.
-- **`posest_runtime`** — runtime graph construction, camera/pipeline factory interfaces, and web/control facade.
-- **`posest_fusion`** — measurement ingestion and fusion output boundaries.
-- **`posest_teensy`** — Teensy USB protocol codec and fusion output adapter.
-- **`posest_v4l2`** — V4L2 camera backend (Linux only): `V4L2Producer` opens a device by stable path (`/dev/v4l/by-id/` or `/dev/v4l/by-path/`), applies UVC controls from config, uses MMAP streaming with zero-copy decode input, and converts V4L2 kernel timestamps to `steady_clock`. Depends on `posest_camera` + system V4L2 headers.
-- **`posest_mock`** — `MockProducer` / `MockConsumer` used by the test suite to exercise the core pipeline contracts.
+- **`posest_config`** — runtime configuration persistence and validation. SQLite is the only persistent config backend; `SqliteConfigStore` creates/migrates the schema and atomically saves/loads `RuntimeConfig`. Also parses Kalibr/field-layout YAML/JSON via `CalibrationParsers`.
+- **`posest_runtime`** — runtime graph construction (`RuntimeGraph`), camera/pipeline factory interfaces (`Factories.h`), telemetry snapshot, and the web/control facade (`WebService`).
+- **`posest_pipelines`** — vision pipeline implementations: `VisionPipelineBase` (a `ConsumerBase` specialization that publishes onto the `MeasurementBus`), `AprilTagPipeline`, and the placeholder pipelines used as defaults. Links `apriltag`.
+- **`posest_calibration`** — dataset recording (`CalibrationRecorder`) and Kalibr Docker invocation helpers used by the daemon's calibration subcommands.
+- **`posest_fusion`** — measurement ingestion (`FusionService` subscribes to the `MeasurementBus`) and fusion output sink boundary (`IFusionOutputSink`). Links GTSAM.
+- **`posest_teensy`** — Teensy USB protocol codec (`Protocol.h`), `SerialTransport` / `FakeSerialTransport`, and `TeensyService` which adapts protocol frames to the `MeasurementBus` and consumes fused poses.
+- **`posest_v4l2`** — V4L2 camera backend (Linux only): `V4L2Producer` opens a device by stable path (`/dev/v4l/by-id/` or `/dev/v4l/by-path/`), applies UVC controls from config, uses MMAP streaming with zero-copy decode input, and converts V4L2 kernel timestamps to `steady_clock`. Includes `V4L2DeviceEnumerator`. Depends on `posest_camera` + system V4L2 headers.
+- **`posest_daemon_lib`** + **`posest_daemon`** — the single-process runtime: `Daemon.cpp` owns lifecycle (`Created → LoadedConfig → Built → Running → Stopping → Stopped`), `ProductionFactories` wires real producers/pipelines (V4L2 + AprilTag), and `app/posest_daemon.cpp` is the executable. The same binary also dispatches one-shot config subcommands (`calibrate-camera`, `import-field-layout`, `record-kalibr-dataset`, `make-kalibr-bag`, `calibrate-camera-imu`) — see `daemonUsage()` for the full surface.
+- **`posest_mock`** — `MockProducer` / `MockConsumer` / `MockCameraProducer` used by the test suite to exercise the core pipeline and camera contracts.
+
+Deeper feature-level architecture docs live in `docs/features/` (e.g. `producer-consumer-architecture.md`, `camera-producer.md`). `docs/ignore_this_folder/` is exactly what it sounds like — don't read or edit it.
 
 ### The latency contract (important)
 
@@ -85,4 +100,12 @@ Supported control names: `exposure_auto`, `exposure_absolute`, `gain`, `brightne
 
 ### Adding new camera backends
 
-Subclass `CameraProducer` and implement the 7 hooks (`openDevice`, `applyFormat`, `applyControls`, `startStream`, `grabFrame`, `stopStream`, `closeDevice`). Do **not** override `captureOne()` — it is `final` and delegates to `grabFrame()`. Create a new library (e.g. `posest_avfoundation`) following the `posest_v4l2` pattern.
+Subclass `CameraProducer` and implement the 7 hooks (`openDevice`, `applyFormat`, `applyControls`, `startStream`, `grabFrame`, `stopStream`, `closeDevice`). Do **not** override `captureOne()` — it is `final` and delegates to `grabFrame()`. Create a new library (e.g. `posest_avfoundation`) following the `posest_v4l2` pattern, and register it in `ProductionCameraFactory` so the daemon can build it.
+
+### MeasurementBus and non-frame data
+
+Frames flow producer → consumer through `LatestFrameSlot` (drop-oldest, single slot). Non-frame measurements (IMU samples, wheel/robot odometry, AprilTag detections) flow through `MeasurementBus` instead — a typed pub/sub fan-out used by `TeensyService` (publisher), vision pipelines (publishers, via `VisionPipelineBase`), and `FusionService` (subscriber). When wiring a new measurement source or sink, prefer the bus over ad-hoc shared state, and follow the same non-blocking publisher rule that applies to `IFrameConsumer::deliver()`.
+
+### Code style and conventions
+
+C++20, warnings-as-listed in `CMakeLists.txt` (`-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion`). 4-space indent, braces same-line. Types/test suites `PascalCase`, functions `camelCase`, namespaces lowercase, private members trailing underscore (`running_`). Keep platform-specific code isolated to its backend library and CMake-guarded (see `posest_v4l2`). Public API headers go in `include/posest/...` mirroring the `src/<area>/...` layout.
