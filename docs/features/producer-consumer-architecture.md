@@ -1,6 +1,6 @@
 # Producer/Consumer Architecture
 
-**Status:** Core plumbing is feature-complete and now supports **dynamic subscription**: `addConsumer()` / `removeConsumer()` may be called at any time, including while a producer is running. `ProducerBase` also exposes a `state()` enum so the graph can detect a capture loop that exited on its own. The remaining gap is the user-facing **video-preview consumer** (`PreviewConsumer`) and its declarative binding entry — both deferred until an HTTP server is wired into `WebService`.
+**Status:** Core plumbing is feature-complete: **dynamic subscription** (`addConsumer()` / `removeConsumer()` are safe at any time), **`VisionPipelineBase` collapsed onto `ConsumerBase`** (the duplicated worker plumbing is gone), and **producer-died telemetry** (`ProducerState` machine + `RuntimeGraph::deadProducers()` + warn-log on graph stop) are all in. The remaining gap is the user-facing **video-preview consumer** (`PreviewConsumer`) and its declarative binding entry — both deferred until an HTTP server is wired into `WebService`.
 
 This document covers the subsystem that moves `Frame` objects from any source (camera, mock, future file replay) to any sink (vision pipelines, calibration recorder, future video-preview feed). Camera-specific lifecycle and backend details live in [`camera-producer.md`](camera-producer.md); this document stays one layer up — the generic plumbing that all producers and consumers share.
 
@@ -222,7 +222,7 @@ Cost: one uncontended mutex acquisition + a small `vector<shared_ptr>` copy per 
 | 1-to-many fan-out | ✅ Complete | Static and dynamic. Per-frame mutex-protected snapshot in `runLoop`. |
 | Dynamic subscribe/unsubscribe (e.g. live preview attach) | ✅ Complete | `addConsumer()` / `removeConsumer()` are safe at any time. See §6.1. |
 | Plumbing dedupe (`VisionPipelineBase` ↔ `ConsumerBase`) | ✅ Complete | `VisionPipelineBase` now inherits `ConsumerBase`. See §6.4. |
-| Producer-died telemetry | 🚧 Partial | `ProducerState` enum + `state()` and the `ProducerBase` state machine are wired; `RuntimeGraph::deadProducers()` is declared but its implementation, the warn-log on graph stop, and dedicated tests are still pending. See §6.5. |
+| Producer-died telemetry | ✅ Complete | `ProducerState` enum + `state()`, `ProducerBase` state machine, `RuntimeGraph::deadProducers()`, and warn-log on graph stop — all wired with dedicated tests. See §6.5. |
 | **Video-preview consumer implementation** | ❌ Deferred | No `PreviewConsumer` class; `WebService` has no HTTP server to host MJPEG yet. Co-deferred with non-pipeline binding scaffolding (§6.3). |
 | Declarative non-pipeline bindings in `RuntimeConfig` | ❌ Deferred | Co-motivated by preview; design once a concrete consumer exists. |
 | Cross-camera timestamp domain | ✅ Complete | `steady_clock` enforced by `ProducerBase`. |
@@ -281,23 +281,29 @@ The only motivation for a declarative non-pipeline binding category is preview (
 
 `VisionPipelineBase` now inherits `ConsumerBase` and only carries `type_` and `IMeasurementSink&`. The duplicated `thread + LatestFrameSlot + deliver/put/take/process` plumbing was removed; `process()` is overridden once with `final` to forward to the existing `processFrame()` hook so concrete pipelines (`AprilTagPipeline`, placeholder pipelines) compile unchanged. To resolve the diamond on `IFrameConsumer` between `ConsumerBase` and `runtime::IVisionPipeline`, both bases now use `public virtual IFrameConsumer`. The `posest_pipelines` and `posest_runtime_graph` test suites pass without modification.
 
-### 6.5 Producer-side telemetry for "I died" — **PARTIAL**
+### 6.5 Producer-side telemetry for "I died" — **DONE**
 
 `IFrameProducer` now exposes `ProducerState state() const`, with values `Idle | Running | EndOfStream | Failed`. `ProducerBase` owns a `std::atomic<ProducerState>` that:
 
 - starts at `Idle`,
-- transitions `Idle → Running` via CAS in `start()` (rejecting restart from terminal states),
+- transitions `Idle → Running` via CAS in `start()` (which now returns `[[nodiscard]] ProducerState` so callers cannot silently miss a terminal-state restart attempt — see C2 in the code-review notes),
 - writes `EndOfStream` (via `Running → EndOfStream` CAS) when `captureOne()` returns `false`,
 - writes `Failed` (via `Running → Failed` CAS) when `captureOne()` propagates an exception,
 - returns to `Idle` in `stop()`, joining the worker thread either way (terminal-state stops still join cleanly).
 
 The CAS guards ensure that a concurrent `stop()` always wins — operators who explicitly stopped don't see a spurious `EndOfStream`/`Failed` afterwards. Consumers' mailboxes still need to be `stop()`'d by the owner; `state()` is what surfaces "the producer left on its own" to the polling caller.
 
-**Still pending (small):**
+`RuntimeGraph` exposes the signal at the graph level:
 
-- `RuntimeGraph::deadProducers()` is declared in the header but the body is not implemented yet; once implemented it will scan `cameras_` and return the ids whose `state()` is `EndOfStream` or `Failed`.
-- `RuntimeGraph::stop()` should warn-log when a camera is already in a terminal state at shutdown so silent deaths surface even when nothing was polling.
-- Dedicated tests for the new state machine (`StateRunningWhileCapturing`, `StateBecomesEndOfStreamWhenCaptureOneReturnsFalse`, `StateBecomesFailedOnException`, `StopJoinsCleanlyAfterEndOfStream`).
+- `RuntimeGraph::deadProducers()` returns the ids of cameras whose `state()` is `EndOfStream` or `Failed`. Cheap; intended for periodic health polling from the daemon's telemetry loop.
+- `RuntimeGraph::stop()` warn-logs to stderr when a camera is already in a terminal state at shutdown, so silent deaths surface even when nothing was polling.
+
+Test coverage in `test/test_producer_base.cpp`:
+
+- `StateRunningWhileCapturing` — `state()` reports `Idle → Running → Idle` across the start/stop cycle.
+- `StateBecomesEndOfStreamWhenCaptureOneReturnsFalse` — verifies the `Running → EndOfStream` transition without an intervening `stop()`, and that a subsequent `start()` returns `EndOfStream` (no-op).
+- `StateBecomesFailedOnException` — verifies the `Running → Failed` transition via the existing `ThrowingProducer`.
+- `StopJoinsCleanlyAfterEndOfStream` — `stop()` after the worker has already exited completes within 100 ms and lands at `Idle`.
 
 The deeper camera-lifecycle discussion still lives in [`camera-producer.md`](camera-producer.md) §6.2; this section covers only the plumbing-level signal.
 
@@ -311,7 +317,7 @@ MJPEG decode happens on the producer thread (`V4L2Producer::grabFrame`), so the 
 
 The core plumbing (interfaces, base classes, drop-oldest mailbox, fan-out, startup/shutdown, timestamp discipline) implements the stated requirements cleanly. Multi-producer scales trivially because nothing is shared between producers; 1-to-many fan-out is a first-class feature and its isolation properties are covered by tests.
 
-Dynamic subscription (§6.1) and the `VisionPipelineBase` / `ConsumerBase` dedupe (§6.4) have landed. Producer-side state telemetry (§6.5) is partially in: the `ProducerState` enum and the `ProducerBase` state machine are wired and CAS-safe against concurrent `stop()`, but the `RuntimeGraph::deadProducers()` body, the warn-log on graph stop, and the dedicated tests are still pending.
+Dynamic subscription (§6.1), the `VisionPipelineBase` / `ConsumerBase` dedupe (§6.4), and producer-died telemetry (§6.5) have all landed end-to-end with tests.
 
 The remaining product-visible gap is the user-facing **video-preview consumer** (§6.2). The plumbing is ready for it, but it can't ship until `WebService` grows an HTTP server to host an MJPEG endpoint. Declarative non-pipeline bindings (§6.3) are co-deferred with §6.2 — without a concrete preview consumer there's nothing to bind.
 

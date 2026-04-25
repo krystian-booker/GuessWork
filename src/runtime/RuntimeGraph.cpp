@@ -115,11 +115,36 @@ RuntimeGraph::cameraProducers() const {
     return out;
 }
 
+std::vector<std::string> RuntimeGraph::deadProducers() const {
+    std::vector<std::string> out;
+    for (const auto& entry : cameras_) {
+        const auto s = entry.second->state();
+        if (s == ProducerState::EndOfStream || s == ProducerState::Failed) {
+            out.push_back(entry.first);
+        }
+    }
+    return out;
+}
+
 void RuntimeGraph::stop() {
     if (!running_) {
         return;
     }
     for (auto it = camera_start_order_.rbegin(); it != camera_start_order_.rend(); ++it) {
+        // Surface a silent-death camera to the operator: if a producer's
+        // capture loop exited on its own (EndOfStream / Failed) and nothing
+        // was polling state(), warn now so the event isn't lost.
+        const auto pre_stop_state = (*it)->state();
+        if (pre_stop_state == ProducerState::EndOfStream ||
+            pre_stop_state == ProducerState::Failed) {
+            std::fprintf(stderr,
+                         "RuntimeGraph: camera %s exited on its own (state=%s) "
+                         "before graph stop\n",
+                         (*it)->id().c_str(),
+                         pre_stop_state == ProducerState::EndOfStream
+                             ? "EndOfStream"
+                             : "Failed");
+        }
         (*it)->stop();
     }
     for (auto it = pipeline_start_order_.rbegin(); it != pipeline_start_order_.rend(); ++it) {

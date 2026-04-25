@@ -408,3 +408,83 @@ TEST(ProducerBase, AddRemoveDuringCaptureDoesNotDeadlock) {
     EXPECT_GE(primary_fps, 240.0 * 0.5)
         << "subscriber churn starved the primary consumer";
 }
+
+TEST(ProducerBase, StateRunningWhileCapturing) {
+    posest::mock::MockProducer prod(
+        posest::mock::MockProducerConfig{.id = "cam", .target_fps = 240.0});
+    EXPECT_EQ(prod.state(), posest::ProducerState::Idle);
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(prod.state(), posest::ProducerState::Running);
+    prod.stop();
+    EXPECT_EQ(prod.state(), posest::ProducerState::Idle);
+}
+
+TEST(ProducerBase, StateBecomesEndOfStreamWhenCaptureOneReturnsFalse) {
+    // CountingProducer emits N frames then returns false. Verify that the
+    // base transitions to EndOfStream on its own — without anyone calling
+    // stop() — and that the public state reflects it.
+    CountingProducer prod("cam", 5);
+    auto cons = std::make_shared<RecordingConsumer>("c");
+    prod.addConsumer(cons);
+
+    cons->start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+
+    // Wait for the loop to exhaust its budget AND notice the false return.
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (prod.state() == posest::ProducerState::Running &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(prod.state(), posest::ProducerState::EndOfStream);
+    EXPECT_EQ(prod.producedCount(), 5u);
+
+    // start() on a terminal-state producer must report the terminal state
+    // back to the caller and remain a no-op.
+    EXPECT_EQ(prod.start(), posest::ProducerState::EndOfStream);
+
+    cons->stop();
+}
+
+TEST(ProducerBase, StateBecomesFailedOnException) {
+    ThrowingProducer prod("cam");
+    auto cons = std::make_shared<RecordingConsumer>("c");
+    prod.addConsumer(cons);
+
+    cons->start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (prod.state() == posest::ProducerState::Running &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(prod.state(), posest::ProducerState::Failed);
+    EXPECT_EQ(prod.start(), posest::ProducerState::Failed)
+        << "start() on a Failed producer must remain a no-op";
+
+    cons->stop();
+}
+
+TEST(ProducerBase, StopJoinsCleanlyAfterEndOfStream) {
+    // After the worker has exited on its own, stop() must still join
+    // (the worker is joinable but already terminated) and reset to Idle
+    // within a tight bound.
+    CountingProducer prod("cam", 10);
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (prod.state() == posest::ProducerState::Running &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_EQ(prod.state(), posest::ProducerState::EndOfStream);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    prod.stop();
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+    EXPECT_LT(elapsed, 100ms) << "stop() must not hang after EndOfStream";
+    EXPECT_EQ(prod.state(), posest::ProducerState::Idle);
+}
