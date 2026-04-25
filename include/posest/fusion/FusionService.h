@@ -7,7 +7,6 @@
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "posest/MeasurementBus.h"
@@ -29,10 +28,7 @@ inline constexpr std::uint32_t kFusionStatusOptimizerError = 1u << 3u;
 inline constexpr std::uint32_t kFusionStatusDegradedInput = 1u << 4u;
 
 struct FusionConfig {
-    std::unordered_map<int, Pose3d> field_to_tags;
-    std::unordered_map<std::string, Pose3d> camera_to_robot;
     std::array<double, 6> wheel_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
-    std::array<double, 6> vision_sigmas{0.15, 0.15, 0.12, 0.10, 0.10, 0.20};
     std::array<double, 6> origin_prior_sigmas{10.0, 10.0, 3.14, 10.0, 10.0, 10.0};
 };
 

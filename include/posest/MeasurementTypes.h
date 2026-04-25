@@ -45,6 +45,15 @@ struct AprilTagObservation {
     std::uint64_t frame_sequence{0};
     Timestamp capture_time{};
     std::vector<AprilTagDetection> detections;
+
+    // Aggregated PnP solution. nullopt when no field-known tags were
+    // detected, the solver failed, or single-tag ambiguity exceeded the
+    // configured threshold. When set, the covariance below is meaningful and
+    // uses gtsam Pose3 tangent order: [rx, ry, rz, tx, ty, tz], 6x6 row-major.
+    std::optional<Pose3d> field_to_robot;
+    std::array<double, 36> covariance{};
+    double reprojection_rms_px{0.0};
+    int solved_tag_count{0};
 };
 
 struct VioMeasurement {

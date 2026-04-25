@@ -23,6 +23,16 @@ struct AprilTagCameraCalibration {
     std::vector<double> distortion_coefficients;
 };
 
+struct AprilTagCovarianceTuning {
+    double base_sigma_translation_m{0.02};
+    double base_sigma_rotation_rad{0.02};
+    double reference_distance_m{1.0};
+    double reference_rms_px{1.0};
+    double single_tag_translation_mult{1.5};
+    double single_tag_rotation_mult{5.0};
+    double ambiguity_drop_threshold{0.4};
+};
+
 struct AprilTagPipelineConfig {
     std::string family = "tag36h11";
     int nthreads = 4;
@@ -36,6 +46,8 @@ struct AprilTagPipelineConfig {
     double tag_size_m{0.1651};
     std::unordered_map<std::string, AprilTagCameraCalibration> camera_calibrations;
     std::unordered_map<int, posest::Pose3d> field_to_tags;
+    std::unordered_map<std::string, posest::Pose3d> camera_to_robot;
+    AprilTagCovarianceTuning covariance;
 };
 
 AprilTagPipelineConfig parseAprilTagPipelineConfig(

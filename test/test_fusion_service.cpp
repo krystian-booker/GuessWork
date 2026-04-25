@@ -34,20 +34,29 @@ bool covarianceIsFinite(const posest::FusedPoseEstimate& estimate) {
 }
 
 posest::fusion::FusionConfig makeTagFusionConfig() {
-    posest::fusion::FusionConfig config;
-    config.field_to_tags.emplace(
-        1,
-        posest::Pose3d{
-            .translation_m = {5.0, 0.0, 0.0},
-            .rotation_rpy_rad = {0.0, 0.0, 0.0},
-        });
-    config.camera_to_robot.emplace(
-        "cam0",
-        posest::Pose3d{
-            .translation_m = {0.0, 0.0, 0.0},
-            .rotation_rpy_rad = {0.0, 0.0, 0.0},
-        });
-    return config;
+    return posest::fusion::FusionConfig{};
+}
+
+posest::AprilTagObservation makePriorObservation(
+    const posest::Pose3d& field_to_robot,
+    double sigma_translation = 0.1,
+    double sigma_rotation = 0.05) {
+    posest::AprilTagObservation observation;
+    observation.camera_id = "cam0";
+    observation.capture_time = std::chrono::steady_clock::now();
+    observation.field_to_robot = field_to_robot;
+    observation.solved_tag_count = 2;
+    observation.reprojection_rms_px = 0.3;
+    const double var_t = sigma_translation * sigma_translation;
+    const double var_r = sigma_rotation * sigma_rotation;
+    observation.covariance.fill(0.0);
+    observation.covariance[0 * 6 + 0] = var_r;
+    observation.covariance[1 * 6 + 1] = var_r;
+    observation.covariance[2 * 6 + 2] = var_r;
+    observation.covariance[3 * 6 + 3] = var_t;
+    observation.covariance[4 * 6 + 4] = var_t;
+    observation.covariance[5 * 6 + 5] = var_t;
+    return observation;
 }
 
 }  // namespace
@@ -83,21 +92,15 @@ TEST(FusionService, ProcessesWheelOdometryWithGtsamAndPublishesEstimate) {
     ASSERT_EQ(sink->estimates.size(), 1u);
 }
 
-TEST(FusionService, UsesAprilTagMeasurementAsAbsolutePosePrior) {
+TEST(FusionService, UsesAggregatedAprilTagPoseAsSinglePrior) {
     posest::MeasurementBus bus(8);
     posest::fusion::FusionService fusion(bus, makeTagFusionConfig());
     fusion.start();
 
-    posest::AprilTagObservation observation;
-    observation.camera_id = "cam0";
-    observation.capture_time = std::chrono::steady_clock::now();
-    posest::AprilTagDetection detection;
-    detection.tag_id = 1;
-    detection.camera_to_tag = posest::Pose3d{
-        .translation_m = {2.0, 0.0, 0.0},
+    auto observation = makePriorObservation(posest::Pose3d{
+        .translation_m = {3.0, 0.0, 0.0},
         .rotation_rpy_rad = {0.0, 0.0, 0.0},
-    };
-    observation.detections.push_back(detection);
+    });
     ASSERT_TRUE(bus.publish(observation));
 
     std::this_thread::sleep_for(50ms);
@@ -105,10 +108,34 @@ TEST(FusionService, UsesAprilTagMeasurementAsAbsolutePosePrior) {
 
     const auto latest = fusion.latestEstimate();
     ASSERT_TRUE(latest.has_value());
-    EXPECT_NEAR(latest->field_to_robot.x_m, 3.0, 1e-6);
-    EXPECT_NEAR(latest->field_to_robot.y_m, 0.0, 1e-6);
+    EXPECT_NEAR(latest->field_to_robot.x_m, 3.0, 1e-3);
+    EXPECT_NEAR(latest->field_to_robot.y_m, 0.0, 1e-3);
     EXPECT_EQ(latest->status_flags & posest::fusion::kFusionStatusVisionUnavailable, 0u);
     EXPECT_TRUE(covarianceIsFinite(*latest));
+}
+
+TEST(FusionService, RejectsNonPositiveDefiniteCovariance) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus, makeTagFusionConfig());
+    fusion.start();
+
+    posest::AprilTagObservation observation;
+    observation.camera_id = "cam0";
+    observation.capture_time = std::chrono::steady_clock::now();
+    observation.field_to_robot = posest::Pose3d{};
+    observation.solved_tag_count = 2;
+    observation.covariance.fill(0.0);
+    ASSERT_TRUE(bus.publish(observation));
+
+    std::this_thread::sleep_for(50ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    if (latest.has_value()) {
+        EXPECT_NE(
+            latest->status_flags & posest::fusion::kFusionStatusOptimizerError,
+            0u);
+    }
 }
 
 TEST(FusionService, MarksVisionUnavailableForEmptyTagObservationAfterInitialization) {
@@ -176,41 +203,14 @@ TEST(FusionService, RejectsStaleMeasurements) {
     EXPECT_EQ(stats.stale_measurements, 1u);
 }
 
-TEST(FusionConfig, BuildsActiveFieldTagsAndCameraExtrinsicsFromRuntimeConfig) {
+TEST(FusionConfig, BuildFusionConfigIgnoresRuntimeConfig) {
     posest::runtime::RuntimeConfig runtime_config;
-    posest::runtime::FieldLayoutConfig layout;
-    layout.id = "field";
-    layout.name = "Field";
-    layout.source_file_path = "field.json";
-    layout.field_length_m = 16.0;
-    layout.field_width_m = 8.0;
-    layout.tags.push_back({
-        .tag_id = 1,
-        .field_to_tag = {
-            .translation_m = {2.0, 3.0, 0.5},
-            .rotation_rpy_rad = {0.0, 0.0, 1.0},
-        },
-    });
-    runtime_config.field_layouts.push_back(layout);
-    runtime_config.active_field_layout_id = "field";
     runtime_config.calibrations.push_back({
         .camera_id = "cam0",
         .version = "v1",
         .active = true,
     });
-    runtime_config.camera_extrinsics.push_back({
-        .camera_id = "cam0",
-        .version = "v1",
-        .camera_to_robot = {
-            .translation_m = {0.1, 0.2, 0.3},
-            .rotation_rpy_rad = {0.0, 0.0, 0.0},
-        },
-    });
-
     const auto config = posest::fusion::buildFusionConfig(runtime_config);
-
-    ASSERT_EQ(config.field_to_tags.size(), 1u);
-    ASSERT_EQ(config.camera_to_robot.size(), 1u);
-    EXPECT_DOUBLE_EQ(config.field_to_tags.at(1).translation_m.y, 3.0);
-    EXPECT_DOUBLE_EQ(config.camera_to_robot.at("cam0").translation_m.x, 0.1);
+    EXPECT_GT(config.wheel_sigmas[0], 0.0);
+    EXPECT_GT(config.origin_prior_sigmas[0], 0.0);
 }

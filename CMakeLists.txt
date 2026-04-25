@@ -97,6 +97,7 @@ add_library(posest_pipelines
     src/pipelines/VisionPipelineBase.cpp
     src/pipelines/PlaceholderPipelines.cpp
     src/pipelines/AprilTagPipeline.cpp
+    src/pipelines/AprilTagPoseSolver.cpp
 )
 target_link_libraries(posest_pipelines PUBLIC
     posest_core
@@ -154,6 +155,7 @@ add_executable(posest_tests
     test/test_measurement_bus.cpp
     test/test_runtime_graph.cpp
     test/test_pipelines.cpp
+    test/test_apriltag_pose_solver.cpp
     test/test_teensy_protocol.cpp
     test/test_teensy_service.cpp
     test/test_calibration_recorder.cpp

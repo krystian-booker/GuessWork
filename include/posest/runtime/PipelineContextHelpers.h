@@ -13,4 +13,8 @@ void applyFieldLayoutContext(
     const RuntimeConfig& runtime_config,
     pipelines::AprilTagPipelineConfig& pipeline_config);
 
+void applyCameraExtrinsicsContext(
+    const RuntimeConfig& runtime_config,
+    pipelines::AprilTagPipelineConfig& pipeline_config);
+
 }  // namespace posest::runtime::detail

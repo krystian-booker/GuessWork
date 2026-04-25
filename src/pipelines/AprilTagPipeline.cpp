@@ -1,18 +1,16 @@
 #include "posest/pipelines/AprilTagPipeline.h"
 
-#include <cmath>
-#include <optional>
 #include <stdexcept>
 #include <utility>
 
 #include <apriltag/apriltag.h>
-#include <apriltag/apriltag_pose.h>
 #include <apriltag/common/image_types.h>
-#include <apriltag/common/matd.h>
 #include <apriltag/common/zarray.h>
 #include <apriltag/tag36h11.h>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include "posest/pipelines/AprilTagPoseSolver.h"
 
 namespace posest::pipelines {
 
@@ -45,68 +43,6 @@ T jsonValueOr(const nlohmann::json& json, const char* key, T fallback) {
     return json.at(key).get<T>();
 }
 
-Vec3 rpyFromRotationMatrix(const matd_t* rotation) {
-    const double r00 = matd_get(rotation, 0, 0);
-    const double r10 = matd_get(rotation, 1, 0);
-    const double r20 = matd_get(rotation, 2, 0);
-    const double r21 = matd_get(rotation, 2, 1);
-    const double r22 = matd_get(rotation, 2, 2);
-    const double r11 = matd_get(rotation, 1, 1);
-    const double r12 = matd_get(rotation, 1, 2);
-
-    const double sy = std::sqrt(r00 * r00 + r10 * r10);
-    if (sy < 1e-9) {
-        return {
-            std::atan2(-r12, r11),
-            std::atan2(-r20, sy),
-            0.0,
-        };
-    }
-    return {
-        std::atan2(r21, r22),
-        std::atan2(-r20, sy),
-        std::atan2(r10, r00),
-    };
-}
-
-std::optional<Pose3d> estimateCameraToTag(
-    apriltag_detection_t* detection,
-    const AprilTagCameraCalibration& calibration,
-    double tag_size_m,
-    double& reprojection_error) {
-    apriltag_detection_info_t info{};
-    info.det = detection;
-    info.tagsize = tag_size_m;
-    info.fx = calibration.fx;
-    info.fy = calibration.fy;
-    info.cx = calibration.cx;
-    info.cy = calibration.cy;
-
-    apriltag_pose_t pose{};
-    reprojection_error = estimate_tag_pose(&info, &pose);
-    if (!pose.R || !pose.t) {
-        if (pose.R) {
-            matd_destroy(pose.R);
-        }
-        if (pose.t) {
-            matd_destroy(pose.t);
-        }
-        return std::nullopt;
-    }
-
-    Pose3d out;
-    out.translation_m = {
-        matd_get(pose.t, 0, 0),
-        matd_get(pose.t, 1, 0),
-        matd_get(pose.t, 2, 0),
-    };
-    out.rotation_rpy_rad = rpyFromRotationMatrix(pose.R);
-
-    matd_destroy(pose.R);
-    matd_destroy(pose.t);
-    return out;
-}
-
 }  // namespace
 
 AprilTagPipelineConfig parseAprilTagPipelineConfig(
@@ -134,6 +70,28 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
         jsonValueOr<std::string>(params, "field_layout_id", config.field_layout_id);
     config.tag_size_m = jsonValueOr<double>(params, "tag_size_m", config.tag_size_m);
 
+    if (params.contains("covariance")) {
+        const auto& cov = params.at("covariance");
+        if (!cov.is_object()) {
+            throw std::invalid_argument(
+                "AprilTag pipeline parameters_json.covariance must be a JSON object");
+        }
+        config.covariance.base_sigma_translation_m = jsonValueOr<double>(
+            cov, "base_sigma_translation_m", config.covariance.base_sigma_translation_m);
+        config.covariance.base_sigma_rotation_rad = jsonValueOr<double>(
+            cov, "base_sigma_rotation_rad", config.covariance.base_sigma_rotation_rad);
+        config.covariance.reference_distance_m = jsonValueOr<double>(
+            cov, "reference_distance_m", config.covariance.reference_distance_m);
+        config.covariance.reference_rms_px = jsonValueOr<double>(
+            cov, "reference_rms_px", config.covariance.reference_rms_px);
+        config.covariance.single_tag_translation_mult = jsonValueOr<double>(
+            cov, "single_tag_translation_mult", config.covariance.single_tag_translation_mult);
+        config.covariance.single_tag_rotation_mult = jsonValueOr<double>(
+            cov, "single_tag_rotation_mult", config.covariance.single_tag_rotation_mult);
+        config.covariance.ambiguity_drop_threshold = jsonValueOr<double>(
+            cov, "ambiguity_drop_threshold", config.covariance.ambiguity_drop_threshold);
+    }
+
     if (config.family != "tag36h11") {
         throw std::invalid_argument("Only AprilTag family tag36h11 is supported");
     }
@@ -151,6 +109,35 @@ AprilTagPipelineConfig parseAprilTagPipelineConfig(
     }
     if (config.tag_size_m <= 0.0) {
         throw std::invalid_argument("AprilTag tag_size_m must be > 0");
+    }
+    if (config.covariance.base_sigma_translation_m <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.base_sigma_translation_m must be > 0");
+    }
+    if (config.covariance.base_sigma_rotation_rad <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.base_sigma_rotation_rad must be > 0");
+    }
+    if (config.covariance.reference_distance_m <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.reference_distance_m must be > 0");
+    }
+    if (config.covariance.reference_rms_px <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.reference_rms_px must be > 0");
+    }
+    if (config.covariance.single_tag_translation_mult <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.single_tag_translation_mult must be > 0");
+    }
+    if (config.covariance.single_tag_rotation_mult <= 0.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.single_tag_rotation_mult must be > 0");
+    }
+    if (config.covariance.ambiguity_drop_threshold <= 0.0 ||
+        config.covariance.ambiguity_drop_threshold > 1.0) {
+        throw std::invalid_argument(
+            "AprilTag covariance.ambiguity_drop_threshold must be in (0, 1]");
     }
 
     return config;
@@ -218,6 +205,25 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
 
     const int count = zarray_size(detections);
     observation.detections.reserve(static_cast<std::size_t>(count));
+
+    AprilTagPoseSolveInput solver_input;
+    solver_input.tag_size_m = config_.tag_size_m;
+    solver_input.covariance = config_.covariance;
+
+    const auto calibration_it = config_.camera_calibrations.find(frame.camera_id);
+    const auto extrinsics_it = config_.camera_to_robot.find(frame.camera_id);
+    const bool has_calibration = calibration_it != config_.camera_calibrations.end();
+    const bool has_extrinsics = extrinsics_it != config_.camera_to_robot.end();
+    if (has_calibration) {
+        solver_input.calibration = calibration_it->second;
+    }
+    if (has_extrinsics) {
+        solver_input.camera_to_robot = extrinsics_it->second;
+    }
+
+    std::vector<int> solver_index_to_detection_index;
+    solver_index_to_detection_index.reserve(static_cast<std::size_t>(count));
+
     for (int i = 0; i < count; ++i) {
         apriltag_detection_t* detection = nullptr;
         zarray_get(detections, i, &detection);
@@ -227,21 +233,43 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
 
         AprilTagDetection out;
         out.tag_id = detection->id;
-        out.ambiguity = static_cast<double>(detection->hamming);
+        out.ambiguity = 0.0;
         out.reprojection_error_px = 0.0;
         for (std::size_t corner = 0; corner < out.image_corners_px.size(); ++corner) {
             out.image_corners_px[corner].x = detection->p[corner][0];
             out.image_corners_px[corner].y = detection->p[corner][1];
         }
-        const auto calibration_it = config_.camera_calibrations.find(frame.camera_id);
-        if (calibration_it != config_.camera_calibrations.end()) {
-            out.camera_to_tag = estimateCameraToTag(
-                detection,
-                calibration_it->second,
-                config_.tag_size_m,
-                out.reprojection_error_px);
-        }
+        const std::size_t detection_index = observation.detections.size();
         observation.detections.push_back(out);
+
+        if (!has_calibration || !has_extrinsics) {
+            continue;
+        }
+        const auto field_it = config_.field_to_tags.find(detection->id);
+        if (field_it == config_.field_to_tags.end()) {
+            continue;
+        }
+        AprilTagPoseSolveInput::TagInput tag_input;
+        tag_input.tag_id = detection->id;
+        tag_input.image_corners_px = out.image_corners_px;
+        tag_input.field_to_tag = field_it->second;
+        tag_input.raw = detection;
+        solver_input.tags.push_back(tag_input);
+        solver_index_to_detection_index.push_back(static_cast<int>(detection_index));
+    }
+
+    if (!solver_input.tags.empty()) {
+        const AprilTagPoseSolveOutput solver_output = solveAprilTagPose(solver_input);
+        observation.field_to_robot = solver_output.field_to_robot;
+        observation.covariance = solver_output.covariance;
+        observation.reprojection_rms_px = solver_output.reprojection_rms_px;
+        observation.solved_tag_count = solver_output.solved_tag_count;
+        if (solver_output.single_tag_ambiguity.has_value() &&
+            !solver_index_to_detection_index.empty()) {
+            const int detection_index = solver_index_to_detection_index.front();
+            observation.detections[static_cast<std::size_t>(detection_index)].ambiguity =
+                *solver_output.single_tag_ambiguity;
+        }
     }
 
     apriltag_detections_destroy(detections);

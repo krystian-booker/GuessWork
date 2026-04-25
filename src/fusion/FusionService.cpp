@@ -66,41 +66,12 @@ gtsam::Key poseKey(std::uint64_t index) {
     return gtsam::Symbol('x', index).key();
 }
 
-std::optional<gtsam::Pose3> fieldToRobotFromTag(
-    const FusionConfig& config,
-    const AprilTagObservation& observation,
-    const AprilTagDetection& detection,
-    std::uint32_t& status_flags) {
-    if (!detection.camera_to_tag) {
-        status_flags |= kFusionStatusDegradedInput;
-        return std::nullopt;
-    }
-
-    const auto field_tag_it = config.field_to_tags.find(detection.tag_id);
-    if (field_tag_it == config.field_to_tags.end()) {
-        status_flags |= kFusionStatusDegradedInput;
-        return std::nullopt;
-    }
-
-    const auto camera_robot_it = config.camera_to_robot.find(observation.camera_id);
-    if (camera_robot_it == config.camera_to_robot.end()) {
-        status_flags |= kFusionStatusDegradedInput;
-        return std::nullopt;
-    }
-
-    const gtsam::Pose3 field_to_tag = toGtsamPose(field_tag_it->second);
-    const gtsam::Pose3 camera_to_tag = toGtsamPose(*detection.camera_to_tag);
-    const gtsam::Pose3 camera_to_robot = toGtsamPose(camera_robot_it->second);
-    return field_to_tag.compose(camera_to_tag.inverse()).compose(camera_to_robot);
-}
-
 }  // namespace
 
 struct FusionBackend {
     explicit FusionBackend(FusionConfig config)
         : config_(std::move(config)),
           wheel_noise_(diagonalNoise(config_.wheel_sigmas)),
-          vision_noise_(diagonalNoise(config_.vision_sigmas)),
           origin_prior_noise_(diagonalNoise(config_.origin_prior_sigmas)) {
         gtsam::ISAM2Params params;
         params.relinearizeThreshold = 0.01;
@@ -151,42 +122,38 @@ struct FusionBackend {
         const AprilTagObservation& observation,
         Timestamp timestamp) {
         std::uint32_t status_flags = 0u;
-        gtsam::NonlinearFactorGraph graph;
-        gtsam::Values initial_values;
-        std::optional<gtsam::Pose3> first_pose;
-
-        for (const auto& detection : observation.detections) {
-            auto field_to_robot =
-                fieldToRobotFromTag(config_, observation, detection, status_flags);
-            if (!field_to_robot) {
-                continue;
-            }
-            if (!first_pose) {
-                first_pose = *field_to_robot;
-            }
-        }
-
-        if (!first_pose) {
+        if (!observation.field_to_robot.has_value()) {
             status_flags |= kFusionStatusVisionUnavailable;
             return estimateFromCurrent(timestamp, status_flags);
         }
 
+        gtsam::Matrix6 covariance_matrix;
+        for (int row = 0; row < 6; ++row) {
+            for (int col = 0; col < 6; ++col) {
+                covariance_matrix(row, col) =
+                    observation.covariance[static_cast<std::size_t>(row * 6 + col)];
+            }
+        }
+
+        gtsam::SharedNoiseModel vision_noise;
+        try {
+            vision_noise = gtsam::noiseModel::Gaussian::Covariance(covariance_matrix);
+        } catch (const std::exception&) {
+            return estimateFromCurrent(timestamp, status_flags | kFusionStatusOptimizerError);
+        }
+
+        const gtsam::Pose3 field_to_robot = toGtsamPose(*observation.field_to_robot);
+
+        gtsam::NonlinearFactorGraph graph;
+        gtsam::Values initial_values;
         gtsam::Key key = current_key_;
         std::uint64_t index = current_index_;
         if (!initialized_) {
             key = poseKey(0);
             index = 0;
-            initial_values.insert(key, *first_pose);
+            initial_values.insert(key, field_to_robot);
         }
-
-        for (const auto& detection : observation.detections) {
-            auto field_to_robot =
-                fieldToRobotFromTag(config_, observation, detection, status_flags);
-            if (field_to_robot) {
-                graph.add(gtsam::PriorFactor<gtsam::Pose3>(
-                    key, *field_to_robot, vision_noise_));
-            }
-        }
+        graph.add(gtsam::PriorFactor<gtsam::Pose3>(key, field_to_robot, vision_noise));
 
         if (!update(graph, initial_values, key, index)) {
             return estimateFromCurrent(timestamp, status_flags | kFusionStatusOptimizerError);
@@ -253,7 +220,6 @@ private:
 
     FusionConfig config_;
     gtsam::SharedNoiseModel wheel_noise_;
-    gtsam::SharedNoiseModel vision_noise_;
     gtsam::SharedNoiseModel origin_prior_noise_;
     gtsam::ISAM2 isam_;
     gtsam::Values estimate_;
@@ -263,34 +229,8 @@ private:
     bool initialized_{false};
 };
 
-FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config) {
-    FusionConfig config;
-
-    for (const auto& layout : runtime_config.field_layouts) {
-        if (layout.id != runtime_config.active_field_layout_id) {
-            continue;
-        }
-        for (const auto& tag : layout.tags) {
-            config.field_to_tags[tag.tag_id] = tag.field_to_tag;
-        }
-        break;
-    }
-
-    std::unordered_map<std::string, std::string> active_versions;
-    for (const auto& calibration : runtime_config.calibrations) {
-        if (calibration.active) {
-            active_versions[calibration.camera_id] = calibration.version;
-        }
-    }
-    for (const auto& extrinsics : runtime_config.camera_extrinsics) {
-        const auto version_it = active_versions.find(extrinsics.camera_id);
-        if (version_it != active_versions.end() &&
-            version_it->second == extrinsics.version) {
-            config.camera_to_robot[extrinsics.camera_id] = extrinsics.camera_to_robot;
-        }
-    }
-
-    return config;
+FusionConfig buildFusionConfig(const runtime::RuntimeConfig& /*runtime_config*/) {
+    return FusionConfig{};
 }
 
 FusionService::FusionService(MeasurementBus& measurement_bus, FusionConfig config)

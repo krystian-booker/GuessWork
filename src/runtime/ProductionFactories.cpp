@@ -59,6 +59,32 @@ void applyFieldLayoutContext(
     }
 }
 
+void applyCameraExtrinsicsContext(
+    const RuntimeConfig& runtime_config,
+    pipelines::AprilTagPipelineConfig& pipeline_config) {
+    std::unordered_map<std::string, std::string> active_versions;
+    for (const auto& calibration : runtime_config.calibrations) {
+        if (!calibration.active) {
+            continue;
+        }
+        if (!pipeline_config.calibration_version.empty() &&
+            calibration.version != pipeline_config.calibration_version) {
+            continue;
+        }
+        active_versions[calibration.camera_id] = calibration.version;
+    }
+    for (const auto& extrinsics : runtime_config.camera_extrinsics) {
+        const auto version_it = active_versions.find(extrinsics.camera_id);
+        if (version_it == active_versions.end()) {
+            continue;
+        }
+        if (version_it->second != extrinsics.version) {
+            continue;
+        }
+        pipeline_config.camera_to_robot[extrinsics.camera_id] = extrinsics.camera_to_robot;
+    }
+}
+
 }  // namespace posest::runtime::detail
 
 namespace posest::runtime {
@@ -96,6 +122,7 @@ std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(
     if (config.type == "apriltag") {
         auto pipeline_config = pipelines::parseAprilTagPipelineConfig(config);
         detail::applyCameraCalibrationContext(runtime_config, pipeline_config);
+        detail::applyCameraExtrinsicsContext(runtime_config, pipeline_config);
         detail::applyFieldLayoutContext(runtime_config, pipeline_config);
         return std::make_shared<pipelines::AprilTagPipeline>(
             config.id,

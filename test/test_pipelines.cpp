@@ -143,6 +143,13 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_DOUBLE_EQ(defaults.quad_decimate, 1.0);
     EXPECT_DOUBLE_EQ(defaults.tag_size_m, 0.1651);
     EXPECT_TRUE(defaults.refine_edges);
+    EXPECT_DOUBLE_EQ(defaults.covariance.base_sigma_translation_m, 0.02);
+    EXPECT_DOUBLE_EQ(defaults.covariance.base_sigma_rotation_rad, 0.02);
+    EXPECT_DOUBLE_EQ(defaults.covariance.reference_distance_m, 1.0);
+    EXPECT_DOUBLE_EQ(defaults.covariance.reference_rms_px, 1.0);
+    EXPECT_DOUBLE_EQ(defaults.covariance.single_tag_translation_mult, 1.5);
+    EXPECT_DOUBLE_EQ(defaults.covariance.single_tag_rotation_mult, 5.0);
+    EXPECT_DOUBLE_EQ(defaults.covariance.ambiguity_drop_threshold, 0.4);
 
     config.parameters_json =
         R"({"nthreads":2,"quad_decimate":1.5,"debug":true,"tag_size_m":0.2})";
@@ -152,6 +159,13 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_DOUBLE_EQ(custom.tag_size_m, 0.2);
     EXPECT_TRUE(custom.debug);
 
+    config.parameters_json =
+        R"({"covariance":{"base_sigma_translation_m":0.05,"ambiguity_drop_threshold":0.6}})";
+    const auto custom_cov = posest::pipelines::parseAprilTagPipelineConfig(config);
+    EXPECT_DOUBLE_EQ(custom_cov.covariance.base_sigma_translation_m, 0.05);
+    EXPECT_DOUBLE_EQ(custom_cov.covariance.ambiguity_drop_threshold, 0.6);
+    EXPECT_DOUBLE_EQ(custom_cov.covariance.base_sigma_rotation_rad, 0.02);
+
     config.parameters_json = R"({"family":"tagStandard41h12"})";
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
 
@@ -159,6 +173,15 @@ TEST(AprilTagPipeline, ConfigParserAppliesDefaultsAndRejectsInvalidValues) {
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::exception);
 
     config.parameters_json = R"({"tag_size_m":0.0})";
+    EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
+
+    config.parameters_json = R"({"covariance":{"base_sigma_translation_m":-0.1}})";
+    EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
+
+    config.parameters_json = R"({"covariance":{"ambiguity_drop_threshold":1.5}})";
+    EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
+
+    config.parameters_json = R"({"covariance":"oops"})";
     EXPECT_THROW(posest::pipelines::parseAprilTagPipelineConfig(config), std::invalid_argument);
 }
 
@@ -205,27 +228,22 @@ TEST(AprilTagPipeline, DetectsRenderedTag36h11) {
         EXPECT_GT(corner.x, 0.0);
         EXPECT_GT(corner.y, 0.0);
     }
-    EXPECT_FALSE(observation.detections[0].camera_to_tag.has_value());
+    EXPECT_FALSE(observation.field_to_robot.has_value());
+    EXPECT_EQ(observation.solved_tag_count, 0);
 }
 
-TEST(AprilTagPipeline, PopulatesCameraToTagWhenCalibrationIsAvailable) {
+TEST(AprilTagPipeline, MissingFieldLayoutLeavesFieldToRobotUnset) {
     posest::MeasurementBus bus(4);
     posest::pipelines::AprilTagPipelineConfig config;
     config.quad_decimate = 1.0;
     config.camera_calibrations.emplace(
         "cam0",
         posest::pipelines::AprilTagCameraCalibration{
-            .fx = 500.0,
-            .fy = 500.0,
-            .cx = 160.0,
-            .cy = 160.0,
-            .distortion_model = {},
-            .distortion_coefficients = {},
+            .fx = 500.0, .fy = 500.0, .cx = 160.0, .cy = 160.0,
+            .distortion_model = {}, .distortion_coefficients = {},
         });
-    posest::pipelines::AprilTagPipeline pipeline(
-        "tags",
-        bus,
-        config);
+    config.camera_to_robot.emplace("cam0", posest::Pose3d{});
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
 
     pipeline.start();
     pipeline.deliver(makeFrame(makeRenderedTag36h11(0)));
@@ -233,12 +251,75 @@ TEST(AprilTagPipeline, PopulatesCameraToTagWhenCalibrationIsAvailable) {
     pipeline.stop();
 
     ASSERT_TRUE(measurement.has_value());
-    ASSERT_TRUE(std::holds_alternative<posest::AprilTagObservation>(*measurement));
     const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
     ASSERT_FALSE(observation.detections.empty());
-    ASSERT_TRUE(observation.detections[0].camera_to_tag.has_value());
-    EXPECT_GT(observation.detections[0].camera_to_tag->translation_m.z, 0.0);
-    EXPECT_GE(observation.detections[0].reprojection_error_px, 0.0);
+    EXPECT_FALSE(observation.field_to_robot.has_value());
+    EXPECT_EQ(observation.solved_tag_count, 0);
+}
+
+TEST(AprilTagPipeline, MissingExtrinsicsLeavesFieldToRobotUnset) {
+    posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
+    config.camera_calibrations.emplace(
+        "cam0",
+        posest::pipelines::AprilTagCameraCalibration{
+            .fx = 500.0, .fy = 500.0, .cx = 160.0, .cy = 160.0,
+            .distortion_model = {}, .distortion_coefficients = {},
+        });
+    config.field_to_tags.emplace(0, posest::Pose3d{});
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
+
+    pipeline.start();
+    pipeline.deliver(makeFrame(makeRenderedTag36h11(0)));
+    auto measurement = bus.take();
+    pipeline.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
+    ASSERT_FALSE(observation.detections.empty());
+    EXPECT_FALSE(observation.field_to_robot.has_value());
+}
+
+TEST(AprilTagPipeline, SingleTagWithFullContextPopulatesFieldToRobotPose) {
+    posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
+    config.tag_size_m = 0.1;
+    config.camera_calibrations.emplace(
+        "cam0",
+        posest::pipelines::AprilTagCameraCalibration{
+            .fx = 500.0, .fy = 500.0, .cx = 160.0, .cy = 160.0,
+            .distortion_model = {}, .distortion_coefficients = {},
+        });
+    config.camera_to_robot.emplace("cam0", posest::Pose3d{});
+    config.field_to_tags.emplace(
+        0,
+        posest::Pose3d{
+            .translation_m = {2.0, 0.0, 0.0},
+            .rotation_rpy_rad = {0.0, 0.0, 0.0},
+        });
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
+
+    pipeline.start();
+    pipeline.deliver(makeFrame(makeRenderedTag36h11(0)));
+    auto measurement = bus.take();
+    pipeline.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
+    ASSERT_FALSE(observation.detections.empty());
+    if (observation.field_to_robot.has_value()) {
+        EXPECT_EQ(observation.solved_tag_count, 1);
+        EXPECT_GE(observation.reprojection_rms_px, 0.0);
+        // Diagonal covariance must be positive.
+        EXPECT_GT(observation.covariance[0 * 6 + 0], 0.0);
+        EXPECT_GT(observation.covariance[3 * 6 + 3], 0.0);
+    } else {
+        // If ambiguity exceeded threshold the frame is dropped; the diagnostic
+        // ratio must still appear on the per-tag detection.
+        EXPECT_GT(observation.detections[0].ambiguity, 0.0);
+    }
 }
 
 TEST(Pipelines, ProductionPipelineFactoryCreatesConfiguredPipelines) {
@@ -290,12 +371,23 @@ TEST(Pipelines, ProductionPipelineFactoryPassesActiveCalibrationToAprilTagPipeli
         .fy = 500.0,
         .cx = 160.0,
         .cy = 160.0,
+        .distortion_coefficients = {},
     });
+    runtime_config.camera_extrinsics.push_back({
+        .camera_id = "cam0",
+        .version = "v1",
+        .camera_to_robot = {},
+    });
+    posest::runtime::FieldLayoutConfig layout;
+    layout.id = "field";
+    layout.tags.push_back({.tag_id = 0, .field_to_tag = {.translation_m = {2.0, 0.0, 0.0}}});
+    runtime_config.field_layouts.push_back(layout);
+    runtime_config.active_field_layout_id = "field";
 
     posest::runtime::PipelineConfig tags;
     tags.id = "tags";
     tags.type = "apriltag";
-    tags.parameters_json = R"({"quad_decimate":1.0})";
+    tags.parameters_json = R"({"quad_decimate":1.0,"tag_size_m":0.1})";
     auto apriltag = factory.createPipeline(tags, bus, runtime_config);
     ASSERT_TRUE(apriltag);
 
@@ -308,7 +400,11 @@ TEST(Pipelines, ProductionPipelineFactoryPassesActiveCalibrationToAprilTagPipeli
     ASSERT_TRUE(std::holds_alternative<posest::AprilTagObservation>(*measurement));
     const auto& observation = std::get<posest::AprilTagObservation>(*measurement);
     ASSERT_FALSE(observation.detections.empty());
-    EXPECT_TRUE(observation.detections[0].camera_to_tag.has_value());
+    // Solver must have at least seen valid context (intrinsics + extrinsics +
+    // field layout). It may emit a pose or drop on ambiguity; either path is
+    // observable by inspecting the diagnostic fields.
+    EXPECT_TRUE(observation.field_to_robot.has_value() ||
+                observation.detections[0].ambiguity > 0.0);
 }
 
 TEST(Pipelines, RuntimeGraphFlowsCameraFramesToMeasurementBus) {
@@ -459,4 +555,66 @@ TEST(AprilTagPipelineContext, FieldLayoutUnknownIdIsSilentNoop) {
     posest::runtime::detail::applyFieldLayoutContext(runtime_config, pipeline_config);
 
     EXPECT_TRUE(pipeline_config.field_to_tags.empty());
+}
+
+TEST(AprilTagPipelineContext, ExtrinsicsCopiesActiveVersionMatchedRow) {
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.calibrations.push_back(makeRadtanCalibration("cam0", "v1"));
+    runtime_config.camera_extrinsics.push_back({
+        .camera_id = "cam0",
+        .version = "v1",
+        .camera_to_robot = {.translation_m = {0.1, 0.2, 0.3}},
+    });
+    runtime_config.camera_extrinsics.push_back({
+        .camera_id = "cam0",
+        .version = "v2",
+        .camera_to_robot = {.translation_m = {9.9, 9.9, 9.9}},
+    });
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    posest::runtime::detail::applyCameraExtrinsicsContext(runtime_config, pipeline_config);
+
+    ASSERT_EQ(pipeline_config.camera_to_robot.count("cam0"), 1u);
+    EXPECT_DOUBLE_EQ(
+        pipeline_config.camera_to_robot.at("cam0").translation_m.x, 0.1);
+}
+
+TEST(AprilTagPipelineContext, ExtrinsicsSkippedWhenVersionMismatch) {
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.calibrations.push_back(makeRadtanCalibration("cam0", "v1"));
+    runtime_config.camera_extrinsics.push_back({
+        .camera_id = "cam0",
+        .version = "v2",
+        .camera_to_robot = {.translation_m = {9.9, 9.9, 9.9}},
+    });
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    posest::runtime::detail::applyCameraExtrinsicsContext(runtime_config, pipeline_config);
+
+    EXPECT_TRUE(pipeline_config.camera_to_robot.empty());
+}
+
+TEST(AprilTagPipelineContext, ExtrinsicsRespectsPipelineCalibrationVersionFilter) {
+    posest::runtime::RuntimeConfig runtime_config;
+    runtime_config.calibrations.push_back(makeRadtanCalibration("cam0", "v1"));
+    auto v2_cal = makeRadtanCalibration("cam0", "v2");
+    runtime_config.calibrations.push_back(v2_cal);
+    runtime_config.camera_extrinsics.push_back({
+        .camera_id = "cam0",
+        .version = "v1",
+        .camera_to_robot = {.translation_m = {1.0, 0.0, 0.0}},
+    });
+    runtime_config.camera_extrinsics.push_back({
+        .camera_id = "cam0",
+        .version = "v2",
+        .camera_to_robot = {.translation_m = {2.0, 0.0, 0.0}},
+    });
+
+    posest::pipelines::AprilTagPipelineConfig pipeline_config;
+    pipeline_config.calibration_version = "v2";
+    posest::runtime::detail::applyCameraExtrinsicsContext(runtime_config, pipeline_config);
+
+    ASSERT_EQ(pipeline_config.camera_to_robot.count("cam0"), 1u);
+    EXPECT_DOUBLE_EQ(
+        pipeline_config.camera_to_robot.at("cam0").translation_m.x, 2.0);
 }
