@@ -667,12 +667,33 @@ std::uint64_t TeensyService::steadyMicros(Timestamp timestamp) {
 
 std::vector<std::uint8_t> TeensyService::encodeFusedPosePayload(
     const FusedPoseEstimate& estimate) {
+    // v3 wire layout. The fields below must stay 1:1 with
+    // firmware/teensy41/src/Protocol.cpp::decodeFusedPosePayload (368 bytes).
+    // FusedPoseEstimate carries a Pose2d today; Phase C will widen the graph
+    // to track full Pose3 + Vector3 velocity, at which point this encoder
+    // pulls those directly from the estimate. For the in-between window
+    // (Phase D shipped, Phase C in flight) we project the Pose2d into 3-DOF
+    // pose with zero z/roll/pitch and zero velocity.
     std::vector<std::uint8_t> payload;
-    payload.reserve(4 + 3 * sizeof(double));
+    payload.reserve(368);
+    // Pose3
     appendDouble(payload, estimate.field_to_robot.x_m);
     appendDouble(payload, estimate.field_to_robot.y_m);
-    appendDouble(payload, estimate.field_to_robot.theta_rad);
+    appendDouble(payload, 0.0);  // z
+    appendDouble(payload, 0.0);  // roll
+    appendDouble(payload, 0.0);  // pitch
+    appendDouble(payload, estimate.field_to_robot.theta_rad);  // yaw
+    // Velocity (NaN-coded: has_velocity=0 means RIO ignores)
+    const bool has_velocity = estimate.velocity.has_value();
+    appendDouble(payload, has_velocity ? estimate.velocity->x : 0.0);
+    appendDouble(payload, has_velocity ? estimate.velocity->y : 0.0);
+    appendDouble(payload, has_velocity ? estimate.velocity->z : 0.0);
+    appendU32(payload, has_velocity ? 1u : 0u);
     appendU32(payload, estimate.status_flags);
+    // Covariance — gtsam Pose3 tangent order, row-major 6×6.
+    for (std::size_t i = 0; i < estimate.covariance.size(); ++i) {
+        appendDouble(payload, estimate.covariance[i]);
+    }
     return payload;
 }
 

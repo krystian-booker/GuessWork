@@ -7,7 +7,9 @@
 namespace posest::firmware {
 
 constexpr std::uint16_t kFrameMagic = 0x4757;
-constexpr std::uint8_t kProtocolVersion = 2;
+// v3: FusedPose payload extended to carry full Pose3 + velocity + 6×6
+// covariance. Mirrors include/posest/teensy/Protocol.h.
+constexpr std::uint8_t kProtocolVersion = 3;
 
 // Per-sample status flags shared with include/posest/teensy/Protocol.h. See
 // scripts/check_protocol_constants.py for the host-vs-firmware drift check.
@@ -154,10 +156,34 @@ struct TimeSyncResponsePayload {
     std::uint64_t teensy_transmit_time_us{0};
 };
 
-struct FusedPosePayload {
-    Pose2d field_to_robot;
+// v3 FusedPose USB payload, mirroring posest::FusedPoseEstimate. The wire
+// layout (368 bytes, see decodeFusedPosePayload) carries:
+//   - 6 doubles for Pose3 (x, y, z, roll, pitch, yaw)
+//   - 3 doubles for body-frame velocity (vx, vy, vz)
+//   - has_velocity flag (uint32, 0 or 1) — false drops the velocity block
+//     into "unavailable" state without forcing a NaN sentinel
+//   - status_flags (uint32)
+//   - covariance: 36 doubles, gtsam::Pose3 tangent order [rx, ry, rz, tx, ty, tz]
+// CAN-side packing (CanBridge::writeFusedPoseFrame) compresses this into a
+// 64-byte FD frame; see firmware/teensy41/include/CanSchema.h.
+struct FusedPose3Payload {
+    double x_m{0.0};
+    double y_m{0.0};
+    double z_m{0.0};
+    double roll_rad{0.0};
+    double pitch_rad{0.0};
+    double yaw_rad{0.0};
+    double vx_mps{0.0};
+    double vy_mps{0.0};
+    double vz_mps{0.0};
+    bool has_velocity{false};
     std::uint32_t status_flags{0};
+    double covariance[36]{};
 };
+
+// Backwards-compatible alias retained for any incidental callers; new code
+// should use FusedPose3Payload.
+using FusedPosePayload = FusedPose3Payload;
 
 struct CameraTriggerCommand {
     bool enabled{false};

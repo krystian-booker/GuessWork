@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include "posest/MeasurementBus.h"
 #include "posest/fusion/IFusionOutputSink.h"
 #include "posest/runtime/RuntimeConfig.h"
+#include "posest/util/LatencyHistogram.h"
 
 namespace posest::fusion {
 
@@ -27,6 +29,36 @@ struct FusionStats {
     // measurements_processed.
     std::uint64_t measurements_vio_processed{0};
     std::uint64_t measurements_vio_skipped_no_tracking{0};
+
+    // Phase C: IMU preintegration counters. Only ever non-zero when the
+    // preintegration feature flag is on AND the state machine has reached
+    // kRunning.
+    std::uint64_t imu_factors_committed{0};
+    std::uint64_t imu_out_of_order{0};
+    std::uint64_t imu_resets{0};
+    std::uint64_t keyframes_committed{0};
+    std::uint64_t bias_calibrations_completed{0};
+
+    // Phase E: per-stage latency observability.
+    //
+    // graph_update_us measures bus-pop → ISAM2.update() return for graph-
+    // mutating measurements only (chassis/vision/VIO). IMU samples bypass
+    // this since they don't update the graph.
+    //
+    // publish_us measures the synchronous sink fan-out (TeensyService etc.)
+    // — should stay in single-digit microseconds since sinks only enqueue.
+    //
+    // graph_factor_count / graph_variable_count are snapshots of the live
+    // ISAM2 graph captured after the most recent update; they grow over the
+    // life of a match until Phase C's marginalization window kicks in.
+    util::LatencyHistogram::Snapshot graph_update_us;
+    util::LatencyHistogram::Snapshot publish_us;
+    std::size_t graph_factor_count{0};
+    std::size_t graph_variable_count{0};
+    // Wall-clock microseconds-since-epoch of the last successful update.
+    // Useful for detecting a stalled fusion worker without pulling time
+    // through DaemonHealth itself.
+    std::int64_t last_update_wall_clock_us{0};
 };
 
 inline constexpr std::uint32_t kFusionStatusInitializing = 1u << 0u;
@@ -36,6 +68,31 @@ inline constexpr std::uint32_t kFusionStatusOptimizerError = 1u << 3u;
 inline constexpr std::uint32_t kFusionStatusDegradedInput = 1u << 4u;
 inline constexpr std::uint32_t kFusionStatusShockInflated = 1u << 5u;
 inline constexpr std::uint32_t kFusionStatusChassisGap = 1u << 6u;
+// Set when the RIO flagged the chassis sample with kChassisStatusSlip (i.e.
+// it observed wheel slip). Independent of kFusionStatusShockInflated; both
+// can fire on the same step. Triggers chassis-sigma inflation regardless of
+// IMU shock detection.
+inline constexpr std::uint32_t kFusionStatusSlipReported = 1u << 7u;
+// Phase C: IMU preintegration status surface. Inert when
+// FusionConfig::enable_imu_preintegration is false.
+//
+// kFusionStatusImuGap         — IMU samples were missing for longer than
+//                               max_imu_gap_seconds; preintegrator was reset
+//                               and the affected keyframe interval fell back
+//                               to chassis-only.
+// kFusionStatusBiasUnverified — boot-time stationary calibration window
+//                               timed out without enough quiet samples.
+//                               Fusion runs with the persisted bias seed.
+// kFusionStatusAwaitingFieldFix — graph is initialized in body frame but
+//                               vision has not yet anchored it; ImuFactors
+//                               are suppressed because nav frame is undefined.
+// kFusionStatusSlipDetected   — chassis-vs-IMU velocity disagreement crossed
+//                               slip_disagreement_mps. Distinct from
+//                               kFusionStatusSlipReported (RIO-driven).
+inline constexpr std::uint32_t kFusionStatusImuGap = 1u << 8u;
+inline constexpr std::uint32_t kFusionStatusBiasUnverified = 1u << 9u;
+inline constexpr std::uint32_t kFusionStatusAwaitingFieldFix = 1u << 10u;
+inline constexpr std::uint32_t kFusionStatusSlipDetected = 1u << 11u;
 
 struct FusionConfig {
     // Process noise on the per-Δt BetweenFactor built from integrated
@@ -70,6 +127,29 @@ struct FusionConfig {
     // Fallback sigmas applied when a VioMeasurement arrives with a non-PD or
     // all-zero covariance. Order matches Pose3 tangent: [rx, ry, rz, tx, ty, tz].
     std::array<double, 6> vio_default_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
+
+    // Phase B: Huber kernel constant on the chassis BetweenFactor (in
+    // standardized residual units). Wired into the noise model in Phase B.
+    double huber_k{1.5};
+
+    // Phase C: IMU preintegration. All fields below are inert until the
+    // feature flag is true and the Phase C code path lands. See
+    // docs/features/fusion-service.md §8 and the IMU preintegration design
+    // memo in the implementation plan.
+    bool enable_imu_preintegration{false};
+    Pose3d imu_extrinsic_body_to_imu;
+    double accel_noise_sigma{0.05};
+    double gyro_noise_sigma{0.001};
+    double accel_bias_rw_sigma{1e-4};
+    double gyro_bias_rw_sigma{1e-5};
+    double integration_cov_sigma{1e-8};
+    std::array<double, 6> persisted_bias{};
+    double bias_calibration_seconds{1.5};
+    double bias_calibration_chassis_threshold{0.02};
+    double max_keyframe_dt_seconds{0.020};
+    double max_imu_gap_seconds{0.100};
+    std::uint32_t marginalize_keyframe_window{500};
+    double slip_disagreement_mps{1.0};
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config);
@@ -100,7 +180,12 @@ private:
     // Different types track independent cursors so a chassis sample at t=10
     // does not silently drop an AprilTag observation at t=9.
     bool acceptTimestamp(const Measurement& measurement, Timestamp timestamp);
-    void publishEstimate(FusedPoseEstimate estimate);
+    // publish_started is captured by the caller right before calling this
+    // method so the publish-stage histogram measures sink fan-out only,
+    // not the time spent doing the graph update upstream.
+    void publishEstimate(
+        FusedPoseEstimate estimate,
+        std::chrono::steady_clock::time_point publish_started);
 
     static constexpr std::size_t kMeasurementTypeCount = 6;
 
@@ -109,6 +194,15 @@ private:
     mutable std::mutex mu_;
     std::vector<std::shared_ptr<IFusionOutputSink>> sinks_;
     FusionStats stats_;
+    // Live histograms; snapshot()ed into FusionStats inside stats(). Both are
+    // mutated only by the worker thread under mu_, snapshotted by readers
+    // under the same lock.
+    util::LatencyHistogram graph_update_hist_;
+    util::LatencyHistogram publish_hist_;
+    // Live graph sizes, refreshed after every successful backend update.
+    std::size_t graph_factor_count_{0};
+    std::size_t graph_variable_count_{0};
+    std::int64_t last_update_wall_clock_us_{0};
     // One cursor per Measurement variant alternative — keyed by Measurement::index().
     std::array<std::optional<Timestamp>, kMeasurementTypeCount> per_type_cursors_;
     std::optional<FusedPoseEstimate> latest_estimate_;

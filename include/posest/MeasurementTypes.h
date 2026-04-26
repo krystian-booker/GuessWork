@@ -77,12 +77,20 @@ struct ImuSample {
     std::uint32_t status_flags{0};
 };
 
+// Bit positions in ChassisSpeedsSample::status_flags. The RIO owns this byte;
+// these constants are the host-side mirror of the agreed bit layout. A new
+// flag must be added on both sides in lockstep.
+inline constexpr std::uint32_t kChassisStatusSlip = 1u << 0u;
+
 struct ChassisSpeedsSample {
     Timestamp timestamp{};
     double vx_mps{0.0};
     double vy_mps{0.0};
     double omega_radps{0.0};
     std::uint64_t rio_time_us{0};
+    // Bitfield owned by the RIO; see kChassisStatus* constants above. Any
+    // non-zero value flags the sample as kFusionStatusDegradedInput; specific
+    // bits (e.g. kChassisStatusSlip) trigger targeted noise inflation.
     std::uint32_t status_flags{0};
 };
 

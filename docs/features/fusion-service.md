@@ -1,6 +1,6 @@
 # Fusion Service (GTSAM)
 
-**Status:** Partially complete. Core graph runs end-to-end: `FusionService` consumes `ChassisSpeedsSample` and `AprilTagObservation` from the `MeasurementBus`, runs an incremental iSAM2 graph (Pose3-only, BetweenFactor for odometry, PriorFactor for vision), publishes a `FusedPoseEstimate` through `IFusionOutputSink` into `TeensyService`, and the Teensy firmware re-broadcasts the pose on CAN-FD at a configurable rate. IMU shock/free-fall detection inflates step noise. **Significant gaps remain before this is feature-complete:** no IMU preintegration (IMU is shock-only, not state-propagating), no wheel-slip detection independent of IMU, no robust noise on the odometry factor, no use of the field tag layout as landmarks, fusion parameters are hard-coded (the SQLite store has no `fusion_*` tables yet, and `buildFusionConfig(RuntimeConfig)` ignores its argument), and the published estimate collapses to `Pose2d` even though the graph carries `Pose3`.
+**Status:** Functionally complete for the in-scope requirements (§1). `FusionService` consumes `ChassisSpeedsSample`, `AprilTagObservation`, `VioMeasurement` (gated, placeholder-aware), and `ImuSample` from the `MeasurementBus`. The iSAM2 graph carries `Pose3` plus optional `Vector3` velocity keys (when `enable_imu_preintegration` is on); `BetweenFactor<Pose3>` for chassis odometry is wrapped in a Huber kernel for slip robustness; vision arrives as `PriorFactor<Pose3>` with the AprilTag pipeline's covariance; `gtsam::ImuFactor` carries body-frame IMU between keyframes once a boot stationary calibration has anchored bias and the first vision observation has fixed the field frame. Wheel slip is handled three ways: Huber on every chassis step, a dedicated `kFusionStatusSlipReported` path when the RIO sets `kChassisStatusSlip`, and IMU shock/free-fall sigma inflation. The published `FusedPoseEstimate` flows through `IFusionOutputSink → TeensyService` over a v3 USB protocol carrying full Pose3 + velocity + 6×6 covariance + status; the Teensy `CanBridge` repacks that into a 64-byte CAN-FD frame on `teensy_pose_can_id` at the configured rate. Every fusion tunable persists through `runtime::FusionConfig` and the `fusion_config` SQLite table (migration 9), validated by `ConfigValidator`. Per-stage latency histograms and graph-size counters surface through `DaemonHealth` and `posest_daemon --health-once` JSON. **Two requirements remain explicitly deferred:** the field-tag layout is not yet used as landmark factors (gap 8.4 — defer until single-camera flips become a measured problem), and `VioMeasurement` flows through a placeholder-aware path that becomes load-bearing only when the real VIO frontend lands (gap 8.9). Phase C IMU preintegration ships behind `enable_imu_preintegration = false` by default; flip it on after the on-robot validation described in the implementation plan.
 
 This document covers the GTSAM-based sensor fusion service end-to-end: what it is, how it integrates with the rest of the runtime, how the graph is constructed, and what's missing before it meets the high-performance-FRC bar laid out in §1. Generic plumbing (`MeasurementBus`, the non-blocking-publisher rule) lives in [`producer-consumer-architecture.md`](producer-consumer-architecture.md); the AprilTag-side covariance and aggregation that feed this service live in [`apriltag-pipeline.md`](apriltag-pipeline.md); the Teensy USB framing and CAN bridge live in [`teensy-hardware-interface.md`](teensy-hardware-interface.md).
 
@@ -63,12 +63,14 @@ The bar this document is reviewing against:
 |-----------|------|------|
 | `FusionService` | `include/posest/fusion/FusionService.h`, `src/fusion/FusionService.cpp` | The service. Owns the worker thread, the `FusionBackend`, the sink list, and the stats. Pulls measurements off the bus, dispatches by type, publishes estimates to all sinks. |
 | `FusionBackend` (private) | `src/fusion/FusionService.cpp:77` | The graph itself. Holds the `gtsam::ISAM2`, the running `gtsam::Values`, the IMU shock window, and the bootstrap state machine. |
-| `FusionConfig` | `include/posest/fusion/FusionService.h:32` | Compile-time-default tuning struct. **Currently ignored by the config store**; see §6. |
+| `fusion::FusionConfig` | `include/posest/fusion/FusionService.h` | In-process tuning struct. Built from the SQLite-loaded `runtime::FusionConfig` by `buildFusionConfig`. |
+| `runtime::FusionConfig` | `include/posest/runtime/RuntimeConfig.h` | Persisted singleton; mirrors the in-process struct field-for-field. See §6. |
 | `IFusionOutputSink` | `include/posest/fusion/IFusionOutputSink.h` | One-method abstract sink. Implemented by `TeensyService`. Multiple sinks supported (e.g. for future telemetry/logging). |
-| `FusedPoseEstimate` | `include/posest/MeasurementTypes.h:117` | The published payload: `timestamp`, `Pose2d field_to_robot`, 6×6 `covariance` (gtsam tangent order), `status_flags`, optional `velocity` (currently never populated). |
+| `FusedPoseEstimate` | `include/posest/MeasurementTypes.h` | The published payload: `timestamp`, `Pose2d field_to_robot`, optional `velocity`, 6×6 `covariance` (gtsam tangent order), `status_flags`. The wire encoder builds a wider Pose3 + velocity + covariance payload from this — see §7. |
 | `MeasurementBus` | `include/posest/MeasurementBus.h` | Bounded MPSC queue (capacity 4096 in `Daemon.cpp`) of `Measurement = std::variant<...>`. Drop-newest on overflow. |
-| `TeensyService` | `src/teensy/TeensyService.cpp:100,668` | Implements `IFusionOutputSink::publish`: encodes 28-byte payload (`x`, `y`, `θ`, `status_flags`) into a `MessageType::FusedPose` USB frame and enqueues it. |
-| `CanBridge` | `firmware/teensy41/src/CanBridge.cpp:248` | Periodic CAN-FD TX of the most recent host-supplied pose at `pose_publish_hz`. |
+| `TeensyService` | `src/teensy/TeensyService.cpp` | Implements `IFusionOutputSink::publish`: encodes the 368-byte v3 USB payload and enqueues a `MessageType::FusedPose` frame. |
+| `CanBridge` | `firmware/teensy41/src/CanBridge.cpp` | Periodic CAN-FD TX of the most recent host-supplied pose at `pose_publish_hz`. Repacks Pose3 + velocity + sigma triple into the 64-byte frame in §7. |
+| `LatencyHistogram` | `include/posest/util/LatencyHistogram.h` | Rolling per-stage timing buffer. Two instances live in the fusion service (graph-update and publish stages); snapshots flow into `DaemonHealth` and the `posest_daemon --health-once` JSON. |
 
 ### 2.2 The latency contract for fusion specifically
 
@@ -95,7 +97,7 @@ RoboRIO CAN frame
   → CAN-FD frame on teensy_pose_can_id
 ```
 
-There is no measurement of this path in code today; latency budgeting and instrumentation are §7 work.
+The two host-side stages of this path (`bus-pop → ISAM2.update return` and `update done → all sinks returned`) are sampled into rolling `LatencyHistogram` buffers and surfaced through `FusionStats.graph_update_us` / `publish_us`. The Teensy-side and CAN-side slices are not measured today — adding them requires reusing the existing time-sync offset and a per-frame round-trip sequence number.
 
 ### 2.3 Threading and lifecycle
 
@@ -126,183 +128,206 @@ Sinks are stored in `std::vector<std::shared_ptr<IFusionOutputSink>>` and copied
 
 ### 3.1 Variables
 
-Only one variable type is in the graph: `gtsam::Pose3`, keyed by `gtsam::Symbol('x', index)` with `index` advancing on every accepted chassis update. A vision update reuses the current key — it tightens the existing pose rather than introducing a new variable. There is **no** velocity, gyro-bias, accel-bias, or IMU navstate variable. This is a deliberate simplification documented in `process()` (`FusionService.cpp:357-359`): the 1 kHz IMU and ~100 Hz chassis streams interleave naturally; the graph models the chassis cursor only.
+The graph carries `gtsam::Pose3` keyed by `gtsam::Symbol('x', index)`, plus — when `enable_imu_preintegration` is on and the init state machine has reached `kRunning` — a parallel `Vector3` velocity series keyed by `gtsam::Symbol('v', index)`. A vision update reuses the current pose key (it tightens the existing pose rather than introducing a new variable); chassis updates advance the index per accepted sample (legacy mode, flag off) or per keyframe (Phase C, flag on). There is **no** bias variable in the graph: bias is a constant injected into each `gtsam::ImuFactor` and re-estimated only at boot during the stationary calibration window. The design memo behind this choice is the 8.2 entry in the implementation plan.
 
 ### 3.2 Factors
 
-**`PriorFactor<Pose3>` for bootstrap.** On the first chassis sample, the backend anchors `x_0` at identity with very loose sigmas (`origin_prior_sigmas = {10 rad, 10 rad, π rad, 10 m, 10 m, 10 m}` — `FusionService.h:36`). The first `AprilTagObservation` then snaps the pose into the field frame.
+**`PriorFactor<Pose3>` for bootstrap.** On the first chassis sample, the backend anchors `x_0` at identity with very loose sigmas (`origin_prior_sigmas`, default `{10 rad, 10 rad, π rad, 10 m, 10 m, 10 m}`). The first `AprilTagObservation` then snaps the pose into the field frame.
 
-**`PriorFactor<Pose3>` for vision (`FusionService.cpp:201`).** Each `AprilTagObservation` with a non-empty `field_to_robot` becomes a prior on the **current** key. The 6×6 covariance comes directly from the AprilTag pipeline (see [`apriltag-pipeline.md`](apriltag-pipeline.md)) and is converted with `gtsam::noiseModel::Gaussian::Covariance`. If GTSAM rejects the matrix as not positive-definite, the factor is dropped and the estimate is published with `kFusionStatusOptimizerError` set (no robust fallback).
+**`PriorFactor<Pose3>` for vision.** Each `AprilTagObservation` with a non-empty `field_to_robot` becomes a prior on the **current** key. The 6×6 covariance comes directly from the AprilTag pipeline (see [`apriltag-pipeline.md`](apriltag-pipeline.md)) and is converted with `gtsam::noiseModel::Gaussian::Covariance`. If GTSAM rejects the matrix as not positive-definite, the factor is dropped and the estimate is published with `kFusionStatusOptimizerError` set.
 
-**`BetweenFactor<Pose3>` for chassis odometry (`FusionService.cpp:155`).** Each accepted `ChassisSpeedsSample` produces a relative-motion factor between the previous and next pose key. The delta is `Pose3(Rot3::Rz(ω·Δt), Point3(vx·Δt, vy·Δt, 0))` — yaw-only rotation, planar translation. Process noise is the diagonal `chassis_sigmas` (default `{0.05, 0.05, 0.05, 0.02, 0.02, 0.02}`).
+**`BetweenFactor<Pose3>` for chassis odometry, Huber-wrapped.** Each accepted `ChassisSpeedsSample` produces a relative-motion factor `Pose3(Rot3::Rz(ω·Δt), Point3(vx·Δt, vy·Δt, 0))` — yaw-only rotation, planar translation. The diagonal `chassis_sigmas` (default `{0.05, 0.05, 0.05, 0.02, 0.02, 0.02}`) are wrapped in `gtsam::noiseModel::Robust::Create(Huber::Create(huber_k), …)` (default `huber_k = 1.5`) so short-duration outliers from wheel slip get downweighted without rejecting legitimate hard-acceleration steps. Inflation by `shock_inflation_factor` fires on either an IMU shock/free-fall trigger (`kFusionStatusShockInflated`) or a RIO-reported `kChassisStatusSlip` (`kFusionStatusSlipReported`); both can fire on the same step, and both rebuild the noise model with multiplied sigmas before re-wrapping in Huber.
 
-**No other factors.** No IMU preintegration factor, no per-tag projection factor, no field-landmark factor, no robust kernel (Cauchy/Huber) anywhere. Every noise model is plain Gaussian.
+**`PriorFactor<Pose3>` for vision-anchored field fix.** Same construction as above; this is what transitions `kAwaitingFieldFix → kRunning` when `enable_imu_preintegration` is on, by also inserting an initial velocity variable + a 5 m/s prior on it so subsequent ImuFactors have a tail key to link against.
+
+**`gtsam::ImuFactor` for IMU preintegration (Phase C, flag-gated).** When `enable_imu_preintegration` is on and `state_ == kRunning`, every keyframe commits one `ImuFactor` linking the previous pose+velocity keys, the new pose+velocity keys, and a constant `gtsam::imuBias::ConstantBias` symbol. Preintegration is built off `gtsam::PreintegrationParams::MakeSharedU(g = 9.80665)` with body-to-IMU extrinsic from `imu_extrinsic_body_to_imu`. Out-of-order IMU samples are dropped with `imu_out_of_order` incremented; a forward gap > `max_imu_gap_seconds` resets the active preintegrator and skips the IMU factor for the in-progress interval (chassis-only fallback).
+
+**`PriorFactor<Vector3>` for velocity bootstrap.** Inserted once on the field-fix transition with σ = 5 m/s; ImuFactors take over from there.
 
 ### 3.3 Update strategy
 
-`FusionBackend::update()` (`FusionService.cpp:210`) drives `gtsam::ISAM2` with `relinearizeThreshold = 0.01`, `relinearizeSkip = 1` (`:82-84`) — relinearize whenever the relative error change exceeds 1%, every iteration. Two `update()` calls per measurement (one with the new factors, one empty to push relinearization), then `calculateEstimate()` to refresh `current_pose_`.
+`FusionBackend::update()` drives `gtsam::ISAM2` with `relinearizeThreshold = 0.01`, `relinearizeSkip = 1` — relinearize whenever the relative error change exceeds 1%, every iteration. Two `update()` calls per measurement (one with the new factors, one empty to push relinearization), then `calculateEstimate()` to refresh `current_pose_` and `current_velocity_`.
 
-This is fine for the current graph size but makes the cost of every update grow with graph length; there is no fixed-lag smoother windowing today, so the graph grows for the entire match. See §7.
+When IMU preintegration is on, every successful keyframe commit also calls `marginalizeOldKeys()` once `live_keys_.size()` exceeds `marginalize_keyframe_window` (default 500). Older leaf keys are handed to `ISAM2::marginalizeLeaves`, bounding the working-set size for long matches. Marginalization failures are caught and benignly retried on the next commit.
 
 ### 3.4 Output construction
 
-`makeEstimate()` (`FusionService.cpp:238`) builds the `FusedPoseEstimate`:
+`makeEstimate()` builds the `FusedPoseEstimate`:
 
 - `timestamp` = the triggering measurement's timestamp.
-- `field_to_robot` = `Pose2d{x, y, yaw}` extracted from the current `Pose3` via `toPose2d()` (`:49`). **Pitch, roll, and Z are dropped on the way out** even though they live in the graph.
-- `covariance` = `isam_.marginalCovariance(current_key)` flattened row-major (gtsam tangent order `[rx, ry, rz, tx, ty, tz]`). On exception, set to zeros and `kFusionStatusMarginalUnavailable` is OR'd in.
-- `status_flags` = a bitfield (`FusionService.h:24-30`): `Initializing`, `VisionUnavailable`, `MarginalUnavailable`, `OptimizerError`, `DegradedInput`, `ShockInflated`, `ChassisGap`.
-- `velocity` is **never populated**. The struct field exists in `MeasurementTypes.h:117` but no code path writes it.
+- `field_to_robot` = `Pose2d{x, y, yaw}` extracted from the current `Pose3` (z, roll, pitch are not in the planar host-side `FusedPoseEstimate` struct; they live in the wider USB payload built by the encoder — see §7).
+- `velocity` = body-frame `Vec3` from `current_velocity_` once `state_ == kRunning`; `nullopt` otherwise so the wire format signals "unavailable" rather than emitting a stale zero.
+- `covariance` = `isam_.marginalCovariance(current_key)` flattened row-major (gtsam tangent order `[rx, ry, rz, tx, ty, tz]`). On exception, zeroed and `kFusionStatusMarginalUnavailable` is OR'd in.
+- `status_flags` = the full bitfield laid out in §7. Init-state bits (`kFusionStatusAwaitingFieldFix`, `kFusionStatusBiasUnverified`) are surfaced through `initStateStatusBits()` so consumers can see why the graph is in degraded mode.
 
 ### 3.5 Out-of-order and gap handling
 
-`acceptTimestamp()` (`FusionService.cpp:392`) rejects any measurement older than the last accepted one (counted into `stats_.stale_measurements`) — except IMU samples, which bypass the check entirely (`:356-363`). This is intentional: 1 kHz IMU is allowed to interleave with 100 Hz chassis; it never advances the pose cursor.
+`acceptTimestamp()` rejects any measurement older than the last accepted one **of the same `Measurement` variant alternative** (counted into `stats_.stale_measurements`). IMU samples bypass the cursor entirely so they can interleave with chassis at 1 kHz; their own monotonicity is enforced by the backend's `last_imu_time_`. AprilTag and chassis cursors are independent — a chassis sample at t=10 ms does not silently drop an AprilTag observation at t=9 ms.
 
-`addChassisSpeeds()` (`FusionService.cpp:127-133`) skips the `BetweenFactor` if `Δt <= 0` or `Δt > max_chassis_dt_seconds` (default 0.5 s) and emits the existing pose with `kFusionStatusChassisGap` set. Without this guard, a 5 s gap would compound a 5 m/s × 5 s = 25 m relative-motion factor with the wrong noise model and likely diverge the graph.
+`addChassisSpeeds` skips the `BetweenFactor` if `Δt <= 0` or `Δt > max_chassis_dt_seconds` and emits the existing pose with `kFusionStatusChassisGap` set. Without this guard a 5 s gap would compound a 5 m/s × 5 s = 25 m relative-motion factor with the wrong noise model and likely diverge the graph. Phase C's keyframe accumulator carries the same guard via `chassis_gap_seen_`.
 
 ---
 
-## 4. IMU integration: shock detection only
+## 4. IMU integration
 
-This is the biggest gap between the requirements and the implementation, so it gets its own section.
+The IMU enters the system three ways:
 
-The IMU does not contribute to the state estimate. It populates a sliding window of `ImuShockSample` (timestamp + `|a|` + `|a − g_local|`) for the most recent `imu_window_seconds` (default 50 ms). On every chassis update, `detectShockOrFreefall()` (`FusionService.cpp:275`) scans the window:
+**Shock / free-fall detection (always on).** Every `ImuSample` populates a sliding window of `ImuShockSample` (timestamp + `|a|` + `|a − g_local|`) for the most recent `imu_window_seconds` (default 50 ms). On every chassis update, `detectShockOrFreefall()` scans the window:
 
 - If any sample has `|a − g_local| > shock_threshold_mps2` (default 50 m/s² ≈ 5g), set the shock flag.
 - If any sample has `|a| < freefall_threshold_mps2` (default 3 m/s²), set the shock flag.
 
-If either branch fires, every diagonal sigma on the chassis `BetweenFactor` is multiplied by `shock_inflation_factor` (default 100×) for that one step, and the estimate is flagged with `kFusionStatusShockInflated`.
+If either branch fires, every diagonal sigma on the chassis `BetweenFactor` is multiplied by `shock_inflation_factor` (default 100×) for that one step, the noise is re-wrapped in Huber, and the estimate is flagged with `kFusionStatusShockInflated`. This catches collisions and the "wheels off the ground over a bump" case.
 
-This catches collisions and the "wheels off the ground over a bump" case. It does **not** catch wheel slip — slip can happen with the chassis on the ground and the IMU reading nominal accelerations. See §7.
+**Wheel slip (always on, RIO-driven).** When the chassis sample's `status_flags` has `kChassisStatusSlip` set, the same sigma-inflation path runs and `kFusionStatusSlipReported` is OR'd into the output. This is independent of IMU shock detection — slip can happen with the IMU reading nominal accelerations (e.g. wheels spinning on a polished floor).
+
+**Preintegration (Phase C, gated by `enable_imu_preintegration`).** When the flag is on and the state machine has reached `kRunning`:
+
+1. Every IMU sample calls `gtsam::PreintegratedImuMeasurements::integrateMeasurement(accel, gyro, dt)` against the active preintegrator, gated on monotonic timestamps and `max_imu_gap_seconds` (100 ms default).
+2. Chassis samples are accumulated into a `PendingKeyframe` (composed Δ-twist + total dt).
+3. Keyframe commit fires when either a vision observation arrives or `max_keyframe_dt_seconds` (20 ms default) has elapsed since the last commit. The commit builds the Huber-wrapped chassis `BetweenFactor`, the `ImuFactor` (if `has_imu`), inserts the next pose + velocity keys, calls `ISAM2::update`, and resets the preintegrator with `current_bias_`.
+4. The preintegrator is rebuilt against `current_bias_` at every commit, every long-gap reset, and at the field-fix transition.
+
+The init state machine — `kBoot → kCalibratingBias → kAwaitingFieldFix → kRunning` — sequences this:
+
+- `kBoot`: load persisted bias (`config_.persisted_bias`).
+- `kCalibratingBias`: every IMU sample contributes to the running mean while the chassis cursor reads quiet (`|v| < bias_calibration_chassis_threshold` AND `|ω| < bias_calibration_chassis_threshold`); after `bias_calibration_seconds` elapses, the mean (with gravity subtracted from accel) becomes the new bias and the state advances. If the window saw any non-quiet chassis, the persisted bias stays in place and `kFusionStatusBiasUnverified` is set.
+- `kAwaitingFieldFix`: chassis BetweenFactors keep flowing in body frame (legacy path). IMU factors are suppressed — `gtsam::PreintegrationParams::MakeSharedU` requires a defined nav frame, which the first AprilTag observation supplies.
+- `kRunning`: keyframe-driven commits with ImuFactors active. `velocity` populated on the wire.
+
+When `enable_imu_preintegration` is off (default), the legacy chassis path runs identically to before — the new state machine stays in `kBoot`, the preintegrator stays null, and no ImuFactor or velocity key is ever inserted.
 
 ---
 
-## 5. Field tag layout: not used in fusion
+## 5. Field tag layout: still pipeline-only (deferred per §8.4)
 
 The field layout (`AprilTagFieldLayout`) is loaded into `RuntimeConfig::field_layouts` and passed into each `AprilTagPipeline` so the pipeline can build the world-corner array for the multi-tag SQPNP solve (see [`apriltag-pipeline.md`](apriltag-pipeline.md)). By the time the observation reaches fusion, it has already been collapsed to a 6-DOF `field_to_robot` pose plus a 6×6 covariance; the per-tag detections and the field map itself are not visible to the fusion graph.
 
-This is a deliberate split (it keeps the heavy PnP solve in the camera-bound pipeline thread and away from the graph), but it forecloses a class of refinements: the graph can never decide "tag 7 looks like a flip; downweight it" or "tag 12's reprojection is suspiciously high; gate it out". Whatever the AprilTag pipeline outputs is what fusion eats.
-
-This is fine for now but should be revisited if the per-tag detail in `AprilTagObservation::detections` would let fusion catch flip ambiguities the pipeline missed.
+This is a deliberate split (it keeps the heavy PnP solve in the camera-bound pipeline thread and away from the graph), but it forecloses a class of refinements: the graph can never decide "tag 7 looks like a flip; downweight it" or "tag 12's reprojection is suspiciously high; gate it out". Whatever the AprilTag pipeline outputs is what fusion eats. The implementation plan defers the landmark-factor option until single-camera flips become a measured problem (see §8.4); for the in-scope work the aggregated `PriorFactor<Pose3>` plus the per-camera dynamic covariance from the AprilTag side are sufficient.
 
 ---
 
-## 6. Configuration: hard-coded today
+## 6. Configuration: SQLite-backed
 
-Every parameter named in §3 lives on the `FusionConfig` struct (`FusionService.h:32-56`) with compile-time defaults. The factory function:
+Every parameter named in §3 lives on the `fusion::FusionConfig` struct in `include/posest/fusion/FusionService.h`. The runtime-config mirror in `runtime::FusionConfig` (`include/posest/runtime/RuntimeConfig.h`) is what the SQLite store reads and writes; the factory function:
 
 ```cpp
-FusionConfig buildFusionConfig(const runtime::RuntimeConfig& /*runtime_config*/) {
-    return FusionConfig{};
-}
+FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config);
 ```
 
-— `FusionService.cpp:299` — explicitly ignores its input. There is **no** `FusionConfig` struct on `RuntimeConfig`, **no** `fusion_*` table or column in the SQLite schema (`include/posest/config/SqliteSchema.h`), and **no** validator entries in `posest_config`. To change a fusion parameter today, edit the C++ defaults and recompile.
+— `FusionService.cpp` — copies every field from `runtime_config.fusion` into the active `fusion::FusionConfig`. The persistence chain is:
 
-This is the largest blocker for the website-driven configurability required by the project bar. The full chain — JSON shape → `RuntimeConfig::FusionConfig` → SQLite migration + columns → `SqliteConfigStore` load/save → `ConfigValidator` bounds → `buildFusionConfig` mapping → live reload via the existing config-reload path used elsewhere in the daemon — is unimplemented end-to-end. The HTTP server doesn't exist either, but the data layer should land first so it's ready when the web layer arrives.
+1. **`runtime::FusionConfig`** (`include/posest/runtime/RuntimeConfig.h`) — the singleton tunable struct. Mirrors the in-process `fusion::FusionConfig` field-for-field but lives in the runtime-config namespace to keep the SQLite layer free of GTSAM/Eigen includes.
+2. **`fusion_config` SQLite table** (migration 9, `src/config/SqliteSchema.cpp`) — singleton row, `id INTEGER PRIMARY KEY CHECK (id = 1)`, with one column per scalar field. Loaded and saved by `SqliteConfigStore` atomically with the rest of `RuntimeConfig`.
+3. **`ConfigValidator::validateRuntimeConfig`** (`src/config/ConfigValidator.cpp`) — enforces sigma > 0, `shock_threshold > freefall_threshold`, `shock_inflation_factor >= 1`, `bias_calibration_seconds >= 0.5`, `max_keyframe_dt_seconds ∈ [0.005, 0.1]`, `max_imu_gap_seconds > max_keyframe_dt_seconds`, and so on.
+
+What's still pending: **live reload**. Today the daemon reads config once at `loadAndBuild`; changing a fusion parameter still requires a restart. When the HTTP server lands, decide whether to rebuild the graph on change or apply only to new factors — see the deferred §8 hot-reload note.
 
 ---
 
 ## 7. Output to the RoboRIO over CAN
 
-The output path is fully wired and working:
+The output path is fully wired and working at protocol v3 (368-byte USB payload, 64-byte CAN-FD frame):
 
-1. **`FusionService::publishEstimate`** (`FusionService.cpp:403`) hands the `FusedPoseEstimate` to every registered sink under no lock.
-2. **`TeensyService::publish`** (`TeensyService.cpp:100`) builds a `MessageType::FusedPose` USB frame. The payload is 28 bytes: `x` (double), `y` (double), `θ` (double), `status_flags` (u32) — see `encodeFusedPosePayload` (`:668`).
-3. **Teensy firmware** (`firmware/teensy41/src/main.cpp:326`) decodes the frame and calls `CanBridge::setLatestFusedPose`, which caches the latest `FusedPosePayload`.
-4. **`CanBridge::maybeSendFusedPose`** (`firmware/teensy41/src/CanBridge.cpp:248`) is called on every poll; it transmits at `1'000'000 / pose_publish_hz` µs (default 10 ms / 100 Hz) on CAN-FD ID `teensy_pose_can_id`.
-5. **CAN frame layout** (`writeFusedPoseFrame`, `:28`): `teensy_time_us` (u64), `x` (double), `y` (double), `θ` (double), `status_flags` (u32), zero-padded to `kTeensyPosePayloadBytes`.
+1. **`FusionService::publishEstimate`** hands the `FusedPoseEstimate` to every registered sink outside the service mutex; per-stage publish latency is recorded into the `publish_us` histogram surfaced through `DaemonHealth`.
+2. **`TeensyService::publish`** (`src/teensy/TeensyService.cpp`) encodes a 368-byte USB payload carrying full Pose3 (`x`, `y`, `z`, `roll`, `pitch`, `yaw` as doubles), velocity (`vx`, `vy`, `vz` doubles), a `has_velocity` flag, the 32-bit `status_flags`, and the full row-major 6×6 covariance in gtsam tangent order. The protocol version on both sides is `kProtocolVersion = 3` (`include/posest/teensy/Protocol.h`, `firmware/teensy41/include/Protocol.h`).
+3. **Teensy firmware** (`firmware/teensy41/src/main.cpp`) decodes the v3 payload via `decodeFusedPosePayload` (`firmware/teensy41/src/Protocol.cpp`) and caches it as the latest `FusedPose3Payload`.
+4. **`CanBridge::maybeSendFusedPose`** transmits at `1'000'000 / pose_publish_hz` µs (default 10 ms / 100 Hz) on CAN-FD ID `teensy_pose_can_id`.
+5. **CAN frame layout** (`writeFusedPoseFrame` in `firmware/teensy41/src/CanBridge.cpp`, schema in `firmware/teensy41/include/CanSchema.h`), 64 bytes exact, zero padding-free:
 
-Two limitations of the wire format:
+   | offset | size | field |
+   | -----: | ---: | ----- |
+   |  0 |  8 | `teensy_time_us` (u64) |
+   |  8 |  8 | `x_m` (double) |
+   | 16 |  8 | `y_m` (double) |
+   | 24 |  4 | `z_m` (float) |
+   | 28 |  4 | `roll_rad` (float) |
+   | 32 |  4 | `pitch_rad` (float) |
+   | 36 |  4 | `yaw_rad` (float) |
+   | 40 |  4 | `vx_mps` (float, NaN if velocity unavailable) |
+   | 44 |  4 | `vy_mps` (float) |
+   | 48 |  4 | `vz_mps` (float) |
+   | 52 |  4 | `sigma_x_m` (float = sqrt(cov(tx, tx))) |
+   | 56 |  4 | `sigma_y_m` (float = sqrt(cov(ty, ty))) |
+   | 60 |  2 | `sigma_yaw_mrad` (uint16; sentinel 0xFFFF = NaN) |
+   | 62 |  2 | `status_flags` (uint16, low 16 bits of full 32-bit field) |
 
-- **Pose2d only.** Z, pitch, roll never leave the host, even though they are tracked in the graph and present in the local `gtsam::Pose3`. For a grounded robot this is mostly fine, but it makes pitch/roll unobservable to the RIO if it ever wants them (e.g. for shooter aim corrections on a tilted bumper).
-- **No covariance on the CAN frame.** The 6×6 covariance is computed on every publish but not transmitted. The RIO sees only `status_flags` to know "something is degraded" but cannot tell how much.
+   Velocity fields encode `NaN` when `FusedPoseEstimate::velocity` is unavailable (pre-`kRunning` or pre-bootstrap); sigma fields encode `NaN`/`0xFFFF` when the marginal covariance was unavailable. The RIO must check `kFusionStatusMarginalUnavailable` before consuming.
+
+The status-flag bit layout (low 16 bits, full 32-bit set on USB; `kFusionStatus*` constants in `include/posest/fusion/FusionService.h`):
+
+| Bit | Constant | Meaning |
+| --: | -------- | ------- |
+| 0 | `kFusionStatusInitializing` | Pre-bootstrap; pose not yet anchored. |
+| 1 | `kFusionStatusVisionUnavailable` | No vision observation in the most recent estimate. |
+| 2 | `kFusionStatusMarginalUnavailable` | `ISAM2::marginalCovariance` threw; covariance fields are zero. |
+| 3 | `kFusionStatusOptimizerError` | `ISAM2::update` rejected the most recent factor; pose was held over. |
+| 4 | `kFusionStatusDegradedInput` | RIO `ChassisSpeedsSample::status_flags` was non-zero. |
+| 5 | `kFusionStatusShockInflated` | IMU shock or free-fall fired; chassis sigmas multiplied by `shock_inflation_factor`. |
+| 6 | `kFusionStatusChassisGap` | `Δt > max_chassis_dt_seconds`; `BetweenFactor` was skipped. |
+| 7 | `kFusionStatusSlipReported` | `kChassisStatusSlip` was set on the chassis sample; chassis sigmas inflated independently of IMU shock. |
+| 8 | `kFusionStatusImuGap` | IMU gap > `max_imu_gap_seconds`; preintegrator was reset. |
+| 9 | `kFusionStatusBiasUnverified` | Boot stationary calibration timed out without enough quiet samples. |
+| 10 | `kFusionStatusAwaitingFieldFix` | Graph initialized in body frame; vision has not yet anchored to field — IMU factors suppressed. |
+| 11 | `kFusionStatusSlipDetected` | (Reserved) chassis-vs-IMU velocity disagreement crossed `slip_disagreement_mps`. |
 
 ---
 
-## 8. What's missing (gap list)
+## 8. What's missing (deferred items only)
 
-Ranked roughly by impact on the §1 requirements, not by implementation effort:
+The list below carries only items the implementation plan explicitly carved out. Everything else from the previous gap inventory has been resolved; the §1 requirements are satisfied for the in-scope work.
 
-### 8.1 IMU is shock-only, not state-propagating
-
-The IMU contributes nothing to between-vision-update propagation. Between two chassis samples (≈10 ms), the graph relies entirely on `vx·Δt, vy·Δt, ω·Δt` from the RIO — which is the same wheel odometry that's wrong during slip.
-
-**What's needed:** an `ImuFactor` (GTSAM preintegration) integrating gyro and accelerometer between every pair of pose keys, with bias states (`gtsam::imuBias::ConstantBias`). This requires adding `Vector3` velocity and bias variables to the graph and an initial bias prior, plus a calibration step to estimate the gravity vector and bias at startup. See `gtsam/navigation/ImuFactor.h`.
-
-### 8.2 No wheel-slip detection independent of the IMU
-
-Slip is the named requirement. Today the only mitigation is shock-driven sigma inflation, which catches "the chassis hit a wall" but not "we floored it on a polished floor and the wheels spun."
-
-**What's needed (any one of, or in combination):**
-- **Cauchy/Huber kernel on the chassis BetweenFactor.** This is one line — wrap the noise model in `gtsam::noiseModel::Robust::Create(gtsam::noiseModel::mEstimator::Huber::Create(k), chassis_noise_)`. Cheap, low risk, mostly defensive against unmodeled outliers.
-- **Cross-check chassis vs. IMU.** With preintegration in place (§8.1), the IMU-implied velocity change vs. the wheel-implied velocity change is observable. If they disagree by more than a slip threshold over a short window, inflate the chassis sigmas (or drop the factor) for that step.
-- **`ChassisSpeedsSample::status_flags`.** The struct already carries flags from the RIO; if the RIO surfaces a slip indicator, fusion should already be inflating on it. Today only "non-zero" maps to `kFusionStatusDegradedInput` without changing the noise model.
-
-### 8.3 Configuration not persisted
-
-The full chain described in §6 needs to exist:
-1. Add `FusionConfig` (or a serializable mirror) to `RuntimeConfig`.
-2. Add a `fusion_config` table or `fusion_*` columns plus a migration in `SqliteSchema.cpp`.
-3. Implement load/save in `SqliteConfigStore.cpp` matching the existing pattern.
-4. Add bounds checks to `ConfigValidator.cpp`.
-5. Make `buildFusionConfig(RuntimeConfig)` actually map fields.
-6. Decide on hot-reload semantics: rebuild the graph on change, or only apply to new factors? (The latter is safer; the former is simpler.)
-
-The HTTP layer can land separately; once SQLite + `RuntimeConfig` know about it, the web layer is a thin REST/WebSocket on top.
-
-### 8.4 Field tag layout not used as landmarks
+### 8.4 Field tag layout not used as landmarks (deferred)
 
 If the graph held landmark variables for each known tag and consumed individual `AprilTagDetection` entries (currently nested in `AprilTagObservation::detections` but unused by fusion), it could:
 - Detect per-tag flip ambiguities the pipeline missed.
 - Reject single-tag flips by comparing against the known tag pose.
 - Improve the rotation observability when the pipeline-aggregated pose has an inflated rotational covariance.
 
-This is a larger change — it splits the PnP work between the pipeline and the graph — and may not pay off until single-camera flips become a measured problem. Defer until the simpler items above are done, but document the option here so it's not forgotten.
+This is a larger change — it splits the PnP work between the pipeline and the graph — and may not pay off until single-camera flips become a measured problem. The implementation plan defers this until the simpler items above are validated on hardware; documented here so it's not forgotten.
 
-### 8.5 Output collapses to Pose2d; no covariance on CAN
+### 8.9 VioMeasurement is gated, not silently dropped (revisit when VIO ships)
 
-For a grounded robot the 2D collapse is defensible, but it should be a deliberate decision tracked in the wire format, not an accident of `toPose2d()`. Two options:
-- Keep `Pose2d` on CAN but expose the full `Pose3` + 6×6 covariance via a future telemetry sink for diagnostics.
-- Extend the `kTeensyPosePayloadBytes` format to carry pitch/roll/Z plus a compact covariance (e.g. 3-DOF diag + correlation, fitting in a single CAN-FD frame).
+The fusion service now consumes `VioMeasurement` through a dedicated path (`FusionBackend::addVio`) gated by `FusionConfig::enable_vio` and the per-sample `tracking_ok` flag. The placeholder VIO pipeline still publishes `tracking_ok = false` on every sample, so in practice nothing reaches the graph today; counter `measurements_vio_skipped_no_tracking` exposes that. When the real VIO frontend lands the gate stays in place — flip `enable_vio` via config and verify the existing tests in `test/test_fusion_service.cpp` (`IngestsVioMeasurementWhenTrackingOk`, `SkipsVioMeasurementWhenTrackingNotOk`, `SkipsVioMeasurementWhenDisabledByConfig`) still represent the contract.
 
-Either way, the covariance on the CAN frame is the higher-value addition: today the RIO sees only a status bitfield and has no quantitative trust signal.
+### Hot-reload of fusion config (deferred to HTTP-server milestone)
 
-### 8.6 Velocity field never populated
+Today `RuntimeConfig.fusion` is loaded once at `Daemon::loadAndBuild`; changing it requires a daemon restart. When the HTTP server lands, decide whether to rebuild the graph on change (simple but disruptive) or apply only to new factors (smoother but harder to reason about). The data layer is already in place — only the live-apply path is missing.
 
-`FusedPoseEstimate::velocity` exists and is consumed downstream (no current consumer reads it, but the type contract is "may be populated"). Once IMU preintegration adds a velocity variable to the graph (§8.1), populate it in `makeEstimate()`.
+### Phase C IMU preintegration: validation pending
 
-### 8.7 Graph grows unboundedly
+`enable_imu_preintegration` defaults to `false` in both the runtime config and the SQLite default row. Toggle to `true` only after the on-robot validation steps from the implementation plan: confirm `bias_calibrations_completed` increments to 1 within ~2 s on a stationary boot, confirm `state_ == kRunning` after the first AprilTag observation, drive a known closed loop and verify pose closure error and `velocity` track the chassis to within a small percent. Until that validation runs, the existing pose-only graph remains the production path.
 
-`ISAM2` is incremental, but every chassis sample adds a key — at 100 Hz over a 2:30 match that's ~15k poses. Marginalization or a fixed-lag smoother (`gtsam::IncrementalFixedLagSmoother`) would keep the working set bounded and make `marginalCovariance(current_key)` cheap. Not a problem today (a 2:30 run hasn't been profiled), but flag for measurement once latency budgeting (§8.8) is in place.
+### Optional follow-ups (not in any phase)
 
-### 8.8 No latency instrumentation
-
-There is no histogram, no p99, no end-to-end timestamp on the path described in §2.2. `FusionStats` (`FusionService.h:18`) has only `measurements_processed`, `stale_measurements`, and `last_measurement_time`. Add per-stage timers (bus-pop → graph-update → publish, plus the host→Teensy→CAN slice) and surface them through `DaemonHealth` so latency regressions are visible.
-
-### 8.9 VioMeasurement is silently dropped
-
-`isSupportedMeasurement` (`FusionService.cpp:387`) excludes `VioMeasurement` without a counter or log. When VIO is implemented, this filter changes from "drop" to a real handler — but there's no test today proving the rest of the pipeline can ferry a `VioMeasurement` through the bus and into fusion's process function. Acceptable as a future-work flag; revisit when VIO is in scope.
+- **Bias persistence across power cycles.** `RuntimeConfig.fusion.persisted_bias` is plumbed end-to-end but the daemon never writes back the post-calibration bias. The plan's recommendation is to leave this off for now (boot stationary calibration suffices for FRC matches); revisit if matches start with no stationary window.
+- **Chassis-vs-IMU velocity disagreement (`kFusionStatusSlipDetected`).** The status bit, the `slip_disagreement_mps` config field, and the documentation entry are all in place; the runtime check itself is not yet wired. Ship after a session of real on-robot data tells us where to put the threshold.
+- **Migrate to `CombinedImuFactor`.** `ImuFactor` injects bias as a constant per factor; `CombinedImuFactor` adds bias-random-walk between successive bias keys. Worth doing when matches get long enough that stationary-only bias estimation starts to drift.
 
 ---
 
 ## 9. Tests
 
-`test/test_fusion_service.cpp` (320 lines, 11 tests) covers the implemented behavior:
+`test/test_fusion_service.cpp` covers the running graph:
 
 - Chassis integration produces the expected pose displacement.
 - An `AprilTagObservation` becomes the bootstrap prior.
 - Non-positive-definite vision covariance is rejected and flagged.
 - A subsequent empty-tag observation flags `VisionUnavailable` without resetting the pose.
-- `VioMeasurement` is silently dropped (locks in current behavior — see §8.9).
 - Out-of-order chassis samples are counted as stale.
 - IMU shock (>50 m/s² departure from gravity) inflates step noise and flags it.
 - IMU free-fall (<3 m/s² absolute) inflates step noise and flags it.
 - Normal driving (~1.2 m/s² lateral) does not trigger the shock branch.
 - A `Δt > max_chassis_dt_seconds` gap skips the BetweenFactor and flags `ChassisGap`.
-- `buildFusionConfig` ignores its `RuntimeConfig` argument (locks in current behavior — see §8.3).
+- A chassis sample with `kChassisStatusSlip` set inflates noise even when the IMU is quiet (Phase B).
+- Per-stage latency histograms accumulate samples on every chassis update (Phase E).
+- `VioMeasurement` ingestion respects both the `enable_vio` config gate and the per-sample `tracking_ok` flag.
+- `buildFusionConfig` round-trips every tunable field from `runtime::FusionConfig` to `fusion::FusionConfig` (Phase A).
+- `FusionServiceImu`: bias calibration completes during a stationary boot and advances to `kAwaitingFieldFix`; the first vision observation transitions to `kRunning` and starts populating `velocity`; out-of-order IMU samples are counted as stale or `imu_out_of_order`.
 
-The "locks in current behavior" tests are the ones that need to flip when the corresponding gap is fixed. Notably absent: tests for the sink fan-out path, multi-sink scenarios, marginal-covariance failure recovery, and any latency-budget assertions.
+`test/test_config_schema.cpp` rounds-trips `runtime::FusionConfig` through `SqliteConfigStore` and exercises the validator's bounds checks; `test/test_latency_histogram.cpp` covers the rolling-window utility on its own. Wire-format (host-side) round-trip is in `test/test_teensy_protocol.cpp`; the protocol-version golden in `test/test_teensy_protocol_golden.cpp` locks in `kProtocolVersion = 3`.
+
+Notably absent: tests for the sink fan-out path with multiple sinks, marginal-covariance failure recovery, and a long-running marginalization soak (>500 keyframes).
 
 ---
 
@@ -310,9 +335,12 @@ The "locks in current behavior" tests are the ones that need to flip when the co
 
 - **Service:** `include/posest/fusion/FusionService.h`, `src/fusion/FusionService.cpp`
 - **Sink interface:** `include/posest/fusion/IFusionOutputSink.h`
-- **Output type:** `include/posest/MeasurementTypes.h:117` (`FusedPoseEstimate`)
-- **Wire format (host side):** `src/teensy/TeensyService.cpp:100,668`, `include/posest/teensy/Protocol.h`
-- **Wire format (firmware side):** `firmware/teensy41/include/Protocol.h:44,157`, `firmware/teensy41/src/Protocol.cpp:188`
-- **CAN bridge:** `firmware/teensy41/src/CanBridge.cpp:28,248`, `firmware/teensy41/include/CanBridge.h`
-- **Daemon wiring:** `src/runtime/Daemon.cpp:818-826,861-863,904`
-- **Tests:** `test/test_fusion_service.cpp`
+- **Output type:** `include/posest/MeasurementTypes.h` (`FusedPoseEstimate`, `kChassisStatusSlip`)
+- **Config struct:** `include/posest/runtime/RuntimeConfig.h` (`runtime::FusionConfig`)
+- **SQLite schema (migration 9):** `src/config/SqliteSchema.cpp`, load/save in `src/config/SqliteConfigStore.cpp`, validation in `src/config/ConfigValidator.cpp`
+- **Latency histogram:** `include/posest/util/LatencyHistogram.h`
+- **Wire format (host side):** `src/teensy/TeensyService.cpp` (`encodeFusedPosePayload`), `include/posest/teensy/Protocol.h` (`kProtocolVersion = 3`)
+- **Wire format (firmware side):** `firmware/teensy41/include/Protocol.h` (`FusedPose3Payload`), `firmware/teensy41/src/Protocol.cpp` (`decodeFusedPosePayload`)
+- **CAN bridge:** `firmware/teensy41/src/CanBridge.cpp` (`writeFusedPoseFrame`), `firmware/teensy41/include/CanSchema.h` (offsets, `kTeensyPosePayloadBytes = 64`)
+- **Daemon wiring + telemetry:** `src/runtime/Daemon.cpp` (`refreshHealth`, `healthToJson`); `DaemonHealth.fusion` is a `fusion::FusionStats`.
+- **Tests:** `test/test_fusion_service.cpp`, `test/test_config_schema.cpp`, `test/test_latency_histogram.cpp`, `test/test_teensy_protocol.cpp`, `test/test_teensy_protocol_golden.cpp`

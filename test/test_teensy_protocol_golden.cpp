@@ -24,7 +24,7 @@ void expectEncodedSize(const Payload& payload, Encoder&& encoder) {
 
 TEST(TeensyProtocolGolden, FrameHeaderConstants) {
     EXPECT_EQ(posest::teensy::kFrameMagic, 0x4757u);
-    EXPECT_EQ(posest::teensy::kProtocolVersion, 2u);
+    EXPECT_EQ(posest::teensy::kProtocolVersion, 3u);
 }
 
 TEST(TeensyProtocolGolden, MessageTypeNumericValues) {

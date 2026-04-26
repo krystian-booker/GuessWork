@@ -1036,3 +1036,140 @@ TEST(ConfigValidator, RejectsToFIntermeasurementShorterThanTimingBudget) {
     config.vio.tof_intermeasurement_period_ms = 25;  // < timing_budget
     EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
 }
+
+TEST(SqliteConfigStore, FusionConfigRoundTripsAndReopens) {
+    const auto path = tempDbPath("fusion_roundtrip");
+    std::filesystem::remove(path);
+
+    auto config = makeValidConfig();
+    config.fusion.chassis_sigmas = {0.07, 0.08, 0.09, 0.011, 0.012, 0.013};
+    config.fusion.origin_prior_sigmas = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+    config.fusion.shock_threshold_mps2 = 47.5;
+    config.fusion.freefall_threshold_mps2 = 2.5;
+    config.fusion.shock_inflation_factor = 80.0;
+    config.fusion.imu_window_seconds = 0.04;
+    config.fusion.max_chassis_dt_seconds = 0.6;
+    config.fusion.gravity_local_mps2 = {0.01, -0.02, 9.81};
+    config.fusion.enable_vio = true;
+    config.fusion.vio_default_sigmas = {0.04, 0.05, 0.06, 0.015, 0.016, 0.017};
+    config.fusion.huber_k = 1.7;
+    config.fusion.enable_imu_preintegration = true;
+    config.fusion.imu_extrinsic_body_to_imu = {{0.05, -0.05, 0.10}, {0.01, 0.02, 0.03}};
+    config.fusion.accel_noise_sigma = 0.06;
+    config.fusion.gyro_noise_sigma = 0.0015;
+    config.fusion.accel_bias_rw_sigma = 1.5e-4;
+    config.fusion.gyro_bias_rw_sigma = 1.5e-5;
+    config.fusion.integration_cov_sigma = 2e-8;
+    config.fusion.persisted_bias = {0.001, -0.002, 0.003, -0.0004, 0.0005, -0.0006};
+    config.fusion.bias_calibration_seconds = 2.0;
+    config.fusion.bias_calibration_chassis_threshold = 0.03;
+    config.fusion.max_keyframe_dt_seconds = 0.025;
+    config.fusion.max_imu_gap_seconds = 0.150;
+    config.fusion.marginalize_keyframe_window = 750;
+    config.fusion.slip_disagreement_mps = 1.5;
+
+    {
+        posest::config::SqliteConfigStore store(path);
+        store.saveRuntimeConfig(config);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+
+    for (std::size_t i = 0; i < 6; ++i) {
+        EXPECT_DOUBLE_EQ(loaded.fusion.chassis_sigmas[i], config.fusion.chassis_sigmas[i]);
+        EXPECT_DOUBLE_EQ(loaded.fusion.origin_prior_sigmas[i],
+                         config.fusion.origin_prior_sigmas[i]);
+        EXPECT_DOUBLE_EQ(loaded.fusion.vio_default_sigmas[i],
+                         config.fusion.vio_default_sigmas[i]);
+        EXPECT_DOUBLE_EQ(loaded.fusion.persisted_bias[i],
+                         config.fusion.persisted_bias[i]);
+    }
+    EXPECT_DOUBLE_EQ(loaded.fusion.shock_threshold_mps2, 47.5);
+    EXPECT_DOUBLE_EQ(loaded.fusion.freefall_threshold_mps2, 2.5);
+    EXPECT_DOUBLE_EQ(loaded.fusion.shock_inflation_factor, 80.0);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_window_seconds, 0.04);
+    EXPECT_DOUBLE_EQ(loaded.fusion.max_chassis_dt_seconds, 0.6);
+    EXPECT_DOUBLE_EQ(loaded.fusion.gravity_local_mps2.x, 0.01);
+    EXPECT_DOUBLE_EQ(loaded.fusion.gravity_local_mps2.y, -0.02);
+    EXPECT_DOUBLE_EQ(loaded.fusion.gravity_local_mps2.z, 9.81);
+    EXPECT_TRUE(loaded.fusion.enable_vio);
+    EXPECT_DOUBLE_EQ(loaded.fusion.huber_k, 1.7);
+    EXPECT_TRUE(loaded.fusion.enable_imu_preintegration);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_extrinsic_body_to_imu.translation_m.x, 0.05);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_extrinsic_body_to_imu.translation_m.y, -0.05);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_extrinsic_body_to_imu.translation_m.z, 0.10);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad.x, 0.01);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad.y, 0.02);
+    EXPECT_DOUBLE_EQ(loaded.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad.z, 0.03);
+    EXPECT_DOUBLE_EQ(loaded.fusion.accel_noise_sigma, 0.06);
+    EXPECT_DOUBLE_EQ(loaded.fusion.gyro_noise_sigma, 0.0015);
+    EXPECT_DOUBLE_EQ(loaded.fusion.accel_bias_rw_sigma, 1.5e-4);
+    EXPECT_DOUBLE_EQ(loaded.fusion.gyro_bias_rw_sigma, 1.5e-5);
+    EXPECT_DOUBLE_EQ(loaded.fusion.integration_cov_sigma, 2e-8);
+    EXPECT_DOUBLE_EQ(loaded.fusion.bias_calibration_seconds, 2.0);
+    EXPECT_DOUBLE_EQ(loaded.fusion.bias_calibration_chassis_threshold, 0.03);
+    EXPECT_DOUBLE_EQ(loaded.fusion.max_keyframe_dt_seconds, 0.025);
+    EXPECT_DOUBLE_EQ(loaded.fusion.max_imu_gap_seconds, 0.150);
+    EXPECT_EQ(loaded.fusion.marginalize_keyframe_window, 750u);
+    EXPECT_DOUBLE_EQ(loaded.fusion.slip_disagreement_mps, 1.5);
+
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, FusionConfigDefaultsForFreshDatabase) {
+    // Migration 9 seeds a row with the SQL DEFAULT values; an unconfigured DB
+    // must materialize the in-code defaults so the daemon never sees garbage.
+    const auto path = tempDbPath("fusion_defaults");
+    std::filesystem::remove(path);
+
+    posest::config::SqliteConfigStore store(path);
+    const auto loaded = store.loadRuntimeConfig();
+    EXPECT_FALSE(loaded.fusion.enable_imu_preintegration);
+    EXPECT_FALSE(loaded.fusion.enable_vio);
+    EXPECT_DOUBLE_EQ(loaded.fusion.huber_k, 1.5);
+    EXPECT_DOUBLE_EQ(loaded.fusion.shock_threshold_mps2, 50.0);
+    EXPECT_DOUBLE_EQ(loaded.fusion.freefall_threshold_mps2, 3.0);
+    EXPECT_DOUBLE_EQ(loaded.fusion.gravity_local_mps2.z, 9.80665);
+    EXPECT_DOUBLE_EQ(loaded.fusion.max_keyframe_dt_seconds, 0.020);
+    EXPECT_EQ(loaded.fusion.marginalize_keyframe_window, 500u);
+    std::filesystem::remove(path);
+}
+
+TEST(ConfigValidator, RejectsNonPositiveFusionChassisSigma) {
+    auto config = makeValidConfig();
+    config.fusion.chassis_sigmas[2] = -0.01;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsFusionFreefallNotBelowShockThreshold) {
+    auto config = makeValidConfig();
+    config.fusion.shock_threshold_mps2 = 5.0;
+    config.fusion.freefall_threshold_mps2 = 5.0;  // must be strictly less
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsFusionShockInflationLessThanOne) {
+    auto config = makeValidConfig();
+    config.fusion.shock_inflation_factor = 0.5;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsFusionHuberKNonPositive) {
+    auto config = makeValidConfig();
+    config.fusion.huber_k = 0.0;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsFusionMaxKeyframeDtOutOfRange) {
+    auto config = makeValidConfig();
+    config.fusion.max_keyframe_dt_seconds = 0.001;  // too small
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsFusionImuGapNotGreaterThanKeyframeDt) {
+    auto config = makeValidConfig();
+    config.fusion.max_keyframe_dt_seconds = 0.020;
+    config.fusion.max_imu_gap_seconds = 0.020;  // must be strictly greater
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}

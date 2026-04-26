@@ -152,6 +152,7 @@ target_link_libraries(posest_mock PUBLIC posest_core posest_camera)
 # --- tests
 enable_testing()
 add_executable(posest_tests
+    test/test_latency_histogram.cpp
     test/test_latest_frame_slot.cpp
     test/test_producer_base.cpp
     test/test_camera_trigger_cache.cpp

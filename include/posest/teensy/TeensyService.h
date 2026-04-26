@@ -93,9 +93,11 @@ public:
     std::optional<Frame> takeLastOutboundFrame() const;
     TeensyStats stats() const;
 
-private:
+    // v3 FusedPose USB payload encoder. Public for golden-layout testing; the
+    // service is the only production caller and uses it from publish().
     static std::vector<std::uint8_t> encodeFusedPosePayload(const FusedPoseEstimate& estimate);
 
+private:
     void workerLoop();
     void runConnected(ISerialTransport& transport);
     void enqueueFrame(Frame frame);

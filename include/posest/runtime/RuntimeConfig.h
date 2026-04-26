@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -139,6 +140,73 @@ struct VioConfig {
     double tof_expected_max_m{4.0};
 };
 
+// GTSAM fusion-graph tunables. Persisted as a singleton row; all fields have
+// compile-time defaults so an unmigrated DB still produces a runnable config.
+// Ordering of the six-element sigma arrays matches gtsam::Pose3 tangent
+// [rx, ry, rz, tx, ty, tz]. See docs/features/fusion-service.md §3 and §6.
+struct FusionConfig {
+    // BetweenFactor process noise per Δt of integrated chassis speeds.
+    std::array<double, 6> chassis_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
+    // Bootstrap PriorFactor sigmas at x_0 (very loose by design).
+    std::array<double, 6> origin_prior_sigmas{10.0, 10.0, 3.14, 10.0, 10.0, 10.0};
+
+    // Shock-detection thresholds (IMU-driven sigma inflation, not state).
+    double shock_threshold_mps2{50.0};
+    double freefall_threshold_mps2{3.0};
+    double shock_inflation_factor{100.0};
+    // Sliding window over which IMU samples are scanned for shock/free-fall.
+    double imu_window_seconds{0.05};
+    // ChassisSpeeds samples spaced wider than this skip the BetweenFactor.
+    double max_chassis_dt_seconds{0.5};
+    // Body-frame gravity vector. Subtracted from accel before shock test;
+    // override for tilted IMU mounts. Distinct from the nav-frame gravity used
+    // by IMU preintegration (Phase C builds that from g = 9.80665 directly).
+    Vec3 gravity_local_mps2{0.0, 0.0, 9.80665};
+
+    // VioMeasurement → BetweenFactor<Pose3> ingestion. Mirrors the fields on
+    // posest::fusion::FusionConfig; persisting them lets the website turn VIO
+    // on/off without a recompile when the real frontend lands.
+    bool enable_vio{false};
+    std::array<double, 6> vio_default_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
+
+    // Phase B: Huber kernel constant on the chassis BetweenFactor (in
+    // standardized residual units). Lower values downweight legitimate hard
+    // accelerations; higher values let outright slip through.
+    double huber_k{1.5};
+
+    // Phase C: IMU preintegration. Feature-flagged off until Phase C ships and
+    // is validated end-to-end. All fields below are inert when the flag is
+    // false and the existing pose-only graph keeps running.
+    bool enable_imu_preintegration{false};
+    // Static body-to-IMU extrinsic. Identity is correct for an IMU mounted
+    // axis-aligned with the robot frame.
+    Pose3d imu_extrinsic_body_to_imu;
+    // Continuous-time noise densities (per √Hz) and bias random-walk sigmas
+    // for PreintegrationParams. Defaults are typical for a BMI270/ICM-42688.
+    double accel_noise_sigma{0.05};
+    double gyro_noise_sigma{0.001};
+    double accel_bias_rw_sigma{1e-4};
+    double gyro_bias_rw_sigma{1e-5};
+    double integration_cov_sigma{1e-8};
+    // Persisted IMU bias seed [ax, ay, az, gx, gy, gz] across power cycles.
+    // Updated by the boot stationary-calibration loop when one runs.
+    std::array<double, 6> persisted_bias{};
+    double bias_calibration_seconds{1.5};
+    // Stationary detector: chassis must read |v| and |ω| below this for the
+    // entire calibration window for the bias mean to be accepted.
+    double bias_calibration_chassis_threshold{0.02};
+    // Keyframe interval: a new pose+velocity key is committed when either a
+    // vision arrives or this much time has elapsed since the last keyframe.
+    double max_keyframe_dt_seconds{0.020};
+    // IMU gap that triggers a preintegrator reset. Beyond this, integration
+    // accumulates too much error to commit a useful ImuFactor.
+    double max_imu_gap_seconds{0.100};
+    // Sliding-window length for ISAM2 marginalization (in keyframe count).
+    std::uint32_t marginalize_keyframe_window{500};
+    // Threshold for the chassis-vs-IMU velocity disagreement slip detector.
+    double slip_disagreement_mps{1.0};
+};
+
 struct RuntimeConfig {
     std::vector<CameraConfig> cameras;
     std::vector<PipelineConfig> pipelines;
@@ -153,6 +221,7 @@ struct RuntimeConfig {
     std::vector<CameraTriggerConfig> camera_triggers;
     TeensyConfig teensy;
     VioConfig vio;
+    FusionConfig fusion;
 };
 
 }  // namespace posest::runtime

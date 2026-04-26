@@ -186,13 +186,28 @@ bool decodeTimeSyncRequestPayload(const Frame& frame, TimeSyncRequestPayload& pa
 }
 
 bool decodeFusedPosePayload(const Frame& frame, FusedPosePayload& payload) {
-    if (frame.payload_size != 28u) {
+    // v3 wire layout: 9 doubles (pose + velocity) + 4 B has_velocity +
+    // 4 B status_flags + 36 doubles (covariance) = 368 bytes.
+    constexpr std::uint16_t kExpectedSize = 368u;
+    if (frame.payload_size != kExpectedSize) {
         return false;
     }
-    payload.field_to_robot.x_m = readDouble(frame.payload, 0);
-    payload.field_to_robot.y_m = readDouble(frame.payload, 8);
-    payload.field_to_robot.theta_rad = readDouble(frame.payload, 16);
-    payload.status_flags = readU32(frame.payload, 24);
+    std::size_t off = 0;
+    payload.x_m = readDouble(frame.payload, off); off += 8;
+    payload.y_m = readDouble(frame.payload, off); off += 8;
+    payload.z_m = readDouble(frame.payload, off); off += 8;
+    payload.roll_rad = readDouble(frame.payload, off); off += 8;
+    payload.pitch_rad = readDouble(frame.payload, off); off += 8;
+    payload.yaw_rad = readDouble(frame.payload, off); off += 8;
+    payload.vx_mps = readDouble(frame.payload, off); off += 8;
+    payload.vy_mps = readDouble(frame.payload, off); off += 8;
+    payload.vz_mps = readDouble(frame.payload, off); off += 8;
+    payload.has_velocity = readU32(frame.payload, off) != 0u; off += 4;
+    payload.status_flags = readU32(frame.payload, off); off += 4;
+    for (int i = 0; i < 36; ++i) {
+        payload.covariance[i] = readDouble(frame.payload, off);
+        off += 8;
+    }
     return true;
 }
 

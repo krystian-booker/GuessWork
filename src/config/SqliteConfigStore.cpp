@@ -592,6 +592,84 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
         }
     }
 
+    {
+        Statement stmt(
+            db_,
+            "SELECT chassis_sigma_rx, chassis_sigma_ry, chassis_sigma_rz, "
+            "chassis_sigma_tx, chassis_sigma_ty, chassis_sigma_tz, "
+            "origin_prior_sigma_rx, origin_prior_sigma_ry, origin_prior_sigma_rz, "
+            "origin_prior_sigma_tx, origin_prior_sigma_ty, origin_prior_sigma_tz, "
+            "shock_threshold_mps2, freefall_threshold_mps2, shock_inflation_factor, "
+            "imu_window_seconds, max_chassis_dt_seconds, "
+            "gravity_local_x, gravity_local_y, gravity_local_z, "
+            "enable_vio, vio_sigma_rx, vio_sigma_ry, vio_sigma_rz, "
+            "vio_sigma_tx, vio_sigma_ty, vio_sigma_tz, "
+            "huber_k, enable_imu_preintegration, "
+            "imu_extrinsic_tx_m, imu_extrinsic_ty_m, imu_extrinsic_tz_m, "
+            "imu_extrinsic_roll_rad, imu_extrinsic_pitch_rad, imu_extrinsic_yaw_rad, "
+            "accel_noise_sigma, gyro_noise_sigma, "
+            "accel_bias_rw_sigma, gyro_bias_rw_sigma, integration_cov_sigma, "
+            "persisted_bias_ax, persisted_bias_ay, persisted_bias_az, "
+            "persisted_bias_gx, persisted_bias_gy, persisted_bias_gz, "
+            "bias_calibration_seconds, bias_calibration_chassis_threshold, "
+            "max_keyframe_dt_seconds, max_imu_gap_seconds, "
+            "marginalize_keyframe_window, slip_disagreement_mps "
+            "FROM fusion_config WHERE id = 1");
+        if (stmt.stepRow()) {
+            for (int i = 0; i < 6; ++i) {
+                config.fusion.chassis_sigmas[static_cast<std::size_t>(i)] =
+                    stmt.columnDouble(i);
+            }
+            for (int i = 0; i < 6; ++i) {
+                config.fusion.origin_prior_sigmas[static_cast<std::size_t>(i)] =
+                    stmt.columnDouble(6 + i);
+            }
+            config.fusion.shock_threshold_mps2 = stmt.columnDouble(12);
+            config.fusion.freefall_threshold_mps2 = stmt.columnDouble(13);
+            config.fusion.shock_inflation_factor = stmt.columnDouble(14);
+            config.fusion.imu_window_seconds = stmt.columnDouble(15);
+            config.fusion.max_chassis_dt_seconds = stmt.columnDouble(16);
+            config.fusion.gravity_local_mps2 = {
+                stmt.columnDouble(17),
+                stmt.columnDouble(18),
+                stmt.columnDouble(19),
+            };
+            config.fusion.enable_vio = stmt.columnInt64(20) != 0;
+            for (int i = 0; i < 6; ++i) {
+                config.fusion.vio_default_sigmas[static_cast<std::size_t>(i)] =
+                    stmt.columnDouble(21 + i);
+            }
+            config.fusion.huber_k = stmt.columnDouble(27);
+            config.fusion.enable_imu_preintegration = stmt.columnInt64(28) != 0;
+            config.fusion.imu_extrinsic_body_to_imu.translation_m = {
+                stmt.columnDouble(29),
+                stmt.columnDouble(30),
+                stmt.columnDouble(31),
+            };
+            config.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad = {
+                stmt.columnDouble(32),
+                stmt.columnDouble(33),
+                stmt.columnDouble(34),
+            };
+            config.fusion.accel_noise_sigma = stmt.columnDouble(35);
+            config.fusion.gyro_noise_sigma = stmt.columnDouble(36);
+            config.fusion.accel_bias_rw_sigma = stmt.columnDouble(37);
+            config.fusion.gyro_bias_rw_sigma = stmt.columnDouble(38);
+            config.fusion.integration_cov_sigma = stmt.columnDouble(39);
+            for (int i = 0; i < 6; ++i) {
+                config.fusion.persisted_bias[static_cast<std::size_t>(i)] =
+                    stmt.columnDouble(40 + i);
+            }
+            config.fusion.bias_calibration_seconds = stmt.columnDouble(46);
+            config.fusion.bias_calibration_chassis_threshold = stmt.columnDouble(47);
+            config.fusion.max_keyframe_dt_seconds = stmt.columnDouble(48);
+            config.fusion.max_imu_gap_seconds = stmt.columnDouble(49);
+            config.fusion.marginalize_keyframe_window =
+                checkedUint32(stmt.columnInt64(50), "marginalize_keyframe_window");
+            config.fusion.slip_disagreement_mps = stmt.columnDouble(51);
+        }
+    }
+
     validateRuntimeConfig(config);
     return config;
 }
@@ -618,6 +696,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM imu_config");
     exec(db_, "DELETE FROM can_config");
     exec(db_, "DELETE FROM vio_config");
+    exec(db_, "DELETE FROM fusion_config");
 
     for (const auto& camera : config.cameras) {
         Statement insert(
@@ -918,6 +997,95 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             static_cast<sqlite3_int64>(std::llround(config.vio.tof_expected_min_m * 1000.0)));
         insert.bindInt64(14,
             static_cast<sqlite3_int64>(std::llround(config.vio.tof_expected_max_m * 1000.0)));
+        insert.stepDone();
+    }
+
+    {
+        // 52 columns total (excluding id). The VALUES placeholder block is
+        // grouped six-per-line below to keep the count visually verifiable.
+        Statement insert(
+            db_,
+            "INSERT INTO fusion_config "
+            "(id, "
+            "chassis_sigma_rx, chassis_sigma_ry, chassis_sigma_rz, "
+            "chassis_sigma_tx, chassis_sigma_ty, chassis_sigma_tz, "
+            "origin_prior_sigma_rx, origin_prior_sigma_ry, origin_prior_sigma_rz, "
+            "origin_prior_sigma_tx, origin_prior_sigma_ty, origin_prior_sigma_tz, "
+            "shock_threshold_mps2, freefall_threshold_mps2, shock_inflation_factor, "
+            "imu_window_seconds, max_chassis_dt_seconds, "
+            "gravity_local_x, gravity_local_y, gravity_local_z, "
+            "enable_vio, vio_sigma_rx, vio_sigma_ry, vio_sigma_rz, "
+            "vio_sigma_tx, vio_sigma_ty, vio_sigma_tz, "
+            "huber_k, enable_imu_preintegration, "
+            "imu_extrinsic_tx_m, imu_extrinsic_ty_m, imu_extrinsic_tz_m, "
+            "imu_extrinsic_roll_rad, imu_extrinsic_pitch_rad, imu_extrinsic_yaw_rad, "
+            "accel_noise_sigma, gyro_noise_sigma, "
+            "accel_bias_rw_sigma, gyro_bias_rw_sigma, integration_cov_sigma, "
+            "persisted_bias_ax, persisted_bias_ay, persisted_bias_az, "
+            "persisted_bias_gx, persisted_bias_gy, persisted_bias_gz, "
+            "bias_calibration_seconds, bias_calibration_chassis_threshold, "
+            "max_keyframe_dt_seconds, max_imu_gap_seconds, "
+            "marginalize_keyframe_window, slip_disagreement_mps) "
+            "VALUES (1, "
+            "?, ?, ?, ?, ?, ?, "  // chassis_sigmas
+            "?, ?, ?, ?, ?, ?, "  // origin_prior_sigmas
+            "?, ?, ?, "           // shock/freefall/inflation
+            "?, ?, "              // imu_window/max_chassis_dt
+            "?, ?, ?, "           // gravity_local
+            "?, ?, ?, ?, ?, ?, ?, "  // enable_vio + 6 vio sigmas
+            "?, ?, "              // huber_k + enable_imu_preintegration
+            "?, ?, ?, ?, ?, ?, "  // imu_extrinsic
+            "?, ?, ?, ?, ?, "     // accel/gyro/bias_rw/integration_cov
+            "?, ?, ?, ?, ?, ?, "  // persisted_bias
+            "?, ?, "              // bias_calibration_seconds + threshold
+            "?, ?, "              // max_keyframe_dt + max_imu_gap
+            "?, ?)");             // marginalize_window + slip_disagreement
+        int idx = 1;
+        for (int i = 0; i < 6; ++i) {
+            insert.bindDouble(idx++,
+                config.fusion.chassis_sigmas[static_cast<std::size_t>(i)]);
+        }
+        for (int i = 0; i < 6; ++i) {
+            insert.bindDouble(idx++,
+                config.fusion.origin_prior_sigmas[static_cast<std::size_t>(i)]);
+        }
+        insert.bindDouble(idx++, config.fusion.shock_threshold_mps2);
+        insert.bindDouble(idx++, config.fusion.freefall_threshold_mps2);
+        insert.bindDouble(idx++, config.fusion.shock_inflation_factor);
+        insert.bindDouble(idx++, config.fusion.imu_window_seconds);
+        insert.bindDouble(idx++, config.fusion.max_chassis_dt_seconds);
+        insert.bindDouble(idx++, config.fusion.gravity_local_mps2.x);
+        insert.bindDouble(idx++, config.fusion.gravity_local_mps2.y);
+        insert.bindDouble(idx++, config.fusion.gravity_local_mps2.z);
+        insert.bindInt(idx++, config.fusion.enable_vio ? 1 : 0);
+        for (int i = 0; i < 6; ++i) {
+            insert.bindDouble(idx++,
+                config.fusion.vio_default_sigmas[static_cast<std::size_t>(i)]);
+        }
+        insert.bindDouble(idx++, config.fusion.huber_k);
+        insert.bindInt(idx++, config.fusion.enable_imu_preintegration ? 1 : 0);
+        insert.bindDouble(idx++, config.fusion.imu_extrinsic_body_to_imu.translation_m.x);
+        insert.bindDouble(idx++, config.fusion.imu_extrinsic_body_to_imu.translation_m.y);
+        insert.bindDouble(idx++, config.fusion.imu_extrinsic_body_to_imu.translation_m.z);
+        insert.bindDouble(idx++, config.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad.x);
+        insert.bindDouble(idx++, config.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad.y);
+        insert.bindDouble(idx++, config.fusion.imu_extrinsic_body_to_imu.rotation_rpy_rad.z);
+        insert.bindDouble(idx++, config.fusion.accel_noise_sigma);
+        insert.bindDouble(idx++, config.fusion.gyro_noise_sigma);
+        insert.bindDouble(idx++, config.fusion.accel_bias_rw_sigma);
+        insert.bindDouble(idx++, config.fusion.gyro_bias_rw_sigma);
+        insert.bindDouble(idx++, config.fusion.integration_cov_sigma);
+        for (int i = 0; i < 6; ++i) {
+            insert.bindDouble(idx++,
+                config.fusion.persisted_bias[static_cast<std::size_t>(i)]);
+        }
+        insert.bindDouble(idx++, config.fusion.bias_calibration_seconds);
+        insert.bindDouble(idx++, config.fusion.bias_calibration_chassis_threshold);
+        insert.bindDouble(idx++, config.fusion.max_keyframe_dt_seconds);
+        insert.bindDouble(idx++, config.fusion.max_imu_gap_seconds);
+        insert.bindInt64(idx++,
+            static_cast<sqlite3_int64>(config.fusion.marginalize_keyframe_window));
+        insert.bindDouble(idx++, config.fusion.slip_disagreement_mps);
         insert.stepDone();
     }
 

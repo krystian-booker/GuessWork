@@ -63,7 +63,9 @@ constexpr std::uint32_t kTeensyPoseId = 0x180;
 
 constexpr std::size_t kRioChassisSpeedsPayloadBytes = 48;
 constexpr std::size_t kRioTimeSyncPayloadBytes = 16;
-constexpr std::size_t kTeensyPosePayloadBytes = 48;
+// Bumped from 48 → 64 in protocol v3 to carry full Pose3 + velocity + a
+// compressed covariance triple. RIO firmware must be updated in lockstep.
+constexpr std::size_t kTeensyPosePayloadBytes = 64;
 
 // Layout of `kRioChassisSpeedsId` (RIO -> Teensy):
 //   int64  rio_time_us    (offset 0)
@@ -85,17 +87,43 @@ constexpr std::size_t kRioChassisSpeedsStatusOffset = 32;
 constexpr std::size_t kRioTimeSyncRioTimeOffset = 0;
 constexpr std::size_t kRioTimeSyncSeqOffset = 8;
 
-// Layout of `kTeensyPoseId` (Teensy -> RIO):
-//   int64  teensy_time_us (offset 0)
-//   double x_m            (offset 8)
-//   double y_m            (offset 16)
-//   double theta_rad      (offset 24)
-//   uint32 status_flags   (offset 32)
-//   uint8  pad[12]        (offset 36)
+// Layout of `kTeensyPoseId` (Teensy -> RIO), protocol v3, 64 bytes total:
+//
+//   uint64 teensy_time_us       (offset 0)   FPGA-domain stamp at TX
+//   double x_m                  (offset 8)   field-frame robot pose, double precision
+//   double y_m                  (offset 16)
+//   float  z_m                  (offset 24)  grounded → ~0; float is plenty
+//   float  roll_rad             (offset 28)
+//   float  pitch_rad            (offset 32)
+//   float  yaw_rad              (offset 36)
+//   float  vx_mps               (offset 40)  body-frame velocity
+//   float  vy_mps               (offset 44)
+//   float  vz_mps               (offset 48)
+//   float  sigma_x_m            (offset 52)  sqrt(cov(tx, tx))
+//   float  sigma_y_m            (offset 56)  sqrt(cov(ty, ty))
+//   uint16 sigma_yaw_mrad       (offset 60)  sqrt(cov(rz, rz)) × 1000, saturated at 65535
+//   uint16 status_flags         (offset 62)  low 16 bits of FusedPoseEstimate.status_flags
+// total 64 bytes — exact CAN-FD DLC fit, no padding.
+//
+// Velocity fields are NaN when FusedPoseEstimate::velocity is unavailable
+// (kFusionStatusAwaitingFieldFix or pre-bootstrap). Sigma fields likewise
+// carry NaN when the marginal covariance was unavailable
+// (kFusionStatusMarginalUnavailable); the RIO must check the status flag
+// before consuming. sigma_yaw_mrad uses 0xFFFF as its NaN sentinel.
 constexpr std::size_t kTeensyPoseTeensyTimeOffset = 0;
 constexpr std::size_t kTeensyPoseXOffset = 8;
 constexpr std::size_t kTeensyPoseYOffset = 16;
-constexpr std::size_t kTeensyPoseThetaOffset = 24;
-constexpr std::size_t kTeensyPoseStatusOffset = 32;
+constexpr std::size_t kTeensyPoseZOffset = 24;
+constexpr std::size_t kTeensyPoseRollOffset = 28;
+constexpr std::size_t kTeensyPosePitchOffset = 32;
+constexpr std::size_t kTeensyPoseYawOffset = 36;
+constexpr std::size_t kTeensyPoseVxOffset = 40;
+constexpr std::size_t kTeensyPoseVyOffset = 44;
+constexpr std::size_t kTeensyPoseVzOffset = 48;
+constexpr std::size_t kTeensyPoseSigmaXOffset = 52;
+constexpr std::size_t kTeensyPoseSigmaYOffset = 56;
+constexpr std::size_t kTeensyPoseSigmaYawMradOffset = 60;
+constexpr std::size_t kTeensyPoseStatusOffset = 62;
+constexpr std::uint16_t kTeensyPoseSigmaYawMradNaN = 0xFFFFu;
 
 }  // namespace posest::firmware::can_schema

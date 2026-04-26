@@ -531,6 +531,34 @@ std::string healthToJson(const DaemonHealth& health) {
         {"last_error", health.last_error},
         {"shutdown_signal", health.shutdown_signal},
     };
+
+    // Fusion observability. Each histogram becomes a sub-object with the
+    // standard percentile set. count == 0 indicates the histogram has not
+    // accumulated samples yet (e.g. before the first chassis update).
+    auto histogramJson = [](const util::LatencyHistogram::Snapshot& s) {
+        return nlohmann::json{
+            {"count", s.count},
+            {"min_us", s.min_us},
+            {"avg_us", s.avg_us},
+            {"p50_us", s.p50_us},
+            {"p95_us", s.p95_us},
+            {"p99_us", s.p99_us},
+            {"max_us", s.max_us},
+        };
+    };
+    out["fusion"] = {
+        {"measurements_processed", health.fusion.measurements_processed},
+        {"stale_measurements", health.fusion.stale_measurements},
+        {"measurements_vio_processed", health.fusion.measurements_vio_processed},
+        {"measurements_vio_skipped_no_tracking",
+         health.fusion.measurements_vio_skipped_no_tracking},
+        {"graph_factor_count", health.fusion.graph_factor_count},
+        {"graph_variable_count", health.fusion.graph_variable_count},
+        {"last_update_wall_clock_us", health.fusion.last_update_wall_clock_us},
+        {"graph_update_us", histogramJson(health.fusion.graph_update_us)},
+        {"publish_us", histogramJson(health.fusion.publish_us)},
+    };
+
     return out.dump();
 }
 
@@ -949,10 +977,11 @@ void DaemonController::refreshHealth() {
         health_.measurements_dropped = measurement_bus_->droppedNewestCount();
     }
     if (fusion_) {
-        const auto stats = fusion_->stats();
+        auto stats = fusion_->stats();
         health_.measurements_processed = stats.measurements_processed;
         health_.stale_measurements = stats.stale_measurements;
         health_.has_latest_pose = fusion_->latestEstimate().has_value();
+        health_.fusion = std::move(stats);
     }
     if (teensy_) {
         health_.teensy = teensy_->stats();

@@ -302,6 +302,85 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
         require(cameras_enabled.find(config.vio.vio_camera_id) != cameras_enabled.end(),
                 "VIO references unknown camera: " + config.vio.vio_camera_id);
     }
+
+    // GTSAM fusion-graph tunables. Bounds are deliberately loose where the
+    // graph itself will gracefully degrade and tight where a bad value would
+    // crash GTSAM (non-positive sigmas) or silently produce garbage (e.g. an
+    // inverted shock/free-fall ordering).
+    for (std::size_t i = 0; i < config.fusion.chassis_sigmas.size(); ++i) {
+        require(config.fusion.chassis_sigmas[i] > 0.0 &&
+                    isFinite(config.fusion.chassis_sigmas[i]),
+                "fusion chassis_sigmas[" + std::to_string(i) +
+                    "] must be finite and > 0");
+    }
+    for (std::size_t i = 0; i < config.fusion.origin_prior_sigmas.size(); ++i) {
+        require(config.fusion.origin_prior_sigmas[i] > 0.0 &&
+                    isFinite(config.fusion.origin_prior_sigmas[i]),
+                "fusion origin_prior_sigmas[" + std::to_string(i) +
+                    "] must be finite and > 0");
+    }
+    require(config.fusion.shock_threshold_mps2 > 0.0 &&
+                isFinite(config.fusion.shock_threshold_mps2),
+            "fusion shock_threshold_mps2 must be finite and > 0");
+    require(config.fusion.freefall_threshold_mps2 > 0.0 &&
+                isFinite(config.fusion.freefall_threshold_mps2),
+            "fusion freefall_threshold_mps2 must be finite and > 0");
+    require(config.fusion.shock_threshold_mps2 > config.fusion.freefall_threshold_mps2,
+            "fusion shock_threshold_mps2 must be greater than freefall_threshold_mps2");
+    require(config.fusion.shock_inflation_factor >= 1.0 &&
+                isFinite(config.fusion.shock_inflation_factor),
+            "fusion shock_inflation_factor must be finite and >= 1");
+    require(config.fusion.imu_window_seconds > 0.0 &&
+                isFinite(config.fusion.imu_window_seconds),
+            "fusion imu_window_seconds must be finite and > 0");
+    require(config.fusion.max_chassis_dt_seconds > 0.0 &&
+                isFinite(config.fusion.max_chassis_dt_seconds),
+            "fusion max_chassis_dt_seconds must be finite and > 0");
+    require(isFinite(config.fusion.gravity_local_mps2.x) &&
+                isFinite(config.fusion.gravity_local_mps2.y) &&
+                isFinite(config.fusion.gravity_local_mps2.z),
+            "fusion gravity_local_mps2 must be finite");
+    require(config.fusion.huber_k > 0.0 && isFinite(config.fusion.huber_k),
+            "fusion huber_k must be finite and > 0");
+    require(isFinitePose(config.fusion.imu_extrinsic_body_to_imu),
+            "fusion imu_extrinsic_body_to_imu must be finite");
+    require(config.fusion.accel_noise_sigma > 0.0 &&
+                isFinite(config.fusion.accel_noise_sigma),
+            "fusion accel_noise_sigma must be finite and > 0");
+    require(config.fusion.gyro_noise_sigma > 0.0 &&
+                isFinite(config.fusion.gyro_noise_sigma),
+            "fusion gyro_noise_sigma must be finite and > 0");
+    require(config.fusion.accel_bias_rw_sigma > 0.0 &&
+                isFinite(config.fusion.accel_bias_rw_sigma),
+            "fusion accel_bias_rw_sigma must be finite and > 0");
+    require(config.fusion.gyro_bias_rw_sigma > 0.0 &&
+                isFinite(config.fusion.gyro_bias_rw_sigma),
+            "fusion gyro_bias_rw_sigma must be finite and > 0");
+    require(config.fusion.integration_cov_sigma > 0.0 &&
+                isFinite(config.fusion.integration_cov_sigma),
+            "fusion integration_cov_sigma must be finite and > 0");
+    for (std::size_t i = 0; i < config.fusion.persisted_bias.size(); ++i) {
+        require(isFinite(config.fusion.persisted_bias[i]),
+                "fusion persisted_bias[" + std::to_string(i) + "] must be finite");
+    }
+    require(config.fusion.bias_calibration_seconds >= 0.5 &&
+                isFinite(config.fusion.bias_calibration_seconds),
+            "fusion bias_calibration_seconds must be finite and >= 0.5");
+    require(config.fusion.bias_calibration_chassis_threshold > 0.0 &&
+                isFinite(config.fusion.bias_calibration_chassis_threshold),
+            "fusion bias_calibration_chassis_threshold must be finite and > 0");
+    require(config.fusion.max_keyframe_dt_seconds >= 0.005 &&
+                config.fusion.max_keyframe_dt_seconds <= 0.1 &&
+                isFinite(config.fusion.max_keyframe_dt_seconds),
+            "fusion max_keyframe_dt_seconds must be finite and in [0.005, 0.1]");
+    require(config.fusion.max_imu_gap_seconds > config.fusion.max_keyframe_dt_seconds &&
+                isFinite(config.fusion.max_imu_gap_seconds),
+            "fusion max_imu_gap_seconds must be finite and greater than max_keyframe_dt_seconds");
+    require(config.fusion.marginalize_keyframe_window >= 1u,
+            "fusion marginalize_keyframe_window must be >= 1");
+    require(config.fusion.slip_disagreement_mps > 0.0 &&
+                isFinite(config.fusion.slip_disagreement_mps),
+            "fusion slip_disagreement_mps must be finite and > 0");
 }
 
 }  // namespace posest::config

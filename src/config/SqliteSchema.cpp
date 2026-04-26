@@ -353,10 +353,81 @@ COMMIT;
 )sql";
 }
 
+const char* migration9Sql() {
+    // Single-row GTSAM fusion-graph tunables. Six-element sigma arrays use
+    // gtsam::Pose3 tangent ordering (rx, ry, rz, tx, ty, tz). All Phase A/B/C
+    // fields are persisted up front so feature flags toggle without further
+    // migrations. See docs/features/fusion-service.md §3 and §6.
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS fusion_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    chassis_sigma_rx REAL NOT NULL DEFAULT 0.05,
+    chassis_sigma_ry REAL NOT NULL DEFAULT 0.05,
+    chassis_sigma_rz REAL NOT NULL DEFAULT 0.05,
+    chassis_sigma_tx REAL NOT NULL DEFAULT 0.02,
+    chassis_sigma_ty REAL NOT NULL DEFAULT 0.02,
+    chassis_sigma_tz REAL NOT NULL DEFAULT 0.02,
+    origin_prior_sigma_rx REAL NOT NULL DEFAULT 10.0,
+    origin_prior_sigma_ry REAL NOT NULL DEFAULT 10.0,
+    origin_prior_sigma_rz REAL NOT NULL DEFAULT 3.14,
+    origin_prior_sigma_tx REAL NOT NULL DEFAULT 10.0,
+    origin_prior_sigma_ty REAL NOT NULL DEFAULT 10.0,
+    origin_prior_sigma_tz REAL NOT NULL DEFAULT 10.0,
+    shock_threshold_mps2 REAL NOT NULL DEFAULT 50.0,
+    freefall_threshold_mps2 REAL NOT NULL DEFAULT 3.0,
+    shock_inflation_factor REAL NOT NULL DEFAULT 100.0,
+    imu_window_seconds REAL NOT NULL DEFAULT 0.05,
+    max_chassis_dt_seconds REAL NOT NULL DEFAULT 0.5,
+    gravity_local_x REAL NOT NULL DEFAULT 0.0,
+    gravity_local_y REAL NOT NULL DEFAULT 0.0,
+    gravity_local_z REAL NOT NULL DEFAULT 9.80665,
+    enable_vio INTEGER NOT NULL DEFAULT 0,
+    vio_sigma_rx REAL NOT NULL DEFAULT 0.05,
+    vio_sigma_ry REAL NOT NULL DEFAULT 0.05,
+    vio_sigma_rz REAL NOT NULL DEFAULT 0.05,
+    vio_sigma_tx REAL NOT NULL DEFAULT 0.02,
+    vio_sigma_ty REAL NOT NULL DEFAULT 0.02,
+    vio_sigma_tz REAL NOT NULL DEFAULT 0.02,
+    huber_k REAL NOT NULL DEFAULT 1.5,
+    enable_imu_preintegration INTEGER NOT NULL DEFAULT 0,
+    imu_extrinsic_tx_m REAL NOT NULL DEFAULT 0.0,
+    imu_extrinsic_ty_m REAL NOT NULL DEFAULT 0.0,
+    imu_extrinsic_tz_m REAL NOT NULL DEFAULT 0.0,
+    imu_extrinsic_roll_rad REAL NOT NULL DEFAULT 0.0,
+    imu_extrinsic_pitch_rad REAL NOT NULL DEFAULT 0.0,
+    imu_extrinsic_yaw_rad REAL NOT NULL DEFAULT 0.0,
+    accel_noise_sigma REAL NOT NULL DEFAULT 0.05,
+    gyro_noise_sigma REAL NOT NULL DEFAULT 0.001,
+    accel_bias_rw_sigma REAL NOT NULL DEFAULT 0.0001,
+    gyro_bias_rw_sigma REAL NOT NULL DEFAULT 0.00001,
+    integration_cov_sigma REAL NOT NULL DEFAULT 0.00000001,
+    persisted_bias_ax REAL NOT NULL DEFAULT 0.0,
+    persisted_bias_ay REAL NOT NULL DEFAULT 0.0,
+    persisted_bias_az REAL NOT NULL DEFAULT 0.0,
+    persisted_bias_gx REAL NOT NULL DEFAULT 0.0,
+    persisted_bias_gy REAL NOT NULL DEFAULT 0.0,
+    persisted_bias_gz REAL NOT NULL DEFAULT 0.0,
+    bias_calibration_seconds REAL NOT NULL DEFAULT 1.5,
+    bias_calibration_chassis_threshold REAL NOT NULL DEFAULT 0.02,
+    max_keyframe_dt_seconds REAL NOT NULL DEFAULT 0.020,
+    max_imu_gap_seconds REAL NOT NULL DEFAULT 0.100,
+    marginalize_keyframe_window INTEGER NOT NULL DEFAULT 500,
+    slip_disagreement_mps REAL NOT NULL DEFAULT 1.0
+);
+
+INSERT OR IGNORE INTO fusion_config (id) VALUES (1);
+
+PRAGMA user_version = 9;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 8;
+    return 9;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -399,6 +470,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 7) {
         exec(db, migration8Sql());
+        migrated_version = 8;
+    }
+    if (migrated_version == 8) {
+        exec(db, migration9Sql());
     }
 }
 

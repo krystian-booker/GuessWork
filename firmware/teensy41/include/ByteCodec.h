@@ -36,6 +36,13 @@ inline void appendDouble(std::uint8_t* out, std::size_t& offset, double value) {
     appendU64(out, offset, bits);
 }
 
+inline void appendFloat(std::uint8_t* out, std::size_t& offset, float value) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(value));
+    appendU32(out, offset, bits);
+}
+
 inline std::uint16_t readU16(const std::uint8_t* bytes, std::size_t offset) {
     return static_cast<std::uint16_t>(bytes[offset]) |
            static_cast<std::uint16_t>(

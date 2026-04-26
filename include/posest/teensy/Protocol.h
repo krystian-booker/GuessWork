@@ -10,7 +10,10 @@
 namespace posest::teensy {
 
 constexpr std::uint16_t kFrameMagic = 0x4757;  // "GW"
-constexpr std::uint8_t kProtocolVersion = 2;
+// v3: FusedPose payload extended from 28 B (Pose2d + status) to a full Pose3
+// + velocity + 6×6 covariance + status (368 B). Single-vehicle deployment so
+// the version bump is breaking, not negotiated.
+constexpr std::uint8_t kProtocolVersion = 3;
 constexpr std::uint32_t kStatusUnsynchronizedTime = 1u << 0u;
 constexpr std::uint32_t kStatusUnsynchronizedRioTime = 1u << 1u;
 constexpr std::uint32_t kStatusRobotSlipping = 1u << 2u;

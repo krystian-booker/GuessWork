@@ -292,6 +292,66 @@ TEST(FusionService, InflatesCovarianceOnFreefall) {
     EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusShockInflated, 0u);
 }
 
+TEST(FusionService, RecordsPerStageLatencyInStats) {
+    // Phase E: every chassis sample that reaches the graph should accumulate
+    // one sample on graph_update_us and one on publish_us. IMU samples
+    // bypass the graph and don't show up here.
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 50ms, 1.0)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 100ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_GE(stats.graph_update_us.count, 3u);
+    EXPECT_GE(stats.publish_us.count, 3u);
+    // A chassis update spends most of its time in ISAM2; publish into a no-op
+    // sink (only latest_estimate_) is far cheaper. Allow a generous bound to
+    // tolerate CI jitter while still catching a swap.
+    EXPECT_LE(stats.publish_us.avg_us, stats.graph_update_us.avg_us + 1000);
+    EXPECT_GT(stats.graph_factor_count, 0u);
+    EXPECT_GT(stats.graph_variable_count, 0u);
+    EXPECT_GT(stats.last_update_wall_clock_us, 0);
+}
+
+TEST(FusionService, InflatesCovarianceOnRioReportedSlipWithQuietImu) {
+    // Phase B: a chassis sample with kChassisStatusSlip in status_flags must
+    // inflate noise even when the IMU is reading nominal (no shock, no
+    // free-fall). This catches wheel spin on low-traction surfaces, which
+    // the IMU cannot see directly.
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+
+    // Quiet IMU at gravity — neither shock nor free-fall fires.
+    posest::ImuSample steady;
+    steady.timestamp = t0 + 30ms;
+    steady.accel_mps2 = {0.0, 0.0, 9.81};
+    ASSERT_TRUE(bus.publish(steady));
+
+    auto slipping = makeChassis(t0 + 40ms, 1.0);
+    slipping.status_flags = posest::kChassisStatusSlip;
+    ASSERT_TRUE(bus.publish(slipping));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusSlipReported, 0u);
+    EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusDegradedInput, 0u);
+    EXPECT_EQ(latest->status_flags & posest::fusion::kFusionStatusShockInflated, 0u);
+}
+
 TEST(FusionService, DoesNotInflateCovarianceBelowThreshold) {
     posest::MeasurementBus bus(8);
     posest::fusion::FusionService fusion(bus);
@@ -336,16 +396,32 @@ TEST(FusionService, SkipsFactorOnLargeChassisGap) {
     EXPECT_NEAR(latest->field_to_robot.x_m, 0.0, 1e-6);
 }
 
-TEST(FusionConfig, BuildFusionConfigIgnoresRuntimeConfig) {
+TEST(FusionConfig, BuildFusionConfigMapsFromRuntimeFusion) {
+    // Phase A: buildFusionConfig must round-trip every tunable from the
+    // RuntimeConfig.fusion sub-struct. This locks in the field-for-field
+    // mapping so future Phase B/C additions can't silently regress.
     posest::runtime::RuntimeConfig runtime_config;
-    runtime_config.calibrations.push_back({
-        .camera_id = "cam0",
-        .version = "v1",
-        .active = true,
-    });
+    runtime_config.fusion.chassis_sigmas = {0.07, 0.08, 0.09, 0.011, 0.012, 0.013};
+    runtime_config.fusion.huber_k = 1.7;
+    runtime_config.fusion.shock_threshold_mps2 = 47.5;
+    runtime_config.fusion.enable_imu_preintegration = true;
+    runtime_config.fusion.max_keyframe_dt_seconds = 0.025;
+    runtime_config.fusion.persisted_bias = {1, 2, 3, 4, 5, 6};
+    runtime_config.fusion.marginalize_keyframe_window = 750;
+    runtime_config.fusion.enable_vio = true;
+    runtime_config.fusion.vio_default_sigmas = {0.04, 0.05, 0.06, 0.015, 0.016, 0.017};
+
     const auto config = posest::fusion::buildFusionConfig(runtime_config);
-    EXPECT_GT(config.chassis_sigmas[0], 0.0);
-    EXPECT_GT(config.origin_prior_sigmas[0], 0.0);
+    EXPECT_DOUBLE_EQ(config.chassis_sigmas[0], 0.07);
+    EXPECT_DOUBLE_EQ(config.chassis_sigmas[5], 0.013);
+    EXPECT_DOUBLE_EQ(config.huber_k, 1.7);
+    EXPECT_DOUBLE_EQ(config.shock_threshold_mps2, 47.5);
+    EXPECT_TRUE(config.enable_imu_preintegration);
+    EXPECT_DOUBLE_EQ(config.max_keyframe_dt_seconds, 0.025);
+    EXPECT_DOUBLE_EQ(config.persisted_bias[0], 1.0);
+    EXPECT_EQ(config.marginalize_keyframe_window, 750u);
+    EXPECT_TRUE(config.enable_vio);
+    EXPECT_DOUBLE_EQ(config.vio_default_sigmas[0], 0.04);
 }
 
 // ---------- Per-type monotonicity ----------
@@ -456,4 +532,132 @@ TEST(FusionService, SkipsVioMeasurementWhenDisabledByConfig) {
     const auto stats = fusion.stats();
     EXPECT_EQ(stats.measurements_vio_processed, 0u);
     EXPECT_EQ(stats.measurements_vio_skipped_no_tracking, 0u);
+}
+
+// ---------- Phase C: IMU preintegration ----------
+
+namespace {
+
+posest::fusion::FusionConfig makeImuPreintegrationConfig() {
+    posest::fusion::FusionConfig cfg;
+    cfg.enable_imu_preintegration = true;
+    // Tighten the bias-calibration window so tests don't have to feed half
+    // a second of fake IMU; the bound is enforced by the validator at >=0.5
+    // for the SQLite-loaded path, but the in-process struct accepts any
+    // positive value.
+    cfg.bias_calibration_seconds = 0.05;  // 50 ms is plenty for tests
+    cfg.max_keyframe_dt_seconds = 0.020;
+    cfg.max_imu_gap_seconds = 0.100;
+    return cfg;
+}
+
+posest::ImuSample makeStationaryImu(posest::Timestamp t) {
+    posest::ImuSample s;
+    s.timestamp = t;
+    // |a| = 9.80665 m/s² along +Z; matches the default gravity_local_mps2.
+    s.accel_mps2 = {0.0, 0.0, 9.80665};
+    s.gyro_radps = {0.0, 0.0, 0.0};
+    return s;
+}
+
+}  // namespace
+
+TEST(FusionServiceImu, BiasCalibrationCompletesAndAdvancesToAwaitingFieldFix) {
+    posest::MeasurementBus bus(64);
+    posest::fusion::FusionService fusion(bus, makeImuPreintegrationConfig());
+    fusion.start();
+
+    // Bootstrap: chassis at zero (stationary) and a window of stationary IMU
+    // samples that exceeds bias_calibration_seconds. Then a final chassis
+    // sample after the calibration window so the published estimate
+    // reflects the post-calibration state (kAwaitingFieldFix).
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    for (int i = 0; i < 30; ++i) {
+        ASSERT_TRUE(bus.publish(makeStationaryImu(t0 + std::chrono::milliseconds(i * 5))));
+    }
+    // 200 ms post-bootstrap > bias_calibration_seconds (50 ms) — by now the
+    // calibration is done and the next chassis sample will report the new
+    // init state in its status_flags.
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 250ms, 0.0)));
+
+    std::this_thread::sleep_for(150ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_GE(stats.bias_calibrations_completed, 1u);
+    // No vision yet, so we should still be in the awaiting-field-fix state.
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusAwaitingFieldFix, 0u);
+}
+
+TEST(FusionServiceImu, FieldFixAdvancesToRunningAndPopulatesVelocity) {
+    posest::MeasurementBus bus(64);
+    posest::fusion::FusionService fusion(bus, makeImuPreintegrationConfig());
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    // Stationary IMU window completes calibration → kAwaitingFieldFix.
+    for (int i = 0; i < 30; ++i) {
+        ASSERT_TRUE(bus.publish(makeStationaryImu(t0 + std::chrono::milliseconds(i * 5))));
+    }
+    // First vision observation snaps origin and transitions kAwaitingFieldFix
+    // → kRunning. After this, makeEstimate() should populate velocity.
+    auto vision = makePriorObservation({{1.0, 0.5, 0.0}, {0.0, 0.0, 0.0}}, 0.05, 0.02);
+    vision.capture_time = t0 + 200ms;
+    ASSERT_TRUE(bus.publish(vision));
+
+    // Drive a couple of keyframes worth of chassis + IMU at t0+200ms onward
+    // so the running graph emits estimates with velocity.
+    for (int i = 1; i <= 5; ++i) {
+        ASSERT_TRUE(bus.publish(makeStationaryImu(t0 + 200ms + std::chrono::milliseconds(i * 5))));
+    }
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 250ms, 0.5)));
+
+    std::this_thread::sleep_for(150ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->status_flags & posest::fusion::kFusionStatusAwaitingFieldFix, 0u);
+    // Velocity should be populated once kRunning.
+    EXPECT_TRUE(latest->velocity.has_value());
+}
+
+TEST(FusionServiceImu, RejectsOutOfOrderImuSamples) {
+    posest::MeasurementBus bus(64);
+    posest::fusion::FusionService fusion(bus, makeImuPreintegrationConfig());
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    // Calibration window.
+    for (int i = 0; i < 30; ++i) {
+        ASSERT_TRUE(bus.publish(makeStationaryImu(t0 + std::chrono::milliseconds(i * 5))));
+    }
+    // Field fix.
+    auto vision = makePriorObservation({{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, 0.05, 0.02);
+    vision.capture_time = t0 + 200ms;
+    ASSERT_TRUE(bus.publish(vision));
+
+    // Drive forward past the field fix.
+    ASSERT_TRUE(bus.publish(makeStationaryImu(t0 + 250ms)));
+    // Now publish an IMU sample with a timestamp earlier than the previous
+    // accepted one — the per-type cursor in FusionService will reject it
+    // before it reaches the backend (out-of-order is enforced both by the
+    // service-level cursor and the backend's last_imu_time_).
+    posest::ImuSample stale;
+    stale.timestamp = t0 + 100ms;  // older than 250ms
+    stale.accel_mps2 = {0.0, 0.0, 9.80665};
+    ASSERT_TRUE(bus.publish(stale));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    // Either path counts the rejection — service-level stale_measurements
+    // OR backend-level imu_out_of_order. At least one must fire.
+    EXPECT_GE(stats.stale_measurements + stats.imu_out_of_order, 1u);
 }

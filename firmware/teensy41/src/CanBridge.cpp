@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "ByteCodec.h"
 #include "CanSchema.h"
@@ -25,21 +26,80 @@ constexpr std::size_t kChassisSpeedsFrameSize =
     can_schema::kRioChassisSpeedsPayloadBytes;
 constexpr std::size_t kTimeSyncFrameSize = can_schema::kRioTimeSyncPayloadBytes;
 
+// Encode three diagonal-only sigmas from the 6×6 host covariance. The covariance
+// is gtsam::Pose3 tangent ordering [rx, ry, rz, tx, ty, tz]; we extract:
+//   sigma_x = sqrt(cov(tx, tx)) at index 3*6 + 3
+//   sigma_y = sqrt(cov(ty, ty)) at index 4*6 + 4
+//   sigma_yaw = sqrt(cov(rz, rz)) at index 2*6 + 2
+// Each diagonal entry is variance, hence the sqrt. Negative or non-finite
+// entries map to NaN/sentinel so the RIO can detect them via the status word.
+float sigmaFromVariance(double variance) {
+    if (!(variance >= 0.0)) {  // catches NaN and negatives
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    return static_cast<float>(std::sqrt(variance));
+}
+
+std::uint16_t encodeSigmaYawMrad(double variance) {
+    if (!(variance >= 0.0)) {
+        return can_schema::kTeensyPoseSigmaYawMradNaN;
+    }
+    const double mrad = std::sqrt(variance) * 1000.0;
+    if (!(mrad < 65535.0)) {
+        return can_schema::kTeensyPoseSigmaYawMradNaN;
+    }
+    return static_cast<std::uint16_t>(std::lround(mrad));
+}
+
 void writeFusedPoseFrame(
     const FusedPosePayload& pose,
     std::uint64_t teensy_time_us,
     std::uint8_t* out) {
     std::memset(out, 0, can_schema::kTeensyPosePayloadBytes);
+
     std::size_t offset = can_schema::kTeensyPoseTeensyTimeOffset;
     appendU64(out, offset, teensy_time_us);
+
     offset = can_schema::kTeensyPoseXOffset;
-    appendDouble(out, offset, pose.field_to_robot.x_m);
+    appendDouble(out, offset, pose.x_m);
     offset = can_schema::kTeensyPoseYOffset;
-    appendDouble(out, offset, pose.field_to_robot.y_m);
-    offset = can_schema::kTeensyPoseThetaOffset;
-    appendDouble(out, offset, pose.field_to_robot.theta_rad);
+    appendDouble(out, offset, pose.y_m);
+
+    offset = can_schema::kTeensyPoseZOffset;
+    appendFloat(out, offset, static_cast<float>(pose.z_m));
+    offset = can_schema::kTeensyPoseRollOffset;
+    appendFloat(out, offset, static_cast<float>(pose.roll_rad));
+    offset = can_schema::kTeensyPosePitchOffset;
+    appendFloat(out, offset, static_cast<float>(pose.pitch_rad));
+    offset = can_schema::kTeensyPoseYawOffset;
+    appendFloat(out, offset, static_cast<float>(pose.yaw_rad));
+
+    const float vx = pose.has_velocity ? static_cast<float>(pose.vx_mps)
+                                       : std::numeric_limits<float>::quiet_NaN();
+    const float vy = pose.has_velocity ? static_cast<float>(pose.vy_mps)
+                                       : std::numeric_limits<float>::quiet_NaN();
+    const float vz = pose.has_velocity ? static_cast<float>(pose.vz_mps)
+                                       : std::numeric_limits<float>::quiet_NaN();
+    offset = can_schema::kTeensyPoseVxOffset;
+    appendFloat(out, offset, vx);
+    offset = can_schema::kTeensyPoseVyOffset;
+    appendFloat(out, offset, vy);
+    offset = can_schema::kTeensyPoseVzOffset;
+    appendFloat(out, offset, vz);
+
+    // Diagonals for x (tx), y (ty), yaw (rz) — see comment on sigmaFromVariance.
+    const double var_tx = pose.covariance[3 * 6 + 3];
+    const double var_ty = pose.covariance[4 * 6 + 4];
+    const double var_rz = pose.covariance[2 * 6 + 2];
+    offset = can_schema::kTeensyPoseSigmaXOffset;
+    appendFloat(out, offset, sigmaFromVariance(var_tx));
+    offset = can_schema::kTeensyPoseSigmaYOffset;
+    appendFloat(out, offset, sigmaFromVariance(var_ty));
+    offset = can_schema::kTeensyPoseSigmaYawMradOffset;
+    appendU16(out, offset, encodeSigmaYawMrad(var_rz));
+
     offset = can_schema::kTeensyPoseStatusOffset;
-    appendU32(out, offset, pose.status_flags);
+    appendU16(out, offset, static_cast<std::uint16_t>(pose.status_flags & 0xFFFFu));
 }
 
 }  // namespace

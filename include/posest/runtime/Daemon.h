@@ -106,6 +106,7 @@ struct DaemonHealth {
     std::uint64_t stale_measurements{0};
     bool has_latest_pose{false};
     teensy::TeensyStats teensy;
+    fusion::FusionStats fusion;
     std::vector<CameraLiveStats> cameras;
     std::vector<pipelines::AprilTagPipelineStats> apriltag_pipelines;
     std::string last_error;
