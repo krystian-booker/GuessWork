@@ -13,6 +13,8 @@ void CameraTriggerScheduler::begin() {
         pinMode(pin, OUTPUT);
         digitalWriteFast(pin, LOW);
     }
+    pinMode(kIrLedMosfetPin, OUTPUT);
+    digitalWriteFast(kIrLedMosfetPin, LOW);
     time64_low_prev_ = micros();
     time64_high_ = 0;
     active_instance_ = this;
@@ -184,6 +186,14 @@ void CameraTriggerScheduler::disableAll() {
         interval_timer_.end();
         timer_running_ = false;
     }
+    // The VIO companion config is independent of the camera-trigger config
+    // (set via a separate ConfigCommandKind) — keep it intact across a
+    // trigger re-apply, but physically de-energize the LED and drop any
+    // pending ToF deadline since the underlying VIO slot is being torn down.
+    led_fall_timer_.end();
+    digitalWriteFast(kIrLedMosfetPin, LOW);
+    led_fall_pending_ = false;
+    tof_start_pending_ = false;
     for (Channel& channel : channels_) {
         if (channel.enabled || channel.high) {
             digitalWriteFast(channel.pin, LOW);
@@ -204,7 +214,10 @@ void CameraTriggerScheduler::disableAll() {
 void CameraTriggerScheduler::tickIsr() {
     const std::uint32_t tick = ++master_tick_count_;
     const std::uint32_t event_us = micros();
-    for (Channel& channel : channels_) {
+    const std::size_t vio_index =
+        static_cast<std::size_t>(vio_companion_.vio_slot_index);
+    for (std::size_t i = 0; i < kMaxCameraSyncOutputs; ++i) {
+        Channel& channel = channels_[i];
         if (!channel.enabled) {
             continue;
         }
@@ -218,6 +231,19 @@ void CameraTriggerScheduler::tickIsr() {
             channel.next_fall_tick = tick + channel.pulse_ticks;
             ++channel.trigger_sequence;
             enqueueEventFromIsr(channel, event_us);
+            // VIO companion: drive IR LED gate HIGH and (optionally) schedule
+            // a ToF "start ranging" deadline at flash_end + offset. The LED
+            // fall is hardware-timed via a one-shot IntervalTimer because
+            // the master tick (GCD of all channel periods) is typically
+            // much coarser than the desired LED pulse width.
+            if (i == vio_index &&
+                (vio_companion_.led_enabled || vio_companion_.tof_enabled)) {
+                onVioRiseFromIsr(event_us);
+                // Capture the just-incremented sequence number for the ToF
+                // sample that this rise triggers (so the host can join the
+                // ToF result back to the originating frame by exact match).
+                tof_pending_trigger_sequence_ = channel.trigger_sequence;
+            }
             channel.next_rise_tick = tick + channel.period_ticks;
             while (dueTick(tick, channel.next_rise_tick)) {
                 status_flags_ |= kTriggerOverrun;
@@ -225,6 +251,94 @@ void CameraTriggerScheduler::tickIsr() {
             }
         }
     }
+}
+
+void CameraTriggerScheduler::onVioRiseFromIsr(std::uint32_t event_time_us) {
+    if (vio_companion_.led_enabled && vio_companion_.led_pulse_width_us > 0u) {
+        digitalWriteFast(kIrLedMosfetPin, HIGH);
+        led_fall_pending_ = true;
+        // Begin a one-shot IntervalTimer at the LED pulse width. ledFallIsr
+        // will end the timer (so a subsequent rise can re-arm it) and drive
+        // the gate LOW.
+        led_fall_timer_.begin(ledFallThunk, vio_companion_.led_pulse_width_us);
+    }
+    if (vio_companion_.tof_enabled && vio_companion_.tof_divisor > 0u) {
+        const std::uint32_t pulse_ix = vio_pulse_count_++;
+        if (pulse_ix % vio_companion_.tof_divisor == 0u) {
+            // Mark a deadline for the main loop. If a previous ToF sample is
+            // still in flight when the deadline lands, the main loop will
+            // flag kErrorTofRangingOverrun and skip this cycle.
+            tof_start_deadline_us_ = event_time_us + vio_companion_.tof_offset_after_flash_us;
+            tof_start_pending_ = true;
+        }
+    }
+}
+
+void CameraTriggerScheduler::ledFallThunk() {
+    if (active_instance_) {
+        active_instance_->ledFallIsr();
+    }
+}
+
+void CameraTriggerScheduler::ledFallIsr() {
+    // End the timer first so a fresh rise can re-arm it without racing this
+    // ISR's own re-entry.
+    led_fall_timer_.end();
+    digitalWriteFast(kIrLedMosfetPin, LOW);
+    led_fall_pending_ = false;
+}
+
+bool CameraTriggerScheduler::consumeToFStartDue(std::uint32_t now_us, std::uint32_t& out_seq) {
+    bool pending = false;
+    std::uint32_t deadline = 0;
+    std::uint32_t seq = 0;
+    noInterrupts();
+    pending = tof_start_pending_;
+    deadline = tof_start_deadline_us_;
+    seq = tof_pending_trigger_sequence_;
+    interrupts();
+    if (!pending) {
+        return false;
+    }
+    if (static_cast<std::int32_t>(now_us - deadline) < 0) {
+        return false;
+    }
+    noInterrupts();
+    tof_start_pending_ = false;
+    interrupts();
+    out_seq = seq;
+    return true;
+}
+
+std::uint32_t CameraTriggerScheduler::applyVioCompanion(const VioCompanionConfig& cfg) {
+    // Validate before we touch ISR-visible state. The validator on the host
+    // already enforces the multiplex invariant (offset >= led pulse width),
+    // but defense-in-depth: check it here too.
+    if (cfg.vio_slot_index >= kMaxCameraSyncOutputs) {
+        return kConfigAckInvalidVioConfig;
+    }
+    if (cfg.led_enabled && cfg.led_pulse_width_us == 0u) {
+        return kConfigAckInvalidVioConfig;
+    }
+    if (cfg.led_enabled && cfg.tof_enabled &&
+        cfg.tof_offset_after_flash_us < cfg.led_pulse_width_us) {
+        return kConfigAckVioMultiplexViolation;
+    }
+    if (cfg.tof_enabled && cfg.tof_divisor == 0u) {
+        return kConfigAckInvalidVioConfig;
+    }
+
+    // ISR-visible writes: flip state under the standard interrupt fence so
+    // the trigger ISR doesn't observe a torn config.
+    noInterrupts();
+    led_fall_timer_.end();
+    digitalWriteFast(kIrLedMosfetPin, LOW);
+    led_fall_pending_ = false;
+    tof_start_pending_ = false;
+    vio_pulse_count_ = 0;
+    vio_companion_ = cfg;
+    interrupts();
+    return 0u;
 }
 
 void CameraTriggerScheduler::tickThunk() {

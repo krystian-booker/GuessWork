@@ -67,7 +67,7 @@ TEST(TeensyProtocolGolden, PayloadEncodedSizes) {
                           posest::teensy::encodeImuPayload);
     expectEncodedSize<44>(posest::teensy::ChassisSpeedsPayload{},
                           posest::teensy::encodeChassisSpeedsPayload);
-    expectEncodedSize<44>(posest::teensy::TeensyHealthPayload{},
+    expectEncodedSize<60>(posest::teensy::TeensyHealthPayload{},
                           posest::teensy::encodeTeensyHealthPayload);
     expectEncodedSize<20>(posest::teensy::CameraTriggerEventPayload{},
                           posest::teensy::encodeCameraTriggerEventPayload);
@@ -77,6 +77,10 @@ TEST(TeensyProtocolGolden, PayloadEncodedSizes) {
                           posest::teensy::encodeTimeSyncResponsePayload);
     expectEncodedSize<28>(posest::teensy::ImuConfigPayload{},
                           posest::teensy::encodeImuConfigPayload);
+    expectEncodedSize<36>(posest::teensy::ToFSamplePayload{},
+                          posest::teensy::encodeToFSamplePayload);
+    expectEncodedSize<36>(posest::teensy::VioCompanionConfigPayload{},
+                          posest::teensy::encodeVioCompanionConfigPayload);
 }
 
 TEST(TeensyProtocolGolden, ImuPayloadEncodedBytesAreStable) {

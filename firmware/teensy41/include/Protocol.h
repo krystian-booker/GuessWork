@@ -19,6 +19,14 @@ constexpr std::uint32_t kStatusRobotSlipping = 1u << 2u;
 // host's kHealthRio* constants.
 constexpr std::uint32_t kHealthRioUnsynchronized = 1u << 0u;
 constexpr std::uint32_t kHealthRioPingRejected = 1u << 1u;
+
+// Bits set on ToFSamplePayload::firmware_status_flags. Bits 0–7 share
+// semantics with the per-sample kStatus* word so consumers can apply the
+// same time-sync gating; bits 8+ are ToF-specific observability. The
+// host clamp bit (1<<16) is host-only — firmware never sets it.
+constexpr std::uint32_t kToFStatusRangingOverrun = 1u << 8u;
+constexpr std::uint32_t kToFStatusI2cFailure = 1u << 9u;
+constexpr std::uint32_t kToFStatusInvalidRangeStatus = 1u << 10u;
 constexpr std::size_t kHeaderSize = 10;
 constexpr std::size_t kCrcSize = 4;
 constexpr std::size_t kMaxPayloadSize = 4096;
@@ -29,6 +37,7 @@ enum class MessageType : std::uint8_t {
     CanRx = 3,
     TeensyHealth = 4,
     TimeSyncResponse = 5,
+    ToFSample = 6,
     CameraTriggerEvent = 7,
     ConfigAck = 8,
     ChassisSpeeds = 9,
@@ -41,6 +50,7 @@ enum class MessageType : std::uint8_t {
 enum class ConfigCommandKind : std::uint32_t {
     CameraTriggers = 1,
     ImuConfig = 2,
+    VioCompanion = 3,
 };
 
 constexpr std::uint32_t kConfigAckUnsupportedCount = 1u << 0u;
@@ -51,6 +61,9 @@ constexpr std::uint32_t kConfigAckPulseTooWide = 1u << 4u;
 constexpr std::uint32_t kConfigAckInvalidImuConfig = 1u << 5u;
 constexpr std::uint32_t kConfigAckImuSelfTestFailure = 1u << 6u;
 constexpr std::uint32_t kConfigAckUnknownKind = 1u << 7u;
+constexpr std::uint32_t kConfigAckInvalidVioConfig = 1u << 8u;
+constexpr std::uint32_t kConfigAckVioMultiplexViolation = 1u << 9u;
+constexpr std::uint32_t kConfigAckVioInitFailure = 1u << 10u;
 
 struct Frame {
     MessageType type{MessageType::TeensyHealth};
@@ -105,6 +118,10 @@ struct TeensyHealthPayload {
     std::uint32_t rio_status_flags{0};
     std::uint32_t accel_saturations{0};
     std::uint32_t gyro_saturations{0};
+    std::uint32_t tof_samples_emitted{0};
+    std::uint32_t tof_overruns{0};
+    std::uint32_t tof_i2c_failures{0};
+    std::uint32_t tof_status_flags{0};
 };
 
 struct CameraTriggerEventPayload {
@@ -112,6 +129,18 @@ struct CameraTriggerEventPayload {
     std::int32_t pin{-1};
     std::uint32_t trigger_sequence{0};
     std::uint32_t status_flags{0};
+};
+
+// VL53L4CD ranging result. Mirrors include/posest/teensy/Protocol.h.
+struct ToFSamplePayload {
+    std::uint64_t teensy_time_us{0};
+    std::uint32_t trigger_sequence{0};
+    std::uint32_t distance_mm{0};
+    std::uint32_t ranging_duration_us{0};
+    std::uint32_t firmware_status_flags{0};
+    std::uint32_t signal_rate_kcps{0};
+    std::uint32_t ambient_rate_kcps{0};
+    std::uint32_t range_status{0};
 };
 
 struct TimeSyncRequestPayload {
@@ -152,6 +181,33 @@ struct ImuConfigAckEntry {
     std::uint32_t gyro_bandwidth_code{0};
     std::uint32_t data_sync_rate_hz{0};
     std::uint32_t reserved{0};
+};
+
+struct VioConfigAckEntry {
+    std::uint32_t vio_slot_index{0};
+    std::uint32_t led_enabled{0};
+    std::uint32_t led_pulse_width_us{0};
+    std::uint32_t tof_enabled{0};
+    std::uint32_t tof_i2c_address{0};
+    std::uint32_t tof_timing_budget_ms{0};
+    std::uint32_t tof_intermeasurement_period_ms{0};
+    std::uint32_t tof_offset_after_flash_us{0};
+    std::uint32_t tof_divisor{0};
+};
+
+// Decoded VioCompanion command. valid=true after a successful decode; the
+// remaining fields are the literal wire values.
+struct VioCompanionCommand {
+    bool valid{false};
+    std::uint32_t vio_slot_index{0};
+    std::uint32_t led_enabled{0};
+    std::uint32_t led_pulse_width_us{400};
+    std::uint32_t tof_enabled{0};
+    std::uint32_t tof_i2c_address{0x29};
+    std::uint32_t tof_timing_budget_ms{10};
+    std::uint32_t tof_intermeasurement_period_ms{20};
+    std::uint32_t tof_offset_after_flash_us{500};
+    std::uint32_t tof_divisor{1};
 };
 
 struct ConfigAckHeader {
@@ -195,6 +251,8 @@ bool encodeCameraTriggerEventPayload(
     std::uint16_t& out_size);
 bool encodeTimeSyncResponsePayload(const TimeSyncResponsePayload& payload, std::uint8_t* out,
                                    std::size_t capacity, std::uint16_t& out_size);
+bool encodeToFSamplePayload(const ToFSamplePayload& payload, std::uint8_t* out,
+                            std::size_t capacity, std::uint16_t& out_size);
 
 bool decodeTimeSyncRequestPayload(const Frame& frame, TimeSyncRequestPayload& payload);
 bool decodeFusedPosePayload(const Frame& frame, FusedPosePayload& payload);
@@ -204,12 +262,14 @@ bool decodeCameraTriggerConfigPayload(
     std::size_t command_capacity,
     std::size_t& command_count);
 bool decodeImuConfigPayload(const Frame& frame, ImuConfigCommand& command);
+bool decodeVioCompanionConfigPayload(const Frame& frame, VioCompanionCommand& command);
 
 bool encodeConfigAckPayload(
     const ConfigAckHeader& header,
     const TriggerAckEntry* trigger_entries,
     std::size_t trigger_entry_count,
     const ImuConfigAckEntry* imu_entry,
+    const VioConfigAckEntry* vio_entry,
     std::uint8_t* out,
     std::size_t capacity,
     std::uint16_t& out_size);

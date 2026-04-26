@@ -94,6 +94,23 @@ struct CameraTriggerEvent {
     std::uint32_t status_flags{0};
 };
 
+// VL53L4CD ranging result, time-aligned to the camera trigger that drove the
+// IR LED flash that immediately preceded this ranging. distance_m has the
+// host-side mounting offset applied; raw_distance_m is the unaltered chip
+// reading converted from mm.
+struct ToFSample {
+    Timestamp timestamp{};
+    std::uint64_t teensy_time_us{0};
+    std::uint32_t trigger_sequence{0};
+    double raw_distance_m{0.0};
+    double distance_m{0.0};
+    double signal_rate_kcps{0.0};
+    double ambient_rate_kcps{0.0};
+    std::uint32_t ranging_duration_us{0};
+    std::uint32_t range_status{0};
+    std::uint32_t status_flags{0};
+};
+
 struct FusedPoseEstimate {
     Timestamp timestamp{};
     Pose2d field_to_robot;

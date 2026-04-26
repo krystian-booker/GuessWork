@@ -39,10 +39,6 @@ public:
         std::uint64_t now_us,
         ImuConfigAckEntry& effective);
     bool poll(ImuPayload& payload);
-    // Legacy entry point retained for ABI compatibility with older callers.
-    bool poll(std::uint64_t /*reference_time_us*/, ImuPayload& payload) {
-        return poll(payload);
-    }
     void checkForMissedDataReady(std::uint64_t now_us);
     void onDataReadyIsr(std::uint32_t timestamp_us);
 

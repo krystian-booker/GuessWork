@@ -321,10 +321,42 @@ COMMIT;
 )sql";
 }
 
+const char* migration8Sql() {
+    // Single-row VIO workflow config table. ON DELETE SET NULL on the camera
+    // FK so deleting the bound camera doesn't cascade-erase the row; the
+    // validator catches the resulting null vio_camera_id when enabled=1.
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS vio_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    vio_camera_id TEXT REFERENCES cameras(id) ON DELETE SET NULL,
+    vio_slot_index INTEGER NOT NULL DEFAULT 0,
+    ir_led_enabled INTEGER NOT NULL DEFAULT 1,
+    ir_led_pulse_width_us INTEGER NOT NULL DEFAULT 400,
+    tof_enabled INTEGER NOT NULL DEFAULT 1,
+    tof_i2c_address INTEGER NOT NULL DEFAULT 41,
+    tof_timing_budget_ms INTEGER NOT NULL DEFAULT 10,
+    tof_intermeasurement_period_ms INTEGER NOT NULL DEFAULT 20,
+    tof_offset_after_flash_us INTEGER NOT NULL DEFAULT 500,
+    tof_divisor INTEGER NOT NULL DEFAULT 1,
+    tof_mounting_offset_mm INTEGER NOT NULL DEFAULT 0,
+    tof_expected_min_mm INTEGER NOT NULL DEFAULT 50,
+    tof_expected_max_mm INTEGER NOT NULL DEFAULT 4000
+);
+
+INSERT OR IGNORE INTO vio_config (id) VALUES (1);
+
+PRAGMA user_version = 8;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 7;
+    return 8;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -363,6 +395,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 6) {
         exec(db, migration7Sql());
+        migrated_version = 7;
+    }
+    if (migrated_version == 7) {
+        exec(db, migration8Sql());
     }
 }
 

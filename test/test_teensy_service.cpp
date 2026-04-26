@@ -13,6 +13,7 @@
 
 #include "posest/CameraTriggerCache.h"
 #include "posest/MeasurementBus.h"
+#include "posest/ToFSampleCache.h"
 #include "posest/teensy/FakeSerialTransport.h"
 #include "posest/teensy/TeensyService.h"
 
@@ -682,4 +683,163 @@ TEST(TeensyService, CameraTriggerEventIsRecordedInCacheAfterTimeSync) {
     EXPECT_EQ(stamp->teensy_time_us, response.teensy_transmit_time_us);
 
     service.stop();
+}
+
+namespace {
+
+posest::runtime::VioConfig fastVioConfig(const std::string& camera_id = "vio_cam") {
+    posest::runtime::VioConfig vio;
+    vio.enabled = true;
+    vio.vio_camera_id = camera_id;
+    vio.vio_slot_index = 0;
+    vio.ir_led_pulse_width_us = 400;
+    vio.tof_offset_after_flash_us = 500;
+    vio.tof_timing_budget_ms = 10;
+    vio.tof_intermeasurement_period_ms = 20;
+    vio.tof_divisor = 1;
+    // 3" mounting offset → 0.0762 m. Picked to match the example from the
+    // user's spec ("recessed 1\" but report 4\" from ground" delta).
+    vio.tof_mounting_offset_m = 0.0762;
+    vio.tof_expected_min_m = 0.05;
+    vio.tof_expected_max_m = 4.0;
+    return vio;
+}
+
+}  // namespace
+
+TEST(TeensyService, SendsVioCompanionConfigOnConnect) {
+    posest::MeasurementBus bus(4);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    auto vio = fastVioConfig();
+
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); },
+        nullptr,
+        vio);
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+    // Three startup writes: camera triggers, IMU config, VIO companion.
+    ASSERT_TRUE(fake.waitForWriteCount(3, 500ms));
+    service.stop();
+
+    // Look for the VIO config frame by walking writes and inspecting the
+    // ConfigCommand kind discriminator.
+    bool found = false;
+    for (const auto& bytes : fake.writes()) {
+        auto decoded = posest::teensy::decodeFrame(bytes);
+        if (!decoded || decoded->frame.type != posest::teensy::MessageType::ConfigCommand) {
+            continue;
+        }
+        if (decoded->frame.payload.size() < 4) continue;
+        const std::uint32_t kind =
+            static_cast<std::uint32_t>(decoded->frame.payload[0]) |
+            (static_cast<std::uint32_t>(decoded->frame.payload[1]) << 8u) |
+            (static_cast<std::uint32_t>(decoded->frame.payload[2]) << 16u) |
+            (static_cast<std::uint32_t>(decoded->frame.payload[3]) << 24u);
+        if (kind != static_cast<std::uint32_t>(posest::teensy::ConfigCommandKind::VioCompanion)) {
+            continue;
+        }
+        std::vector<std::uint8_t> body(
+            decoded->frame.payload.begin() + 4, decoded->frame.payload.end());
+        auto vio_payload = posest::teensy::decodeVioCompanionConfigPayload(body);
+        ASSERT_TRUE(vio_payload.has_value());
+        EXPECT_EQ(vio_payload->led_pulse_width_us, 400u);
+        EXPECT_EQ(vio_payload->tof_offset_after_flash_us, 500u);
+        found = true;
+        break;
+    }
+    EXPECT_TRUE(found) << "expected VioCompanion ConfigCommand frame";
+}
+
+TEST(TeensyService, AppliesMountingOffsetAndPublishesToFSample) {
+    posest::MeasurementBus bus(4);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    auto cache = std::make_shared<posest::ToFSampleCache>("vio_cam");
+
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); },
+        nullptr,
+        fastVioConfig(),
+        cache);
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+
+    posest::teensy::ToFSamplePayload payload;
+    payload.teensy_time_us = 1000;
+    payload.trigger_sequence = 17;
+    payload.distance_mm = 50;  // 0.050 m raw
+    payload.range_status = 0;
+    payload.firmware_status_flags = 0;
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::ToFSample,
+        100,
+        posest::teensy::encodeToFSamplePayload(payload));
+
+    auto measurement = bus.take();
+    service.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    ASSERT_TRUE(std::holds_alternative<posest::ToFSample>(*measurement));
+    const auto& sample = std::get<posest::ToFSample>(*measurement);
+    EXPECT_EQ(sample.trigger_sequence, 17u);
+    EXPECT_NEAR(sample.raw_distance_m, 0.050, 1e-9);
+    // 0.050 m + 0.0762 m mounting offset = 0.1262 m. distance_m carries the
+    // host-applied correction; raw_distance_m is preserved untouched.
+    EXPECT_NEAR(sample.distance_m, 0.1262, 1e-9);
+
+    // Same sample must also have been recorded into the cache so the
+    // ProducerBase ToF join can find it by sequence.
+    const auto cached = cache->lookupBySequence("vio_cam", 17);
+    ASSERT_TRUE(cached.has_value());
+    EXPECT_NEAR(cached->distance_m, 0.1262, 1e-9);
+}
+
+TEST(TeensyService, ClampsToFSampleBelowExpectedMin) {
+    posest::MeasurementBus bus(4);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    auto vio = fastVioConfig();
+    vio.tof_mounting_offset_m = 0.0;
+    vio.tof_expected_min_m = 0.10;  // clamp anything below 100 mm
+
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); },
+        nullptr,
+        vio);
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+
+    posest::teensy::ToFSamplePayload payload;
+    payload.teensy_time_us = 1000;
+    payload.trigger_sequence = 5;
+    payload.distance_mm = 30;  // 0.030 m → below clamp
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::ToFSample,
+        200,
+        posest::teensy::encodeToFSamplePayload(payload));
+
+    auto measurement = bus.take();
+    service.stop();
+
+    ASSERT_TRUE(measurement.has_value());
+    const auto& sample = std::get<posest::ToFSample>(*measurement);
+    EXPECT_DOUBLE_EQ(sample.distance_m, 0.10);
+    EXPECT_NE(sample.status_flags & posest::teensy::kToFStatusClampedHostSide, 0u);
+    EXPECT_GE(service.stats().inbound_tof_clamped, 1u);
 }

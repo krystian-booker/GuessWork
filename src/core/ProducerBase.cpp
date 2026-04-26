@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "posest/CameraTriggerCache.h"
+#include "posest/ToFSampleCache.h"
 
 namespace posest {
 
@@ -36,6 +37,10 @@ void ProducerBase::addConsumer(std::shared_ptr<IFrameConsumer> consumer) {
 
 void ProducerBase::setTriggerCache(std::shared_ptr<const CameraTriggerCache> cache) {
     std::atomic_store_explicit(&trigger_cache_, std::move(cache), std::memory_order_release);
+}
+
+void ProducerBase::setToFSampleCache(std::shared_ptr<const ToFSampleCache> cache) {
+    std::atomic_store_explicit(&tof_cache_, std::move(cache), std::memory_order_release);
 }
 
 bool ProducerBase::removeConsumer(const std::shared_ptr<IFrameConsumer>& consumer) {
@@ -137,6 +142,20 @@ void ProducerBase::runLoop() {
                 // downstream measurements align against true exposure time
                 // rather than userspace receive time.
                 frame->capture_time = stamp->host_time;
+            }
+        }
+
+        // Join in a ToF sample by exact trigger_sequence, but only if the
+        // trigger pairing above succeeded — otherwise we have no sequence to
+        // look up against. Misses are silent (e.g. ranging overran the frame
+        // window, or this camera isn't the VIO camera).
+        if (frame->trigger_sequence) {
+            if (auto tof = std::atomic_load_explicit(
+                    &tof_cache_, std::memory_order_acquire)) {
+                if (auto sample = tof->lookupBySequence(id_, *frame->trigger_sequence)) {
+                    frame->ground_distance_m = sample->distance_m;
+                    frame->tof_trigger_sequence = sample->trigger_sequence;
+                }
             }
         }
 

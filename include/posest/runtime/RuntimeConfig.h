@@ -114,6 +114,31 @@ struct CameraTriggerConfig {
     std::int64_t phase_offset_us{0};
 };
 
+// Single-camera VIO workflow configuration. Bundles IR LED illumination
+// control and VL53L4CD ToF settings; the firmware enforces temporal
+// multiplexing (no LED-on / ToF-ranging overlap) via the validator constraint
+// tof_offset_after_flash_us >= ir_led_pulse_width_us. The IR LED MOSFET gate
+// pin is a firmware constant — not host-configurable.
+struct VioConfig {
+    bool enabled{false};
+    std::string vio_camera_id;
+    std::int32_t vio_slot_index{0};
+    bool ir_led_enabled{true};
+    std::uint32_t ir_led_pulse_width_us{400};
+    bool tof_enabled{true};
+    std::uint32_t tof_i2c_address{0x29};
+    std::uint32_t tof_timing_budget_ms{10};
+    std::uint32_t tof_intermeasurement_period_ms{20};
+    std::uint32_t tof_offset_after_flash_us{500};
+    std::uint32_t tof_divisor{1};
+    // Host-side mounting offset added to the raw ToF distance before any
+    // consumer sees it. Stored on the wire as integer mm but materialized
+    // here in meters to match the rest of the SI-domain measurement types.
+    double tof_mounting_offset_m{0.0};
+    double tof_expected_min_m{0.05};
+    double tof_expected_max_m{4.0};
+};
+
 struct RuntimeConfig {
     std::vector<CameraConfig> cameras;
     std::vector<PipelineConfig> pipelines;
@@ -127,6 +152,7 @@ struct RuntimeConfig {
     std::string active_field_layout_id;
     std::vector<CameraTriggerConfig> camera_triggers;
     TeensyConfig teensy;
+    VioConfig vio;
 };
 
 }  // namespace posest::runtime

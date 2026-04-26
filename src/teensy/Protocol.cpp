@@ -209,7 +209,7 @@ std::optional<ChassisSpeedsPayload> decodeChassisSpeedsPayload(
 
 std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload) {
     std::vector<std::uint8_t> out;
-    out.reserve(44);
+    out.reserve(60);
     appendU64(out, payload.uptime_us);
     appendU32(out, payload.error_flags);
     appendU32(out, payload.trigger_status_flags);
@@ -219,15 +219,16 @@ std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& p
     appendU32(out, payload.rio_status_flags);
     appendU32(out, payload.accel_saturations);
     appendU32(out, payload.gyro_saturations);
+    appendU32(out, payload.tof_samples_emitted);
+    appendU32(out, payload.tof_overruns);
+    appendU32(out, payload.tof_i2c_failures);
+    appendU32(out, payload.tof_status_flags);
     return out;
 }
 
 std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     const std::vector<std::uint8_t>& bytes) {
-    // Accept both the legacy 24-byte payload (rio fields default to 0) and the
-    // current 44-byte form so older firmware can still report basic health
-    // while the host has been updated.
-    if (bytes.size() != 24u && bytes.size() != 44u) {
+    if (bytes.size() != 60u) {
         return std::nullopt;
     }
     TeensyHealthPayload payload;
@@ -236,12 +237,14 @@ std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     payload.trigger_status_flags = readU32(bytes, 12);
     payload.rx_queue_depth = readU32(bytes, 16);
     payload.tx_queue_depth = readU32(bytes, 20);
-    if (bytes.size() == 44u) {
-        payload.rio_offset_us = static_cast<std::int64_t>(readU64(bytes, 24));
-        payload.rio_status_flags = readU32(bytes, 32);
-        payload.accel_saturations = readU32(bytes, 36);
-        payload.gyro_saturations = readU32(bytes, 40);
-    }
+    payload.rio_offset_us = static_cast<std::int64_t>(readU64(bytes, 24));
+    payload.rio_status_flags = readU32(bytes, 32);
+    payload.accel_saturations = readU32(bytes, 36);
+    payload.gyro_saturations = readU32(bytes, 40);
+    payload.tof_samples_emitted = readU32(bytes, 44);
+    payload.tof_overruns = readU32(bytes, 48);
+    payload.tof_i2c_failures = readU32(bytes, 52);
+    payload.tof_status_flags = readU32(bytes, 56);
     return payload;
 }
 
@@ -266,6 +269,76 @@ std::optional<CameraTriggerEventPayload> decodeCameraTriggerEventPayload(
     payload.pin = static_cast<std::int32_t>(readU32(bytes, 8));
     payload.trigger_sequence = readU32(bytes, 12);
     payload.status_flags = readU32(bytes, 16);
+    return payload;
+}
+
+namespace {
+constexpr std::size_t kToFSamplePayloadSize = 36;
+constexpr std::size_t kVioCompanionConfigBodySize = 36;
+}  // namespace
+
+std::vector<std::uint8_t> encodeToFSamplePayload(const ToFSamplePayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(kToFSamplePayloadSize);
+    appendU64(out, payload.teensy_time_us);
+    appendU32(out, payload.trigger_sequence);
+    appendU32(out, payload.distance_mm);
+    appendU32(out, payload.ranging_duration_us);
+    appendU32(out, payload.firmware_status_flags);
+    appendU32(out, payload.signal_rate_kcps);
+    appendU32(out, payload.ambient_rate_kcps);
+    appendU32(out, payload.range_status);
+    return out;
+}
+
+std::optional<ToFSamplePayload> decodeToFSamplePayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != kToFSamplePayloadSize) {
+        return std::nullopt;
+    }
+    ToFSamplePayload payload;
+    payload.teensy_time_us = readU64(bytes, 0);
+    payload.trigger_sequence = readU32(bytes, 8);
+    payload.distance_mm = readU32(bytes, 12);
+    payload.ranging_duration_us = readU32(bytes, 16);
+    payload.firmware_status_flags = readU32(bytes, 20);
+    payload.signal_rate_kcps = readU32(bytes, 24);
+    payload.ambient_rate_kcps = readU32(bytes, 28);
+    payload.range_status = readU32(bytes, 32);
+    return payload;
+}
+
+std::vector<std::uint8_t> encodeVioCompanionConfigPayload(
+    const VioCompanionConfigPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(kVioCompanionConfigBodySize);
+    appendU32(out, payload.vio_slot_index);
+    appendU32(out, payload.led_enabled);
+    appendU32(out, payload.led_pulse_width_us);
+    appendU32(out, payload.tof_enabled);
+    appendU32(out, payload.tof_i2c_address);
+    appendU32(out, payload.tof_timing_budget_ms);
+    appendU32(out, payload.tof_intermeasurement_period_ms);
+    appendU32(out, payload.tof_offset_after_flash_us);
+    appendU32(out, payload.tof_divisor);
+    return out;
+}
+
+std::optional<VioCompanionConfigPayload> decodeVioCompanionConfigPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != kVioCompanionConfigBodySize) {
+        return std::nullopt;
+    }
+    VioCompanionConfigPayload payload;
+    payload.vio_slot_index = readU32(bytes, 0);
+    payload.led_enabled = readU32(bytes, 4);
+    payload.led_pulse_width_us = readU32(bytes, 8);
+    payload.tof_enabled = readU32(bytes, 12);
+    payload.tof_i2c_address = readU32(bytes, 16);
+    payload.tof_timing_budget_ms = readU32(bytes, 20);
+    payload.tof_intermeasurement_period_ms = readU32(bytes, 24);
+    payload.tof_offset_after_flash_us = readU32(bytes, 28);
+    payload.tof_divisor = readU32(bytes, 32);
     return payload;
 }
 
@@ -310,13 +383,15 @@ constexpr std::size_t kConfigAckHeaderSize = 12;
 constexpr std::size_t kTriggerAckEntrySize = 12;
 constexpr std::size_t kImuConfigAckBodySize = 28;
 constexpr std::size_t kImuConfigPayloadSize = 28;
+constexpr std::size_t kVioConfigAckBodySize = 36;
 
 }  // namespace
 
 std::vector<std::uint8_t> encodeConfigAckPayload(const ConfigAckPayload& payload) {
     std::vector<std::uint8_t> out;
     out.reserve(kConfigAckHeaderSize + payload.trigger_entries.size() * kTriggerAckEntrySize +
-                (payload.imu_entry ? kImuConfigAckBodySize : 0u));
+                (payload.imu_entry ? kImuConfigAckBodySize : 0u) +
+                (payload.vio_entry ? kVioConfigAckBodySize : 0u));
     appendU32(out, payload.kind);
     appendU32(out, payload.status_flags);
     appendU32(out, payload.effective_count);
@@ -337,6 +412,18 @@ std::vector<std::uint8_t> encodeConfigAckPayload(const ConfigAckPayload& payload
         appendU32(out, entry.gyro_bandwidth_code);
         appendU32(out, entry.data_sync_rate_hz);
         appendU32(out, entry.reserved);
+    } else if (payload.kind == static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion) &&
+               payload.vio_entry) {
+        const auto& entry = *payload.vio_entry;
+        appendU32(out, entry.vio_slot_index);
+        appendU32(out, entry.led_enabled);
+        appendU32(out, entry.led_pulse_width_us);
+        appendU32(out, entry.tof_enabled);
+        appendU32(out, entry.tof_i2c_address);
+        appendU32(out, entry.tof_timing_budget_ms);
+        appendU32(out, entry.tof_intermeasurement_period_ms);
+        appendU32(out, entry.tof_offset_after_flash_us);
+        appendU32(out, entry.tof_divisor);
     }
     return out;
 }
@@ -393,6 +480,35 @@ std::optional<ConfigAckPayload> decodeConfigAckPayload(
         offset += 4;
         entry.reserved = readU32(bytes, offset);
         payload.imu_entry = entry;
+        return payload;
+    }
+
+    if (payload.kind == static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion)) {
+        // VIO ack always carries an entry — the firmware echoes whatever it
+        // accepted (or zeros + the relevant kConfigAck* failure bit).
+        if (bytes.size() != kConfigAckHeaderSize + kVioConfigAckBodySize) {
+            return std::nullopt;
+        }
+        VioConfigAckEntry entry;
+        std::size_t offset = kConfigAckHeaderSize;
+        entry.vio_slot_index = readU32(bytes, offset);
+        offset += 4;
+        entry.led_enabled = readU32(bytes, offset);
+        offset += 4;
+        entry.led_pulse_width_us = readU32(bytes, offset);
+        offset += 4;
+        entry.tof_enabled = readU32(bytes, offset);
+        offset += 4;
+        entry.tof_i2c_address = readU32(bytes, offset);
+        offset += 4;
+        entry.tof_timing_budget_ms = readU32(bytes, offset);
+        offset += 4;
+        entry.tof_intermeasurement_period_ms = readU32(bytes, offset);
+        offset += 4;
+        entry.tof_offset_after_flash_us = readU32(bytes, offset);
+        offset += 4;
+        entry.tof_divisor = readU32(bytes, offset);
+        payload.vio_entry = entry;
         return payload;
     }
 

@@ -34,6 +34,7 @@ add_library(posest_core
     src/core/ConsumerBase.cpp
     src/core/MeasurementBus.cpp
     src/core/CameraTriggerCache.cpp
+    src/core/ToFSampleCache.cpp
 )
 target_include_directories(posest_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -154,6 +155,7 @@ add_executable(posest_tests
     test/test_latest_frame_slot.cpp
     test/test_producer_base.cpp
     test/test_camera_trigger_cache.cpp
+    test/test_tof_sample_cache.cpp
     test/test_mock_pipeline.cpp
     test/test_measurement_bus.cpp
     test/test_runtime_graph.cpp

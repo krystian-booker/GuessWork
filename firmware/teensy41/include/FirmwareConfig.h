@@ -22,6 +22,18 @@ constexpr std::uint8_t kBmi088ProtocolSelectPin = 14;
 constexpr std::uint8_t kBmi088Int1Pin = 15;
 constexpr std::uint8_t kBmi088Int2Pin = 16;
 
+// IR LED MOSFET (IRLZ44N) gate driving the VIO-camera flash. Slaved to the
+// VIO-slot trigger pulse rise inside CameraTriggerScheduler::tickIsr; the
+// fall edge is hardware-timed via a dedicated IntervalTimer one-shot so the
+// LED-on window is independent of the master tick (which is the GCD of all
+// trigger periods and would otherwise stretch the pulse).
+constexpr std::uint8_t kIrLedMosfetPin = 11;
+
+// VL53L4CD ToF sensor on default I2C0 (Wire). Documentation only — the Wire
+// library uses these pins implicitly on Teensy 4.1.
+constexpr std::uint8_t kVl53l4cdSdaPin = 18;
+constexpr std::uint8_t kVl53l4cdSclPin = 19;
+
 constexpr std::uint32_t kErrorCrcFailure = 1u << 0u;
 constexpr std::uint32_t kErrorUnsupportedCommand = 1u << 1u;
 constexpr std::uint32_t kErrorInvalidPayload = 1u << 2u;
@@ -33,6 +45,9 @@ constexpr std::uint32_t kErrorImuSampleOverrun = 1u << 7u;
 constexpr std::uint32_t kErrorImuAccelSaturated = 1u << 8u;
 constexpr std::uint32_t kErrorImuGyroSaturated = 1u << 9u;
 constexpr std::uint32_t kErrorImuSelfTestFailure = 1u << 10u;
+constexpr std::uint32_t kErrorTofInitFailed = 1u << 11u;
+constexpr std::uint32_t kErrorTofI2cFailure = 1u << 12u;
+constexpr std::uint32_t kErrorTofRangingOverrun = 1u << 13u;
 
 constexpr std::uint32_t kTriggerUnsupportedCount = 1u << 0u;
 constexpr std::uint32_t kTriggerInvalidPin = 1u << 1u;

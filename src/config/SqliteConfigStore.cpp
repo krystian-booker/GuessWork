@@ -1,5 +1,6 @@
 #include "posest/config/SqliteConfigStore.h"
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -69,6 +70,12 @@ public:
     void bindDouble(int index, double value) {
         if (sqlite3_bind_double(stmt_, index, value) != SQLITE_OK) {
             throw std::runtime_error("SQLite double bind failed: " + sqliteError(db_));
+        }
+    }
+
+    void bindNull(int index) {
+        if (sqlite3_bind_null(stmt_, index) != SQLITE_OK) {
+            throw std::runtime_error("SQLite null bind failed: " + sqliteError(db_));
         }
     }
 
@@ -546,6 +553,45 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
         }
     }
 
+    {
+        Statement stmt(
+            db_,
+            "SELECT enabled, vio_camera_id, vio_slot_index, ir_led_enabled, "
+            "ir_led_pulse_width_us, tof_enabled, tof_i2c_address, "
+            "tof_timing_budget_ms, tof_intermeasurement_period_ms, "
+            "tof_offset_after_flash_us, tof_divisor, tof_mounting_offset_mm, "
+            "tof_expected_min_mm, tof_expected_max_mm "
+            "FROM vio_config WHERE id = 1");
+        if (stmt.stepRow()) {
+            config.vio.enabled = stmt.columnInt64(0) != 0;
+            config.vio.vio_camera_id = stmt.columnText(1);
+            config.vio.vio_slot_index =
+                static_cast<std::int32_t>(stmt.columnInt64(2));
+            config.vio.ir_led_enabled = stmt.columnInt64(3) != 0;
+            config.vio.ir_led_pulse_width_us =
+                checkedUint32(stmt.columnInt64(4), "ir_led_pulse_width_us");
+            config.vio.tof_enabled = stmt.columnInt64(5) != 0;
+            config.vio.tof_i2c_address =
+                checkedUint32(stmt.columnInt64(6), "tof_i2c_address");
+            config.vio.tof_timing_budget_ms =
+                checkedUint32(stmt.columnInt64(7), "tof_timing_budget_ms");
+            config.vio.tof_intermeasurement_period_ms =
+                checkedUint32(stmt.columnInt64(8), "tof_intermeasurement_period_ms");
+            config.vio.tof_offset_after_flash_us =
+                checkedUint32(stmt.columnInt64(9), "tof_offset_after_flash_us");
+            config.vio.tof_divisor =
+                checkedUint32(stmt.columnInt64(10), "tof_divisor");
+            // Stored as integer mm; materialize in meters for the SI-domain
+            // measurement struct.
+            config.vio.tof_mounting_offset_m =
+                static_cast<double>(stmt.columnInt64(11)) * 1e-3;
+            config.vio.tof_expected_min_m =
+                static_cast<double>(stmt.columnInt64(12)) * 1e-3;
+            config.vio.tof_expected_max_m =
+                static_cast<double>(stmt.columnInt64(13)) * 1e-3;
+        }
+    }
+
     validateRuntimeConfig(config);
     return config;
 }
@@ -571,6 +617,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM teensy_config");
     exec(db_, "DELETE FROM imu_config");
     exec(db_, "DELETE FROM can_config");
+    exec(db_, "DELETE FROM vio_config");
 
     for (const auto& camera : config.cameras) {
         Statement insert(
@@ -830,6 +877,47 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             static_cast<sqlite3_int64>(config.teensy.can.rio_time_sync_can_id));
         insert.bindInt64(8,
             static_cast<sqlite3_int64>(config.teensy.can.teensy_pose_can_id));
+        insert.stepDone();
+    }
+
+    {
+        Statement insert(
+            db_,
+            "INSERT INTO vio_config "
+            "(id, enabled, vio_camera_id, vio_slot_index, ir_led_enabled, "
+            "ir_led_pulse_width_us, tof_enabled, tof_i2c_address, "
+            "tof_timing_budget_ms, tof_intermeasurement_period_ms, "
+            "tof_offset_after_flash_us, tof_divisor, tof_mounting_offset_mm, "
+            "tof_expected_min_mm, tof_expected_max_mm) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindInt(1, config.vio.enabled ? 1 : 0);
+        if (config.vio.vio_camera_id.empty()) {
+            insert.bindNull(2);
+        } else {
+            insert.bindText(2, config.vio.vio_camera_id);
+        }
+        insert.bindInt64(3, static_cast<sqlite3_int64>(config.vio.vio_slot_index));
+        insert.bindInt(4, config.vio.ir_led_enabled ? 1 : 0);
+        insert.bindInt64(5,
+            static_cast<sqlite3_int64>(config.vio.ir_led_pulse_width_us));
+        insert.bindInt(6, config.vio.tof_enabled ? 1 : 0);
+        insert.bindInt64(7,
+            static_cast<sqlite3_int64>(config.vio.tof_i2c_address));
+        insert.bindInt64(8,
+            static_cast<sqlite3_int64>(config.vio.tof_timing_budget_ms));
+        insert.bindInt64(9,
+            static_cast<sqlite3_int64>(config.vio.tof_intermeasurement_period_ms));
+        insert.bindInt64(10,
+            static_cast<sqlite3_int64>(config.vio.tof_offset_after_flash_us));
+        insert.bindInt64(11,
+            static_cast<sqlite3_int64>(config.vio.tof_divisor));
+        // Round-trip in mm to keep the SQL column an integer.
+        insert.bindInt64(12,
+            static_cast<sqlite3_int64>(std::llround(config.vio.tof_mounting_offset_m * 1000.0)));
+        insert.bindInt64(13,
+            static_cast<sqlite3_int64>(std::llround(config.vio.tof_expected_min_m * 1000.0)));
+        insert.bindInt64(14,
+            static_cast<sqlite3_int64>(std::llround(config.vio.tof_expected_max_m * 1000.0)));
         insert.stepDone();
     }
 

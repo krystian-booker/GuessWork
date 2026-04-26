@@ -133,8 +133,13 @@ TEST(TeensyProtocol, TeensyHealthPayloadRoundTripsExtended) {
     payload.accel_saturations = 11;
     payload.gyro_saturations = 22;
 
+    payload.tof_samples_emitted = 33;
+    payload.tof_overruns = 4;
+    payload.tof_i2c_failures = 1;
+    payload.tof_status_flags = 0xCAFE;
+
     const auto bytes = posest::teensy::encodeTeensyHealthPayload(payload);
-    EXPECT_EQ(bytes.size(), 44u);
+    EXPECT_EQ(bytes.size(), 60u);
     const auto decoded = posest::teensy::decodeTeensyHealthPayload(bytes);
 
     ASSERT_TRUE(decoded.has_value());
@@ -143,31 +148,10 @@ TEST(TeensyProtocol, TeensyHealthPayloadRoundTripsExtended) {
     EXPECT_EQ(decoded->rio_status_flags, posest::teensy::kHealthRioPingRejected);
     EXPECT_EQ(decoded->accel_saturations, 11u);
     EXPECT_EQ(decoded->gyro_saturations, 22u);
-}
-
-TEST(TeensyProtocol, TeensyHealthPayloadAcceptsLegacy24ByteForm) {
-    // Legacy firmware stamped just the original 24 bytes; the host must keep
-    // accepting that form (rio fields default to zero) so older firmware can
-    // still report basic health while it's being reflashed.
-    posest::teensy::TeensyHealthPayload payload;
-    payload.uptime_us = 99;
-    payload.error_flags = 1;
-    payload.trigger_status_flags = 2;
-    payload.rx_queue_depth = 3;
-    payload.tx_queue_depth = 4;
-    payload.rio_offset_us = 0;
-    payload.rio_status_flags = 0;
-    payload.accel_saturations = 0;
-    payload.gyro_saturations = 0;
-
-    auto bytes = posest::teensy::encodeTeensyHealthPayload(payload);
-    bytes.resize(24);
-    const auto decoded = posest::teensy::decodeTeensyHealthPayload(bytes);
-
-    ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(decoded->uptime_us, 99u);
-    EXPECT_EQ(decoded->rio_offset_us, 0);
-    EXPECT_EQ(decoded->rio_status_flags, 0u);
+    EXPECT_EQ(decoded->tof_samples_emitted, 33u);
+    EXPECT_EQ(decoded->tof_overruns, 4u);
+    EXPECT_EQ(decoded->tof_i2c_failures, 1u);
+    EXPECT_EQ(decoded->tof_status_flags, 0xCAFEu);
 }
 
 TEST(TeensyProtocol, RejectsBadPayloadSizes) {
@@ -263,4 +247,89 @@ TEST(TeensyProtocol, TimeSyncPayloadRoundTrips) {
     EXPECT_EQ(decoded->request_sequence, 12u);
     EXPECT_EQ(decoded->teensy_receive_time_us, 1000u);
     EXPECT_EQ(decoded->teensy_transmit_time_us, 1100u);
+}
+
+
+TEST(TeensyProtocol, ToFSamplePayloadRoundTrips) {
+    posest::teensy::ToFSamplePayload payload;
+    payload.teensy_time_us = 0xAABBCCDDEEFF1122ULL;
+    payload.trigger_sequence = 0x12345678u;
+    payload.distance_mm = 1234u;
+    payload.ranging_duration_us = 9876u;
+    payload.firmware_status_flags =
+        posest::teensy::kStatusUnsynchronizedTime |
+        posest::teensy::kToFStatusRangingOverrun;
+    payload.signal_rate_kcps = 4321u;
+    payload.ambient_rate_kcps = 567u;
+    payload.range_status = 4u;
+
+    const auto bytes = posest::teensy::encodeToFSamplePayload(payload);
+    EXPECT_EQ(bytes.size(), 36u);
+    const auto decoded = posest::teensy::decodeToFSamplePayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->teensy_time_us, payload.teensy_time_us);
+    EXPECT_EQ(decoded->trigger_sequence, payload.trigger_sequence);
+    EXPECT_EQ(decoded->distance_mm, payload.distance_mm);
+    EXPECT_EQ(decoded->ranging_duration_us, payload.ranging_duration_us);
+    EXPECT_EQ(decoded->firmware_status_flags, payload.firmware_status_flags);
+    EXPECT_EQ(decoded->signal_rate_kcps, payload.signal_rate_kcps);
+    EXPECT_EQ(decoded->ambient_rate_kcps, payload.ambient_rate_kcps);
+    EXPECT_EQ(decoded->range_status, payload.range_status);
+}
+
+TEST(TeensyProtocol, ToFSamplePayloadRejectsWrongSize) {
+    EXPECT_FALSE(posest::teensy::decodeToFSamplePayload(
+        std::vector<std::uint8_t>(35, 0)).has_value());
+    EXPECT_FALSE(posest::teensy::decodeToFSamplePayload(
+        std::vector<std::uint8_t>(37, 0)).has_value());
+}
+
+TEST(TeensyProtocol, VioCompanionConfigPayloadRoundTrips) {
+    posest::teensy::VioCompanionConfigPayload payload;
+    payload.vio_slot_index = 0;
+    payload.led_enabled = 1;
+    payload.led_pulse_width_us = 400;
+    payload.tof_enabled = 1;
+    payload.tof_i2c_address = 0x29;
+    payload.tof_timing_budget_ms = 10;
+    payload.tof_intermeasurement_period_ms = 20;
+    payload.tof_offset_after_flash_us = 500;
+    payload.tof_divisor = 1;
+
+    const auto bytes = posest::teensy::encodeVioCompanionConfigPayload(payload);
+    EXPECT_EQ(bytes.size(), 36u);
+    const auto decoded = posest::teensy::decodeVioCompanionConfigPayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->vio_slot_index, 0u);
+    EXPECT_EQ(decoded->led_pulse_width_us, 400u);
+    EXPECT_EQ(decoded->tof_offset_after_flash_us, 500u);
+}
+
+TEST(TeensyProtocol, ConfigAckEncodesVioEntry) {
+    posest::teensy::ConfigAckPayload ack;
+    ack.kind = static_cast<std::uint32_t>(posest::teensy::ConfigCommandKind::VioCompanion);
+    ack.status_flags = 0;
+    ack.effective_count = 1;
+    posest::teensy::VioConfigAckEntry entry;
+    entry.vio_slot_index = 0;
+    entry.led_enabled = 1;
+    entry.led_pulse_width_us = 400;
+    entry.tof_enabled = 1;
+    entry.tof_i2c_address = 0x29;
+    entry.tof_timing_budget_ms = 10;
+    entry.tof_intermeasurement_period_ms = 20;
+    entry.tof_offset_after_flash_us = 500;
+    entry.tof_divisor = 1;
+    ack.vio_entry = entry;
+
+    const auto bytes = posest::teensy::encodeConfigAckPayload(ack);
+    // 12-byte header + 36-byte VIO body.
+    ASSERT_EQ(bytes.size(), 48u);
+    const auto decoded = posest::teensy::decodeConfigAckPayload(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_TRUE(decoded->vio_entry.has_value());
+    EXPECT_EQ(decoded->vio_entry->led_pulse_width_us, 400u);
+    EXPECT_EQ(decoded->vio_entry->tof_offset_after_flash_us, 500u);
 }

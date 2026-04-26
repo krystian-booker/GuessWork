@@ -18,6 +18,7 @@
 namespace posest {
 
 class CameraTriggerCache;
+class ToFSampleCache;
 
 // Reusable base for any frame source.
 //
@@ -54,6 +55,13 @@ public:
     // any time; the load is atomic so the producer thread observes updates
     // without locking.
     void setTriggerCache(std::shared_ptr<const CameraTriggerCache> cache);
+
+    // Wire (or unwire) a ToFSampleCache. The producer only attempts a lookup
+    // when a trigger_sequence was already paired by the trigger cache; the
+    // join is keyed on that sequence (firmware tags each ranging with the
+    // originating camera trigger's sequence). Lookups for non-VIO cameras
+    // miss harmlessly.
+    void setToFSampleCache(std::shared_ptr<const ToFSampleCache> cache);
 
 protected:
     // Produce one frame. Return true on success (frame will be fanned out),
@@ -99,6 +107,7 @@ private:
     std::atomic<std::uint64_t> produced_{0};
     std::uint64_t next_sequence_{0};
     std::shared_ptr<const CameraTriggerCache> trigger_cache_;
+    std::shared_ptr<const ToFSampleCache> tof_cache_;
 };
 
 }  // namespace posest

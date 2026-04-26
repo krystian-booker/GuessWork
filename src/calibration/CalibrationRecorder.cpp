@@ -110,6 +110,10 @@ bool CalibrationRecorder::publish(CameraTriggerEvent event) {
     return true;
 }
 
+bool CalibrationRecorder::publish(ToFSample /*sample*/) {
+    return true;
+}
+
 CalibrationRecorderStats CalibrationRecorder::stats() const {
     std::lock_guard<std::mutex> g(mu_);
     return stats_;

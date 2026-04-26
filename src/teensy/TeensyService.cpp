@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "posest/CameraTriggerCache.h"
+#include "posest/ToFSampleCache.h"
 
 namespace posest::teensy {
 
@@ -45,12 +46,16 @@ TeensyService::TeensyService(
     std::vector<runtime::CameraTriggerConfig> camera_triggers,
     IMeasurementSink& measurement_sink,
     SerialTransportFactory transport_factory,
-    std::shared_ptr<CameraTriggerCache> trigger_cache)
+    std::shared_ptr<CameraTriggerCache> trigger_cache,
+    runtime::VioConfig vio_config,
+    std::shared_ptr<ToFSampleCache> tof_cache)
     : config_(std::move(config)),
       camera_triggers_(std::move(camera_triggers)),
+      vio_config_(std::move(vio_config)),
       measurement_sink_(measurement_sink),
       transport_factory_(std::move(transport_factory)),
-      trigger_cache_(std::move(trigger_cache)) {
+      trigger_cache_(std::move(trigger_cache)),
+      tof_cache_(std::move(tof_cache)) {
     if (!transport_factory_) {
         throw std::invalid_argument("TeensyService requires a serial transport factory");
     }
@@ -131,6 +136,9 @@ void TeensyService::workerLoop() {
             }
             sendCameraTriggerConfig(*current_transport_);
             sendImuConfig(*current_transport_);
+            if (vio_config_.enabled) {
+                sendVioCompanionConfig(*current_transport_);
+            }
             runConnected(*current_transport_);
         } catch (const std::exception& e) {
             markDisconnected(e.what());
@@ -323,6 +331,72 @@ void TeensyService::handleFrame(const Frame& frame) {
             }
             break;
         }
+        case MessageType::ToFSample: {
+            const auto decoded = decodeToFSamplePayload(frame.payload);
+            if (!decoded) {
+                std::lock_guard<std::mutex> g(mu_);
+                ++stats_.invalid_payloads;
+                return;
+            }
+
+            ToFSample sample;
+            sample.timestamp = timestampFromTeensyTime(decoded->teensy_time_us, now);
+            sample.teensy_time_us = decoded->teensy_time_us;
+            sample.trigger_sequence = decoded->trigger_sequence;
+            // Raw chip distance in meters (mm → m); pre-mounting-offset.
+            sample.raw_distance_m = static_cast<double>(decoded->distance_mm) * 1e-3;
+            sample.signal_rate_kcps = static_cast<double>(decoded->signal_rate_kcps);
+            sample.ambient_rate_kcps = static_cast<double>(decoded->ambient_rate_kcps);
+            sample.ranging_duration_us = decoded->ranging_duration_us;
+            sample.range_status = decoded->range_status;
+            sample.status_flags = decoded->firmware_status_flags;
+
+            // Apply host-side mounting offset and clamp to expected range.
+            // Separation of concerns: firmware reports raw chip output; the
+            // mounting calibration lives in host config so a remount only
+            // touches SQLite, not firmware.
+            double corrected =
+                sample.raw_distance_m + vio_config_.tof_mounting_offset_m;
+            bool clamped = false;
+            if (corrected < vio_config_.tof_expected_min_m) {
+                corrected = vio_config_.tof_expected_min_m;
+                clamped = true;
+            } else if (corrected > vio_config_.tof_expected_max_m) {
+                corrected = vio_config_.tof_expected_max_m;
+                clamped = true;
+            }
+            if (clamped) {
+                sample.status_flags |= kToFStatusClampedHostSide;
+            }
+            sample.distance_m = corrected;
+
+            bool time_sync_established = false;
+            {
+                std::lock_guard<std::mutex> g(mu_);
+                time_sync_established = stats_.time_sync_established;
+            }
+            if (!time_sync_established) {
+                sample.status_flags |= kStatusUnsynchronizedTime;
+            }
+
+            // Dual-publish, mirroring the CameraTriggerEvent path: bus for
+            // FusionService and any other generic consumers, cache for the
+            // ProducerBase per-frame join used by the VIO pipeline.
+            if (tof_cache_) {
+                tof_cache_->recordSample(sample);
+            }
+            const bool published = measurement_sink_.publish(sample);
+            std::lock_guard<std::mutex> g(mu_);
+            if (published) {
+                ++stats_.inbound_tof_samples;
+            } else {
+                ++stats_.inbound_measurements_dropped;
+            }
+            if (clamped) {
+                ++stats_.inbound_tof_clamped;
+            }
+            break;
+        }
         case MessageType::CameraTriggerEvent: {
             const auto decoded = decodeCameraTriggerEventPayload(frame.payload);
             if (!decoded) {
@@ -371,6 +445,9 @@ void TeensyService::handleFrame(const Frame& frame) {
             } else if (decoded->kind ==
                        static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
                 stats_.last_imu_ack = *decoded;
+            } else if (decoded->kind ==
+                       static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion)) {
+                stats_.last_vio_ack = *decoded;
             }
             break;
         }
@@ -528,6 +605,36 @@ void TeensyService::sendImuConfig(ISerialTransport& transport) {
     frame.type = MessageType::ConfigCommand;
     frame.sequence = next_sequence_++;
     frame.payload = encodeImuConfigCommandPayload();
+    transport.write(encodeFrame(frame));
+
+    std::lock_guard<std::mutex> g(mu_);
+    ++stats_.outbound_frames_sent;
+    stats_.last_transmit_time = std::chrono::steady_clock::now();
+}
+
+std::vector<std::uint8_t> TeensyService::encodeVioCompanionConfigCommandPayload() const {
+    std::vector<std::uint8_t> payload;
+    appendU32(payload, static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion));
+    VioCompanionConfigPayload body;
+    body.vio_slot_index = static_cast<std::uint32_t>(vio_config_.vio_slot_index);
+    body.led_enabled = vio_config_.ir_led_enabled ? 1u : 0u;
+    body.led_pulse_width_us = vio_config_.ir_led_pulse_width_us;
+    body.tof_enabled = vio_config_.tof_enabled ? 1u : 0u;
+    body.tof_i2c_address = vio_config_.tof_i2c_address;
+    body.tof_timing_budget_ms = vio_config_.tof_timing_budget_ms;
+    body.tof_intermeasurement_period_ms = vio_config_.tof_intermeasurement_period_ms;
+    body.tof_offset_after_flash_us = vio_config_.tof_offset_after_flash_us;
+    body.tof_divisor = vio_config_.tof_divisor;
+    auto wire = encodeVioCompanionConfigPayload(body);
+    payload.insert(payload.end(), wire.begin(), wire.end());
+    return payload;
+}
+
+void TeensyService::sendVioCompanionConfig(ISerialTransport& transport) {
+    Frame frame;
+    frame.type = MessageType::ConfigCommand;
+    frame.sequence = next_sequence_++;
+    frame.payload = encodeVioCompanionConfigCommandPayload();
     transport.write(encodeFrame(frame));
 
     std::lock_guard<std::mutex> g(mu_);

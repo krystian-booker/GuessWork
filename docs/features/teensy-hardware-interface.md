@@ -45,14 +45,15 @@ Messages currently defined (`Protocol.h`):
 | --- | ---: | --- | --- |
 | `ImuSample` | 1 | Teensy → host | Sent on every BMI088 DRDY |
 | `CanRx` | 3 | Teensy → host | **Reserved; never produced** |
-| `TeensyHealth` | 4 | Teensy → host | Sent at 10 Hz |
+| `TeensyHealth` | 4 | Teensy → host | Sent at 10 Hz; carries ToF observability counters |
 | `TimeSyncResponse` | 5 | Teensy → host | Sent for every request |
+| `ToFSample` | 6 | Teensy → host | One per VL53L4CD single-shot ranging; tagged with the originating camera `trigger_sequence` |
 | `CameraTriggerEvent` | 7 | Teensy → host | Sent on every rising edge of every active sync output |
 | `ChassisSpeeds` | 9 | Teensy → host | Emitted from CAN ID `0x100` decode; carries `rio_time_us`, `vx`, `vy`, `omega` |
 | `FusedPose` | 64 | Host → Teensy | Decoded; stored in `CanBridge::latest_pose_` |
 | `CanTx` | 65 | Host → Teensy | **Counted as unsupported** |
 | `TimeSyncRequest` | 66 | Host → Teensy | Decoded immediately and answered |
-| `ConfigCommand` | 67 | Host → Teensy | `CameraTriggers` and `ImuConfig` kinds supported |
+| `ConfigCommand` | 67 | Host → Teensy | `CameraTriggers`, `ImuConfig`, and `VioCompanion` kinds supported |
 
 Helper status bits (`Protocol.h`):
 
@@ -272,6 +273,11 @@ Reconnect policy: `TeensyService::workerLoop()` retries forever; `reconnect_inte
 | CAN driver and transceiver init | ✅ | `CanBridge` owns a `FlexCAN_T4FD<CAN3>` instance at the configured nominal/data rates. |
 | CAN RX → `ChassisSpeeds` USB frames | ✅ | Decode of arbitration ID `0x100` (placeholder schema). |
 | CAN TX of fused pose | ✅ | Latest `FusedPose` re‑published on `0x180` at `pose_publish_hz`. |
+| VIO companion: IR LED slaved to VIO-slot trigger | ✅ | `CameraTriggerScheduler::tickIsr` drives `kIrLedMosfetPin` HIGH alongside the VIO-slot rise; one-shot `IntervalTimer` drives the fall edge at `led_pulse_width_us`. |
+| VIO companion: VL53L4CD ToF single-shot ranging | ⚠️ | Driver compiles end-to-end and the temporal-multiplex deadline / I2C-in-main-loop discipline is wired. Timing-budget / intermeasurement-period programming is left at the chip's factory default — see §10. |
+| VIO companion: temporal multiplex (LED ↔ ToF) | ✅ | Validator + firmware reject `tof_offset_after_flash_us < ir_led_pulse_width_us`; ToF deadline is anchored in the trigger ISR at `flash_rise + offset`. |
+| VIO companion: ToF host-side mounting offset | ✅ | Applied in `TeensyService::handleFrame`; clamped to `[expected_min_m, expected_max_m]` and flagged via `kToFStatusClampedHostSide`. |
+| VIO companion: per-frame depth join | ✅ | `ToFSampleCache::lookupBySequence` keyed on `trigger_sequence`; `ProducerBase::runLoop` populates `Frame::ground_distance_m`. |
 | Firmware/host protocol header drift detection | ✅ | `scripts/check_protocol_constants.py` runs as a CTest case (`protocol_constants_drift`). |
 
 ---
@@ -287,3 +293,94 @@ Roughly in priority order to close the requirement gap:
 5. **Move triggers to hardware timing.** Switch `CameraTriggerScheduler` to `IntervalTimer`/FlexPWM, and adopt a master tick so harmonic rates align exactly. Removes both jitter and the period‑rounding drift.
 6. **Make IMU configuration data‑driven.** Expose range/ODR/bandwidth in `TeensyConfig` (or a dedicated `ImuConfig`) and apply on connect, the same way camera triggers are pushed.
 7. **Catch protocol drift between firmware and host.** A unit test (host side) that round‑trips a serialized payload against a known byte vector, plus a comment in both `Protocol.h` files pointing to the same fixture, would prevent silent layout skew.
+
+---
+
+## 10. VIO companion: IR illumination + VL53L4CD ToF
+
+A single-VIO-camera workflow rides on top of one camera-sync slot (configurable; default slot 0 → pin 2). Three pieces:
+
+1. **IR LED flash.** An IRLZ44N MOSFET gate on `kIrLedMosfetPin = 11` is driven HIGH the same instant the VIO-slot trigger pin rises (inside `CameraTriggerScheduler::tickIsr`). The fall edge is hardware-timed by a dedicated one-shot `IntervalTimer` (`led_fall_timer_`) at `led_pulse_width_us`. The fall **cannot** ride the master tick — `master_period_us` is the GCD of all enabled channel periods (often 20 ms for a single 50 Hz channel) and would stretch the LED pulse far beyond the desired ~400 µs.
+2. **VL53L4CD ToF on `Wire` (pins 18 SDA / 19 SCL).** Single-shot mode only. The trigger ISR sets a `tof_start_pending_` flag with a deadline at `flash_rise + tof_offset_after_flash_us` (default 500 µs). The main loop's `consumeToFStartDue` polls the flag and calls `Vl53l4cdToF::startRanging` — **all I²C runs in the main loop, never an ISR**, because Teensy's `Wire` library is interrupt-driven internally and re-entering it from another ISR risks priority inversion.
+3. **Host-side mounting offset.** `TeensyService::handleFrame` adds `vio.tof_mounting_offset_m` to the raw chip distance and clamps to `[expected_min_m, expected_max_m]` before publishing. Raw and corrected values are both kept on the bus-published `ToFSample` for debuggability; only the corrected value is stamped onto `Frame::ground_distance_m`.
+
+**Pin map additions (`FirmwareConfig.h`):**
+
+| Logical | Teensy 4.1 pin | Notes |
+| --- | --- | --- |
+| IR LED MOSFET gate | 11 | Firmware constant; not host-configurable |
+| VL53L4CD SDA | 18 | Default `Wire` (I2C0) |
+| VL53L4CD SCL | 19 | Default `Wire` (I2C0) |
+
+**Wire protocol additions:**
+
+- `MessageType::ToFSample = 6` (Teensy → host) carries `trigger_sequence` for exact-match join with the camera frame.
+- `ConfigCommandKind::VioCompanion = 3` (host → Teensy) bundles LED + ToF settings; the firmware ack echoes the effective values via `VioConfigAckEntry`.
+- `TeensyHealthPayload` extended (44 → 60 bytes) with `tof_samples_emitted`, `tof_overruns`, `tof_i2c_failures`, `tof_status_flags`. Decoder accepts the 60-byte form only — pre-release software, no historical-size accommodation.
+- New per-sample status bits: `kToFStatusRangingOverrun`, `kToFStatusI2cFailure`, `kToFStatusInvalidRangeStatus`, `kToFStatusClampedHostSide` (host-only).
+
+**Temporal multiplex invariant.** `tof_offset_after_flash_us ≥ ir_led_pulse_width_us` is enforced in three places:
+- Host `ConfigValidator` rejects the save.
+- Firmware `CameraTriggerScheduler::applyVioCompanion` rejects with `kConfigAckVioMultiplexViolation`.
+- The ISR structure makes overlap structurally impossible: the LED rise and the ToF deadline are written from the same ISR, and the deadline is `flash_rise + offset`. If the offset is honored at validation time, the ToF cannot start until the LED is off.
+
+### 10.1 What was deferred during implementation
+
+The wiring is end-to-end (host config → firmware → bus → cache → frame join → VIO pipeline) and 219/219 host tests pass, but a few items are explicitly punted to a follow-up:
+
+#### D1. ST VL53L4CD ULD vendoring
+
+`firmware/teensy41/src/Vl53l4cdToF.cpp` is a minimum-viable driver that talks I²C directly via Arduino `Wire`. It implements:
+
+- Soft-reset on `begin`.
+- Model-ID verification (reads register `0x010F`, expects `0xEB`).
+- Single-shot start (writes `0x10` to `kRegSystemStart = 0x0087`).
+- Coarse "is timing budget elapsed?" gate before reading the result.
+- Distance read from `kRegResultDistanceMm = 0x0096`.
+- Interrupt-clear write to `kRegSystemInterruptClear = 0x0086`.
+
+What it does **not** do correctly:
+
+- **Programmable timing budget.** ST programs the timing-budget registers as a derived sequence of writes (the ULD computes spot-rate / phase-cal compensations from the requested budget); we do **not** apply that sequence, so the chip stays at its factory default budget. `cfg_.timing_budget_ms` is used only as a poll-gate heuristic in `Vl53l4cdToF::poll`, not pushed to the chip.
+- **Programmable intermeasurement period.** Same story; we don't program it. Single-shot mode means we re-trigger every cycle from the trigger ISR, so the IMP doesn't gate cadence in our use, but the chip-side filtering it controls (signal-rate/sigma) is left at default.
+- **Signal-rate / ambient-rate readout.** The fields exist on `ToFSamplePayload` but the firmware leaves them at zero. The ULD register layout for these (`RESULT__SIGNAL_RATE_*`, `RESULT__AMBIENT_RATE_*`) is non-trivial to reproduce by hand without the datasheet companion.
+- **Data-ready bit polling.** We use a "timing budget elapsed" heuristic instead of `VL53L4CD_GetMeasurementDataReady`. Works in practice when the chip is healthy but doesn't surface "ranging failed" cleanly.
+
+**To complete:**
+
+1. Vendor ST's official VL53L4CD ULD (BSD-3) under `firmware/teensy41/lib/VL53L4CD_ULD/` exactly the way `lib/BMI08x_SensorAPI/` is vendored.
+2. In `Vl53l4cdToF::begin`, replace the soft-reset / model-id block with `VL53L4CD_SensorInit`, then call `VL53L4CD_SetRangeTiming(cfg_.timing_budget_ms, cfg_.intermeasurement_period_ms)`.
+3. In `Vl53l4cdToF::startRanging`, call `VL53L4CD_StartRanging` instead of the raw register write.
+4. In `Vl53l4cdToF::poll`, replace the heuristic gate with `VL53L4CD_CheckForDataReady`. When ready, call `VL53L4CD_GetResult` and copy `result.distance_mm`, `result.range_status`, `result.signal_rate_kcps`, `result.ambient_rate_kcps`, then `VL53L4CD_ClearInterrupt`.
+5. Provide the ULD's platform shim functions (`VL53L4CD_RdByte`, `VL53L4CD_WrByte`, `VL53L4CD_RdMulti`, `VL53L4CD_WrMulti`, `VL53L4CD_WaitMs`) as thin wrappers over Arduino `Wire` and `delay`. The existing `writeReg16` / `readReg16` / `readReg16U16` helpers in `Vl53l4cdToF.cpp` can be the implementation body.
+6. Verify by writing a known timing budget (e.g. 33 ms) and asserting the on-wire `ranging_duration_us` lands within ±10% of the requested value.
+
+#### D2. Hardware-in-the-loop verification of the temporal multiplex
+
+The plan's verification section (`/home/krystian/.claude/plans/can-you-put-together-jiggly-rain.md` §Verification) lists logic-analyzer probes that nobody has run yet. Until we do, the multiplex guarantee is structural-by-construction but not empirically confirmed:
+
+1. Drive a 50 Hz trigger on slot 0 with `ir_led_enabled=true, ir_led_pulse_width_us=400`. Probe pin 11 with a logic analyzer or scope. Confirm:
+   - LED HIGH coincides with the slot-0 (pin 2) rising edge within ≤1 µs.
+   - LED LOW edge lands 400 µs ± 5 µs after the rise (jitter bounded by `IntervalTimer` precision, not main-loop scheduling).
+2. Probe SDA (pin 18). Confirm I²C activity starts no earlier than `tof_offset_after_flash_us` after the LED's HIGH edge — never overlapping the LED window.
+3. Inspect the firmware-emitted `ranging_duration_us` field over a few seconds; assert it stays within the configured timing budget. (Once D1 lands, this is also the canary for "did the timing budget actually take effect?")
+4. Negative test: configure `tof_offset_after_flash_us = 100` with `ir_led_pulse_width_us = 400` via direct SQL (bypassing the validator). Confirm the firmware's `applyVioCompanion` rejects with `kConfigAckVioMultiplexViolation` and that `last_vio_ack` on the host reflects the rejection.
+
+#### D3. End-to-end depth-on-frame integration test
+
+`PlaceholderVioPipeline` increments `framesWithDepth_` / `framesWithoutDepth_` counters, but no test currently exercises the full chain camera-trigger event → ToF sample → cache → ProducerBase join → VIO pipeline counter. The cache lookup is unit-tested (`test_tof_sample_cache.cpp`) and the cache record is unit-tested (`test_teensy_service.cpp::AppliesMountingOffsetAndPublishesToFSample`), but the producer-side join has no coverage.
+
+**To complete:** add a `test_producer_base_tof.cpp` that uses `MockProducer` + a hand-constructed `CameraTriggerCache` + `ToFSampleCache`, drives one trigger event and one ToF sample with matching `trigger_sequence`, and asserts that the next produced `Frame` has both `Frame::trigger_sequence` and `Frame::ground_distance_m` populated.
+
+#### D4. CameraTriggerScheduler firmware test for LED slaving
+
+`firmware/teensy41/test/test_protocol/` covers wire format but not the scheduler. The plan called out a fake-`IntervalTimer` test that asserts the LED pin transitions within `ir_led_pulse_width_us` of the slot-0 rise. Adding it requires either:
+
+- A test build that abstracts `IntervalTimer` behind a virtual-time fake (intrusive change to `CameraTriggerScheduler`), or
+- A hardware loopback test on a Teensy with a probe wire from pin 11 to an interrupt-capable input pin, captured in a Unity test under `firmware/teensy41/test/test_camera_trigger_scheduler/`.
+
+Defer until D1 lands so the scheduler internals stop changing.
+
+#### D5. VIO algorithm
+
+Out of scope for this workflow's wiring effort. `PlaceholderVioPipeline::processFrame` reads `frame.ground_distance_m` and emits a stub `VioMeasurement{tracking_ok=false, backend_status="placeholder+tof"}`. A real VIO backend is a separate effort and replaces `processFrame` entirely; nothing in the plumbing changes.

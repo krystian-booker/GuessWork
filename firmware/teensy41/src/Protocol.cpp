@@ -101,7 +101,7 @@ bool encodeTeensyHealthPayload(
     std::uint8_t* out,
     std::size_t capacity,
     std::uint16_t& out_size) {
-    if (!out || !ensure(capacity, 44u)) {
+    if (!out || !ensure(capacity, 60u)) {
         return false;
     }
     std::size_t offset = 0;
@@ -114,6 +114,31 @@ bool encodeTeensyHealthPayload(
     appendU32(out, offset, payload.rio_status_flags);
     appendU32(out, offset, payload.accel_saturations);
     appendU32(out, offset, payload.gyro_saturations);
+    appendU32(out, offset, payload.tof_samples_emitted);
+    appendU32(out, offset, payload.tof_overruns);
+    appendU32(out, offset, payload.tof_i2c_failures);
+    appendU32(out, offset, payload.tof_status_flags);
+    out_size = static_cast<std::uint16_t>(offset);
+    return true;
+}
+
+bool encodeToFSamplePayload(
+    const ToFSamplePayload& payload,
+    std::uint8_t* out,
+    std::size_t capacity,
+    std::uint16_t& out_size) {
+    if (!out || !ensure(capacity, 36u)) {
+        return false;
+    }
+    std::size_t offset = 0;
+    appendU64(out, offset, payload.teensy_time_us);
+    appendU32(out, offset, payload.trigger_sequence);
+    appendU32(out, offset, payload.distance_mm);
+    appendU32(out, offset, payload.ranging_duration_us);
+    appendU32(out, offset, payload.firmware_status_flags);
+    appendU32(out, offset, payload.signal_rate_kcps);
+    appendU32(out, offset, payload.ambient_rate_kcps);
+    appendU32(out, offset, payload.range_status);
     out_size = static_cast<std::uint16_t>(offset);
     return true;
 }
@@ -171,6 +196,30 @@ bool decodeFusedPosePayload(const Frame& frame, FusedPosePayload& payload) {
     return true;
 }
 
+bool decodeVioCompanionConfigPayload(const Frame& frame, VioCompanionCommand& command) {
+    if (frame.payload_size < 4u) {
+        return false;
+    }
+    if (readU32(frame.payload, 0) !=
+        static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion)) {
+        return false;
+    }
+    if (frame.payload_size != 4u + 36u) {
+        return false;
+    }
+    command.valid = true;
+    command.vio_slot_index = readU32(frame.payload, 4);
+    command.led_enabled = readU32(frame.payload, 8);
+    command.led_pulse_width_us = readU32(frame.payload, 12);
+    command.tof_enabled = readU32(frame.payload, 16);
+    command.tof_i2c_address = readU32(frame.payload, 20);
+    command.tof_timing_budget_ms = readU32(frame.payload, 24);
+    command.tof_intermeasurement_period_ms = readU32(frame.payload, 28);
+    command.tof_offset_after_flash_us = readU32(frame.payload, 32);
+    command.tof_divisor = readU32(frame.payload, 36);
+    return true;
+}
+
 bool decodeImuConfigPayload(const Frame& frame, ImuConfigCommand& command) {
     if (frame.payload_size < 12u) {
         return false;
@@ -198,6 +247,7 @@ bool encodeConfigAckPayload(
     const TriggerAckEntry* trigger_entries,
     std::size_t trigger_entry_count,
     const ImuConfigAckEntry* imu_entry,
+    const VioConfigAckEntry* vio_entry,
     std::uint8_t* out,
     std::size_t capacity,
     std::uint16_t& out_size) {
@@ -212,6 +262,11 @@ bool encodeConfigAckPayload(
             return false;
         }
         required += 28u;
+    } else if (header.kind == static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion)) {
+        if (!vio_entry) {
+            return false;
+        }
+        required += 36u;
     }
     if (!ensure(capacity, required)) {
         return false;
@@ -237,6 +292,16 @@ bool encodeConfigAckPayload(
         appendU32(out, offset, imu_entry->gyro_bandwidth_code);
         appendU32(out, offset, imu_entry->data_sync_rate_hz);
         appendU32(out, offset, imu_entry->reserved);
+    } else if (header.kind == static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion)) {
+        appendU32(out, offset, vio_entry->vio_slot_index);
+        appendU32(out, offset, vio_entry->led_enabled);
+        appendU32(out, offset, vio_entry->led_pulse_width_us);
+        appendU32(out, offset, vio_entry->tof_enabled);
+        appendU32(out, offset, vio_entry->tof_i2c_address);
+        appendU32(out, offset, vio_entry->tof_timing_budget_ms);
+        appendU32(out, offset, vio_entry->tof_intermeasurement_period_ms);
+        appendU32(out, offset, vio_entry->tof_offset_after_flash_us);
+        appendU32(out, offset, vio_entry->tof_divisor);
     }
 
     out_size = static_cast<std::uint16_t>(offset);

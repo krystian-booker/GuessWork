@@ -275,6 +275,33 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
             "Teensy reconnect interval must be > 0");
     require(config.teensy.read_timeout_ms > 0, "Teensy read timeout must be > 0");
     require(config.teensy.pose_publish_hz > 0.0, "Teensy pose publish rate must be > 0");
+
+    // VIO companion workflow. The temporal-multiplex invariant is enforced
+    // here: the ToF ranging window must start strictly after the IR LED
+    // flash window has closed.
+    require(config.vio.vio_slot_index >= 0 &&
+                config.vio.vio_slot_index < static_cast<std::int32_t>(kMaxEnabledCameraTriggers),
+            "VIO slot index must be in [0, " +
+                std::to_string(kMaxEnabledCameraTriggers) + ")");
+    require(config.vio.tof_divisor >= 1, "VIO ToF divisor must be >= 1");
+    require(config.vio.tof_intermeasurement_period_ms >
+                config.vio.tof_timing_budget_ms,
+            "VIO ToF intermeasurement period must be greater than timing budget");
+    require(config.vio.tof_offset_after_flash_us >= config.vio.ir_led_pulse_width_us,
+            "VIO ToF offset after flash must be >= IR LED pulse width "
+            "(temporal multiplex invariant: flash and ranging cannot overlap)");
+    require(isFinite(config.vio.tof_mounting_offset_m),
+            "VIO ToF mounting offset must be finite");
+    require(isFinite(config.vio.tof_expected_min_m) &&
+                isFinite(config.vio.tof_expected_max_m) &&
+                config.vio.tof_expected_min_m < config.vio.tof_expected_max_m,
+            "VIO ToF expected range must be finite and min < max");
+    if (config.vio.enabled) {
+        require(!config.vio.vio_camera_id.empty(),
+                "VIO is enabled but vio_camera_id is empty");
+        require(cameras_enabled.find(config.vio.vio_camera_id) != cameras_enabled.end(),
+                "VIO references unknown camera: " + config.vio.vio_camera_id);
+    }
 }
 
 }  // namespace posest::config

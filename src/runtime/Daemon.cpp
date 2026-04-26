@@ -659,7 +659,11 @@ void runConfigCommand(
             cameras.push_back(camera);
         }
         recorder.start();
-        teensy::TeensyService teensy(config.teensy, config.camera_triggers, recorder);
+        // Kalibr recording doesn't run the VIO companion — leaving the
+        // VioConfig at its default (enabled=false) makes the firmware path
+        // a no-op for this transient session.
+        teensy::TeensyService teensy(
+            config.teensy, config.camera_triggers, recorder);
         teensy.start();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!teensy.stats().time_sync_established &&
@@ -805,12 +809,20 @@ void DaemonController::loadAndBuild() {
             pin_to_camera[trigger.teensy_pin] = trigger.camera_id;
         }
         trigger_cache_ = std::make_shared<CameraTriggerCache>(std::move(pin_to_camera));
+        if (config_.vio.enabled && !config_.vio.vio_camera_id.empty()) {
+            tof_cache_ =
+                std::make_shared<ToFSampleCache>(config_.vio.vio_camera_id);
+        } else {
+            tof_cache_.reset();
+        }
         fusion_ = std::make_unique<fusion::FusionService>(
             *measurement_bus_,
             fusion::buildFusionConfig(config_));
         teensy_ = std::make_shared<teensy::TeensyService>(
-            config_.teensy, config_.camera_triggers, *measurement_bus_,
-            teensy::makePosixSerialTransport, trigger_cache_);
+            config_.teensy, config_.camera_triggers,
+            *measurement_bus_,
+            teensy::makePosixSerialTransport, trigger_cache_,
+            config_.vio, tof_cache_);
         fusion_->addOutputSink(teensy_);
         web_ = std::make_unique<WebService>(*config_store_);
         graph_ = std::make_unique<RuntimeGraph>(
@@ -818,6 +830,9 @@ void DaemonController::loadAndBuild() {
         graph_->build();
         for (const auto& camera : graph_->cameraProducers()) {
             camera->setTriggerCache(trigger_cache_);
+            if (tof_cache_) {
+                camera->setToFSampleCache(tof_cache_);
+            }
         }
         built_ = true;
 

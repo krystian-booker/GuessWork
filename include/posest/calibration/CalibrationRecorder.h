@@ -53,6 +53,7 @@ public:
     bool publish(ImuSample sample) override;
     bool publish(ChassisSpeedsSample sample) override;
     bool publish(CameraTriggerEvent event) override;
+    bool publish(ToFSample sample) override;
 
     CalibrationRecorderStats stats() const;
     void throwIfUnacceptable() const;

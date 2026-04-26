@@ -140,15 +140,6 @@ std::uint32_t pixelFormatFromString(const std::string& name) {
     if (const auto* binding = findPixelFormatByName(name)) {
         return binding->fourcc;
     }
-    // Accept upper-case spellings of the canonical names for backwards compat.
-    std::string lower;
-    lower.reserve(name.size());
-    for (char ch : name) {
-        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-    }
-    if (const auto* binding = findPixelFormatByName(lower)) {
-        return binding->fourcc;
-    }
     throw std::runtime_error("Unsupported pixel format: " + name);
 }
 

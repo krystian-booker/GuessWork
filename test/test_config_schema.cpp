@@ -949,3 +949,90 @@ TEST(TeensyService, CameraTriggerConfigWireFormatMatchesFirmwareParserContract) 
     EXPECT_EQ(readU32(frame.payload, 52), 500u);
     EXPECT_EQ(readI64(frame.payload, 56), -25);
 }
+
+TEST(SqliteConfigStore, MigrationEightCreatesVioConfigTable) {
+    const auto path = tempDbPath("vio_migration");
+    std::filesystem::remove(path);
+    {
+        posest::config::SqliteConfigStore store(path);
+        // Just opening at v8 must populate the default vio_config row so a
+        // load returns sensible defaults rather than throwing.
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+    EXPECT_FALSE(loaded.vio.enabled);
+    EXPECT_EQ(loaded.vio.vio_slot_index, 0);
+    EXPECT_EQ(loaded.vio.ir_led_pulse_width_us, 400u);
+    EXPECT_EQ(loaded.vio.tof_offset_after_flash_us, 500u);
+    EXPECT_EQ(loaded.vio.tof_divisor, 1u);
+    EXPECT_DOUBLE_EQ(loaded.vio.tof_mounting_offset_m, 0.0);
+
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, VioConfigRoundTripsThroughSave) {
+    const auto path = tempDbPath("vio_roundtrip");
+    std::filesystem::remove(path);
+
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = config.cameras[0].id;
+    config.vio.vio_slot_index = 0;
+    config.vio.ir_led_pulse_width_us = 350;
+    config.vio.tof_offset_after_flash_us = 600;
+    config.vio.tof_timing_budget_ms = 12;
+    config.vio.tof_intermeasurement_period_ms = 25;
+    config.vio.tof_divisor = 2;
+    // 3" mounting offset → 0.0762 m.
+    config.vio.tof_mounting_offset_m = 0.0762;
+
+    {
+        posest::config::SqliteConfigStore store(path);
+        store.saveRuntimeConfig(config);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+    EXPECT_TRUE(loaded.vio.enabled);
+    EXPECT_EQ(loaded.vio.vio_camera_id, config.cameras[0].id);
+    EXPECT_EQ(loaded.vio.ir_led_pulse_width_us, 350u);
+    EXPECT_EQ(loaded.vio.tof_offset_after_flash_us, 600u);
+    EXPECT_EQ(loaded.vio.tof_timing_budget_ms, 12u);
+    EXPECT_EQ(loaded.vio.tof_intermeasurement_period_ms, 25u);
+    EXPECT_EQ(loaded.vio.tof_divisor, 2u);
+    // mm round-trip: 76 mm → 0.076 m. Allow ±0.5 mm tolerance because the
+    // SQL column is INTEGER (mm), so 0.0762 → 76 → 0.076.
+    EXPECT_NEAR(loaded.vio.tof_mounting_offset_m, 0.076, 0.0006);
+
+    std::filesystem::remove(path);
+}
+
+TEST(ConfigValidator, RejectsToFOffsetSmallerThanLedPulseWidth) {
+    auto config = makeValidConfig();
+    config.vio.enabled = false;  // failure should fire even when disabled
+    config.vio.ir_led_pulse_width_us = 800;
+    config.vio.tof_offset_after_flash_us = 500;  // multiplex violation
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsEnabledVioWithoutCamera) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id.clear();
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsEnabledVioReferencingUnknownCamera) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = "no_such_camera";
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsToFIntermeasurementShorterThanTimingBudget) {
+    auto config = makeValidConfig();
+    config.vio.tof_timing_budget_ms = 30;
+    config.vio.tof_intermeasurement_period_ms = 25;  // < timing_budget
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}

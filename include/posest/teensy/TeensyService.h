@@ -23,6 +23,7 @@
 
 namespace posest {
 class CameraTriggerCache;
+class ToFSampleCache;
 }
 
 namespace posest::teensy {
@@ -40,6 +41,9 @@ struct TeensyStats {
     std::uint64_t inbound_chassis_speeds_samples{0};
     std::uint64_t inbound_chassis_speeds_dropped_pre_sync{0};
     std::uint64_t inbound_camera_trigger_events{0};
+    std::uint64_t inbound_tof_samples{0};
+    std::uint64_t inbound_tof_dropped_pre_sync{0};
+    std::uint64_t inbound_tof_clamped{0};
     std::uint64_t inbound_measurements_dropped{0};
     std::uint64_t outbound_frames_queued{0};
     std::uint64_t outbound_frames_sent{0};
@@ -61,6 +65,7 @@ struct TeensyStats {
     std::int64_t rio_to_teensy_offset_us{0};
     std::optional<ConfigAckPayload> last_trigger_ack;
     std::optional<ConfigAckPayload> last_imu_ack;
+    std::optional<ConfigAckPayload> last_vio_ack;
 };
 
 class TeensyService final : public fusion::IFusionOutputSink {
@@ -72,7 +77,9 @@ public:
         std::vector<runtime::CameraTriggerConfig> camera_triggers,
         IMeasurementSink& measurement_sink,
         SerialTransportFactory transport_factory = makePosixSerialTransport,
-        std::shared_ptr<CameraTriggerCache> trigger_cache = nullptr);
+        std::shared_ptr<CameraTriggerCache> trigger_cache = nullptr,
+        runtime::VioConfig vio_config = {},
+        std::shared_ptr<ToFSampleCache> tof_cache = nullptr);
     ~TeensyService() override;
 
     TeensyService(const TeensyService&) = delete;
@@ -101,6 +108,8 @@ private:
     void sendCameraTriggerConfig(ISerialTransport& transport);
     std::vector<std::uint8_t> encodeImuConfigCommandPayload() const;
     void sendImuConfig(ISerialTransport& transport);
+    std::vector<std::uint8_t> encodeVioCompanionConfigCommandPayload() const;
+    void sendVioCompanionConfig(ISerialTransport& transport);
     void markDisconnected(const std::string& error);
     void sleepUntilReconnectOrStop();
     static std::uint64_t steadyMicros(Timestamp timestamp);
@@ -110,9 +119,11 @@ private:
 
     runtime::TeensyConfig config_;
     std::vector<runtime::CameraTriggerConfig> camera_triggers_;
+    runtime::VioConfig vio_config_;
     IMeasurementSink& measurement_sink_;
     SerialTransportFactory transport_factory_;
     std::shared_ptr<CameraTriggerCache> trigger_cache_;
+    std::shared_ptr<ToFSampleCache> tof_cache_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::optional<Frame> last_outbound_frame_;

@@ -8,6 +8,7 @@
 #include "CanBridge.h"
 #include "FirmwareConfig.h"
 #include "Protocol.h"
+#include "Vl53l4cdToF.h"
 
 namespace {
 
@@ -17,6 +18,7 @@ StreamDecoder g_decoder;
 CameraTriggerScheduler g_triggers;
 CanBridge g_can;
 Bmi088Imu g_imu;
+Vl53l4cdToF g_tof;
 
 std::uint32_t g_tx_sequence = 0;
 std::uint32_t g_error_flags = 0;
@@ -93,6 +95,10 @@ void sendHealth(std::uint64_t now_us) {
     const auto imu_stats = g_imu.stats();
     health.accel_saturations = imu_stats.accel_saturations;
     health.gyro_saturations = imu_stats.gyro_saturations;
+    health.tof_samples_emitted = g_tof.samplesEmitted();
+    health.tof_overruns = g_tof.overruns();
+    health.tof_i2c_failures = g_tof.i2cFailures();
+    health.tof_status_flags = g_tof.errorFlags();
 
     std::uint16_t payload_size = 0;
     if (!encodeTeensyHealthPayload(
@@ -141,17 +147,29 @@ void sendCameraTriggerEvent(const CameraTriggerEventPayload& event) {
     writeFrame(MessageType::CameraTriggerEvent, g_payload_buffer, payload_size);
 }
 
+void sendToFSample(const ToFSamplePayload& sample) {
+    std::uint16_t payload_size = 0;
+    if (!encodeToFSamplePayload(
+            sample, g_payload_buffer, sizeof(g_payload_buffer), payload_size)) {
+        g_error_flags |= kErrorInvalidPayload;
+        return;
+    }
+    writeFrame(MessageType::ToFSample, g_payload_buffer, payload_size);
+}
+
 void sendConfigAck(
     const ConfigAckHeader& header,
     const TriggerAckEntry* trigger_entries,
     std::size_t trigger_entry_count,
-    const ImuConfigAckEntry* imu_entry) {
+    const ImuConfigAckEntry* imu_entry,
+    const VioConfigAckEntry* vio_entry = nullptr) {
     std::uint16_t payload_size = 0;
     if (!encodeConfigAckPayload(
             header,
             trigger_entries,
             trigger_entry_count,
             imu_entry,
+            vio_entry,
             g_payload_buffer,
             sizeof(g_payload_buffer),
             payload_size)) {
@@ -197,6 +215,57 @@ void applyCameraTriggerConfig(const Frame& frame) {
     sendConfigAck(header, entries, effective, nullptr);
 }
 
+void applyVioCompanionConfig(const Frame& frame) {
+    ConfigAckHeader header;
+    header.kind = static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion);
+
+    VioCompanionCommand command;
+    if (!decodeVioCompanionConfigPayload(frame, command)) {
+        g_error_flags |= kErrorInvalidPayload;
+        header.status_flags = kConfigAckInvalidVioConfig;
+        header.effective_count = 0;
+        sendConfigAck(header, nullptr, 0, nullptr, nullptr);
+        return;
+    }
+
+    VioCompanionConfig cfg;
+    cfg.led_enabled = command.led_enabled != 0u;
+    cfg.vio_slot_index = static_cast<std::uint8_t>(command.vio_slot_index);
+    cfg.led_pulse_width_us = command.led_pulse_width_us;
+    cfg.tof_enabled = command.tof_enabled != 0u;
+    cfg.tof_offset_after_flash_us = command.tof_offset_after_flash_us;
+    cfg.tof_divisor = command.tof_divisor;
+
+    const std::uint32_t scheduler_status = g_triggers.applyVioCompanion(cfg);
+    header.status_flags = scheduler_status;
+
+    if (scheduler_status == 0u) {
+        Vl53l4cdToF::Config tof_cfg;
+        tof_cfg.enabled = cfg.tof_enabled;
+        tof_cfg.i2c_address = static_cast<std::uint8_t>(command.tof_i2c_address);
+        tof_cfg.timing_budget_ms = static_cast<std::uint16_t>(command.tof_timing_budget_ms);
+        tof_cfg.intermeasurement_period_ms =
+            static_cast<std::uint16_t>(command.tof_intermeasurement_period_ms);
+        if (!g_tof.reconfigure(tof_cfg, micros64())) {
+            g_error_flags |= kErrorTofInitFailed;
+            header.status_flags |= kConfigAckVioInitFailure;
+        }
+    }
+
+    VioConfigAckEntry entry;
+    entry.vio_slot_index = command.vio_slot_index;
+    entry.led_enabled = command.led_enabled;
+    entry.led_pulse_width_us = command.led_pulse_width_us;
+    entry.tof_enabled = command.tof_enabled;
+    entry.tof_i2c_address = command.tof_i2c_address;
+    entry.tof_timing_budget_ms = command.tof_timing_budget_ms;
+    entry.tof_intermeasurement_period_ms = command.tof_intermeasurement_period_ms;
+    entry.tof_offset_after_flash_us = command.tof_offset_after_flash_us;
+    entry.tof_divisor = command.tof_divisor;
+    header.effective_count = 1u;
+    sendConfigAck(header, nullptr, 0, nullptr, &entry);
+}
+
 void applyImuConfig(const Frame& frame) {
     ImuConfigCommand command;
     ConfigAckHeader header;
@@ -229,6 +298,8 @@ void dispatchConfigCommand(const Frame& frame) {
         applyCameraTriggerConfig(frame);
     } else if (kind == static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
         applyImuConfig(frame);
+    } else if (kind == static_cast<std::uint32_t>(ConfigCommandKind::VioCompanion)) {
+        applyVioCompanionConfig(frame);
     } else {
         ConfigAckHeader header;
         header.kind = kind;
@@ -317,6 +388,13 @@ void setup() {
     if (!g_imu.begin(micros64())) {
         g_error_flags |= kErrorImuInitFailure;
     }
+    {
+        // ToF starts disabled — the host enables it via VioCompanion config
+        // when the workflow is wired up. begin() with enabled=false is a
+        // bus-untouching no-op; this just primes internal state.
+        Vl53l4cdToF::Config tof_cfg;
+        g_tof.begin(tof_cfg, micros64());
+    }
     Serial.begin(kDefaultSerialBaud);
     g_next_health_us = micros64() + kHealthPublishIntervalUs;
     g_next_led_toggle_us = micros() + 250000u;
@@ -347,6 +425,25 @@ void loop() {
             break;
         }
         sendImuSample(sample);
+    }
+
+    // VL53L4CD ToF: check if the trigger ISR has scheduled a new
+    // "start ranging" deadline that has elapsed, and drain any completed
+    // ranging. I2C runs only here in the main loop — never from any ISR.
+    {
+        std::uint32_t pending_seq = 0;
+        if (g_triggers.consumeToFStartDue(now32, pending_seq)) {
+            if (g_tof.isRanging()) {
+                g_tof.noteOverrun();
+                g_error_flags |= kErrorTofRangingOverrun;
+            } else if (!g_tof.startRanging(pending_seq, now64)) {
+                g_error_flags |= kErrorTofI2cFailure;
+            }
+        }
+        ToFSamplePayload tof_sample;
+        if (g_tof.poll(tof_sample, now64)) {
+            sendToFSample(tof_sample);
+        }
     }
 
     if (now64 >= g_next_health_us) {
