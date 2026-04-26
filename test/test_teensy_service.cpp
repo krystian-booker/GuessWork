@@ -87,7 +87,7 @@ TEST(TeensyService, DisabledEmptySerialPortStartsAndStopsWithoutOpening) {
     EXPECT_EQ(fake.openCount(), 0u);
 }
 
-TEST(TeensyService, PublishesInboundImuAndWheelOdometrySamples) {
+TEST(TeensyService, PublishesInboundImuAndChassisSpeedsSamples) {
     posest::MeasurementBus bus(8);
     posest::teensy::FakeSerialTransport fake;
     auto state = fake.sharedState();
@@ -111,21 +111,23 @@ TEST(TeensyService, PublishesInboundImuAndWheelOdometrySamples) {
     imu_frame.payload = posest::teensy::encodeImuPayload(imu_payload);
     fake.pushReadBytes(posest::teensy::encodeFrame(imu_frame));
 
-    posest::teensy::WheelOdometryPayload odom_payload;
-    odom_payload.teensy_time_us = 20;
-    odom_payload.chassis_delta = {0.1, 0.2, 0.3};
-    odom_payload.wheel_delta_m = {1.0, 2.0, 3.0, 4.0};
+    posest::teensy::ChassisSpeedsPayload chassis_payload;
+    chassis_payload.teensy_time_us = 20;
+    chassis_payload.rio_time_us = 21;
+    chassis_payload.vx_mps = 1.0;
+    chassis_payload.vy_mps = 0.5;
+    chassis_payload.omega_radps = 0.25;
 
-    posest::teensy::Frame odom_frame;
-    odom_frame.type = posest::teensy::MessageType::WheelOdometry;
-    odom_frame.sequence = 1;
-    odom_frame.payload = posest::teensy::encodeWheelOdometryPayload(odom_payload);
-    fake.pushReadBytes(posest::teensy::encodeFrame(odom_frame));
+    posest::teensy::Frame chassis_frame;
+    chassis_frame.type = posest::teensy::MessageType::ChassisSpeeds;
+    chassis_frame.sequence = 1;
+    chassis_frame.payload = posest::teensy::encodeChassisSpeedsPayload(chassis_payload);
+    fake.pushReadBytes(posest::teensy::encodeFrame(chassis_frame));
 
     ASSERT_TRUE(waitFor([&] {
         const auto stats = service.stats();
         return stats.inbound_imu_samples == 1u &&
-               stats.inbound_wheel_odometry_samples == 1u;
+               stats.inbound_chassis_speeds_samples == 1u;
     }));
 
     auto first = bus.take();
@@ -137,52 +139,12 @@ TEST(TeensyService, PublishesInboundImuAndWheelOdometrySamples) {
     EXPECT_DOUBLE_EQ(imu.accel_mps2.y, 2.0);
     EXPECT_NE(imu.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
 
-    const auto& odom = std::get<posest::WheelOdometrySample>(*second);
-    EXPECT_DOUBLE_EQ(odom.chassis_delta.theta_rad, 0.3);
-    ASSERT_EQ(odom.wheel_delta_m.size(), 4u);
-    EXPECT_DOUBLE_EQ(odom.wheel_delta_m[3], 4.0);
-
-    service.stop();
-}
-
-TEST(TeensyService, PublishesInboundRobotOdometrySamples) {
-    posest::MeasurementBus bus(8);
-    posest::teensy::FakeSerialTransport fake;
-    auto state = fake.sharedState();
-    posest::teensy::TeensyService service(
-        fastConfig(),
-        {},
-        bus,
-        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); });
-
-    service.start();
-    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
-
-    posest::teensy::RobotOdometryPayload payload;
-    payload.teensy_time_us = 100;
-    payload.rio_time_us = 200;
-    payload.field_to_robot = {1.0, 2.0, 3.0};
-    payload.status_flags = posest::teensy::kStatusRobotSlipping;
-    pushEncodedFrame(
-        fake,
-        posest::teensy::MessageType::RobotOdometry,
-        0,
-        posest::teensy::encodeRobotOdometryPayload(payload));
-
-    ASSERT_TRUE(waitFor([&] {
-        return service.stats().inbound_robot_odometry_samples == 1u;
-    }));
-
-    auto measurement = bus.take();
-    ASSERT_TRUE(measurement.has_value());
-    ASSERT_TRUE(std::holds_alternative<posest::RobotOdometrySample>(*measurement));
-    const auto& odom = std::get<posest::RobotOdometrySample>(*measurement);
-    EXPECT_DOUBLE_EQ(odom.field_to_robot.x_m, 1.0);
-    EXPECT_DOUBLE_EQ(odom.field_to_robot.y_m, 2.0);
-    EXPECT_DOUBLE_EQ(odom.field_to_robot.theta_rad, 3.0);
-    EXPECT_EQ(odom.rio_time_us, 200u);
-    EXPECT_NE(odom.status_flags & posest::teensy::kStatusRobotSlipping, 0u);
-    EXPECT_NE(odom.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
+    const auto& chassis = std::get<posest::ChassisSpeedsSample>(*second);
+    EXPECT_DOUBLE_EQ(chassis.vx_mps, 1.0);
+    EXPECT_DOUBLE_EQ(chassis.vy_mps, 0.5);
+    EXPECT_DOUBLE_EQ(chassis.omega_radps, 0.25);
+    EXPECT_EQ(chassis.rio_time_us, 21u);
+    EXPECT_NE(chassis.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
 
     service.stop();
 }
@@ -302,8 +264,8 @@ TEST(TeensyService, CountsInboundDropsWhenMeasurementBusIsFull) {
 
 TEST(TeensyService, HandlesSustainedOneKilohertzImuTraffic) {
     constexpr std::size_t kImuSamples = 100;
-    constexpr std::size_t kRobotOdometrySamples = 10;
-    constexpr std::size_t kExpectedSamples = kImuSamples + kRobotOdometrySamples;
+    constexpr std::size_t kChassisSpeedsSamples = 10;
+    constexpr std::size_t kExpectedSamples = kImuSamples + kChassisSpeedsSamples;
 
     posest::MeasurementBus bus(256);
     posest::teensy::FakeSerialTransport fake;
@@ -346,18 +308,17 @@ TEST(TeensyService, HandlesSustainedOneKilohertzImuTraffic) {
                 posest::teensy::encodeImuPayload(imu));
 
             if (i % 10u == 0u) {
-                posest::teensy::RobotOdometryPayload odom;
-                odom.teensy_time_us = static_cast<std::uint64_t>(i * 1000u);
-                odom.rio_time_us = static_cast<std::uint64_t>(i * 1000u + 100u);
-                odom.field_to_robot = {
-                    static_cast<double>(i) * 0.01,
-                    static_cast<double>(i) * 0.02,
-                    static_cast<double>(i) * 0.001};
+                posest::teensy::ChassisSpeedsPayload chassis;
+                chassis.teensy_time_us = static_cast<std::uint64_t>(i * 1000u);
+                chassis.rio_time_us = static_cast<std::uint64_t>(i * 1000u + 100u);
+                chassis.vx_mps = static_cast<double>(i) * 0.01;
+                chassis.vy_mps = static_cast<double>(i) * 0.02;
+                chassis.omega_radps = static_cast<double>(i) * 0.001;
                 pushEncodedFrame(
                     fake,
-                    posest::teensy::MessageType::RobotOdometry,
+                    posest::teensy::MessageType::ChassisSpeeds,
                     sequence++,
-                    posest::teensy::encodeRobotOdometryPayload(odom));
+                    posest::teensy::encodeChassisSpeedsPayload(chassis));
             }
 
             next_sample_time += 1ms;
@@ -369,7 +330,7 @@ TEST(TeensyService, HandlesSustainedOneKilohertzImuTraffic) {
     const bool completed = waitFor([&] {
         const auto stats = service.stats();
         return stats.inbound_imu_samples == kImuSamples &&
-               stats.inbound_robot_odometry_samples == kRobotOdometrySamples;
+               stats.inbound_chassis_speeds_samples == kChassisSpeedsSamples;
     }, 2s);
 
     service.stop();
@@ -496,26 +457,28 @@ TEST(TeensyService, TimeSyncResponseEstablishesClockOffset) {
 
     ASSERT_TRUE(waitFor([&] { return service.stats().time_sync_established; }));
 
-    posest::teensy::RobotOdometryPayload odom_payload;
-    odom_payload.teensy_time_us = response.teensy_transmit_time_us;
-    odom_payload.rio_time_us = 1234;
-    odom_payload.field_to_robot = {4.0, 5.0, 6.0};
+    posest::teensy::ChassisSpeedsPayload chassis_payload;
+    chassis_payload.teensy_time_us = response.teensy_transmit_time_us;
+    chassis_payload.rio_time_us = 1234;
+    chassis_payload.vx_mps = 4.0;
+    chassis_payload.vy_mps = 5.0;
+    chassis_payload.omega_radps = 6.0;
     pushEncodedFrame(
         fake,
-        posest::teensy::MessageType::RobotOdometry,
+        posest::teensy::MessageType::ChassisSpeeds,
         1,
-        posest::teensy::encodeRobotOdometryPayload(odom_payload));
+        posest::teensy::encodeChassisSpeedsPayload(chassis_payload));
 
     ASSERT_TRUE(waitFor([&] {
-        return service.stats().inbound_robot_odometry_samples == 1u;
+        return service.stats().inbound_chassis_speeds_samples == 1u;
     }));
     auto measurement = bus.take();
     ASSERT_TRUE(measurement.has_value());
-    ASSERT_TRUE(std::holds_alternative<posest::RobotOdometrySample>(*measurement));
-    const auto& odom = std::get<posest::RobotOdometrySample>(*measurement);
-    EXPECT_EQ(odom.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
-    EXPECT_EQ(odom.rio_time_us, 1234u);
-    EXPECT_DOUBLE_EQ(odom.field_to_robot.theta_rad, 6.0);
+    ASSERT_TRUE(std::holds_alternative<posest::ChassisSpeedsSample>(*measurement));
+    const auto& chassis = std::get<posest::ChassisSpeedsSample>(*measurement);
+    EXPECT_EQ(chassis.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
+    EXPECT_EQ(chassis.rio_time_us, 1234u);
+    EXPECT_DOUBLE_EQ(chassis.omega_radps, 6.0);
 
     service.stop();
 }

@@ -101,11 +101,7 @@ bool CalibrationRecorder::publish(ImuSample sample) {
     return true;
 }
 
-bool CalibrationRecorder::publish(WheelOdometrySample /*sample*/) {
-    return true;
-}
-
-bool CalibrationRecorder::publish(RobotOdometrySample /*sample*/) {
+bool CalibrationRecorder::publish(ChassisSpeedsSample /*sample*/) {
     return true;
 }
 

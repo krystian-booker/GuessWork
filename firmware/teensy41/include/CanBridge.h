@@ -21,7 +21,7 @@ struct CanBusConfig {
     std::uint32_t data_bitrate_bps{2'000'000};
     std::uint32_t pose_publish_hz{100};
     std::uint64_t rio_offset_stale_us{1'000'000};
-    std::uint32_t rio_pose_can_id{0x100};
+    std::uint32_t rio_chassis_speeds_can_id{0x100};
     std::uint32_t rio_time_sync_can_id{0x101};
     std::uint32_t teensy_pose_can_id{0x180};
 };
@@ -37,14 +37,14 @@ struct CanBridgeStats {
     bool rio_offset_valid{false};
     std::int64_t rio_offset_us{0};
     std::uint64_t last_rio_offset_time_us{0};
-    std::uint32_t pending_robot_odometry{0};
+    std::uint32_t pending_chassis_speeds{0};
     std::uint32_t status_flags{0};
 };
 
-// Buffered RobotOdometry frames waiting to be written to USB by the main loop.
+// Buffered ChassisSpeeds frames waiting to be written to USB by the main loop.
 class CanBridge final {
 public:
-    static constexpr std::size_t kPendingOdometryCapacity = 8;
+    static constexpr std::size_t kPendingChassisSpeedsCapacity = 8;
 
     void begin(const CanBusConfig& config = CanBusConfig{});
     // Drives RX decode + periodic FusedPose TX. Call once per loop iteration.
@@ -60,8 +60,8 @@ public:
         status_flags_ |= kCanFrameTruncated;
     }
 
-    // True iff a RobotOdometry payload is queued for USB transmit.
-    bool popPendingRobotOdometry(RobotOdometryPayload& out);
+    // True iff a ChassisSpeeds payload is queued for USB transmit.
+    bool popPendingChassisSpeeds(ChassisSpeedsPayload& out);
 
     bool hasLatestPose() const { return has_latest_pose_; }
     const FusedPosePayload& latestPose() const { return latest_pose_; }
@@ -79,10 +79,11 @@ private:
                        const std::uint8_t* data,
                        std::size_t length,
                        std::uint64_t now_us);
-    void handleRioPose(const std::uint8_t* data, std::size_t length, std::uint64_t now_us);
+    void handleRioChassisSpeeds(const std::uint8_t* data, std::size_t length,
+                                std::uint64_t now_us);
     void handleRioTimeSync(const std::uint8_t* data, std::size_t length,
                             std::uint64_t now_us);
-    void enqueuePendingRobotOdometry(const RobotOdometryPayload& payload);
+    void enqueuePendingChassisSpeeds(const ChassisSpeedsPayload& payload);
     void maybeSendFusedPose(std::uint64_t now_us);
     bool transmitTeensyPose(const FusedPosePayload& pose, std::uint64_t now_us);
 
@@ -95,7 +96,7 @@ private:
     std::uint32_t received_fused_poses_{0};
     std::uint32_t unsupported_can_tx_frames_{0};
 
-    RobotOdometryPayload pending_odometry_[kPendingOdometryCapacity]{};
+    ChassisSpeedsPayload pending_chassis_speeds_[kPendingChassisSpeedsCapacity]{};
     std::size_t pending_head_{0};
     std::size_t pending_count_{0};
 

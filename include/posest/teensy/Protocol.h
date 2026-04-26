@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <array>
 #include <vector>
 
 #include "posest/MeasurementTypes.h"
@@ -11,7 +10,7 @@
 namespace posest::teensy {
 
 constexpr std::uint16_t kFrameMagic = 0x4757;  // "GW"
-constexpr std::uint8_t kProtocolVersion = 1;
+constexpr std::uint8_t kProtocolVersion = 2;
 constexpr std::uint32_t kStatusUnsynchronizedTime = 1u << 0u;
 constexpr std::uint32_t kStatusUnsynchronizedRioTime = 1u << 1u;
 constexpr std::uint32_t kStatusRobotSlipping = 1u << 2u;
@@ -24,13 +23,14 @@ constexpr std::uint32_t kHealthRioPingRejected = 1u << 1u;
 
 enum class MessageType : std::uint8_t {
     ImuSample = 1,
-    WheelOdometry = 2,
+    // Reserved (was WheelOdometry) = 2,
     CanRx = 3,
     TeensyHealth = 4,
     TimeSyncResponse = 5,
-    RobotOdometry = 6,
+    // Reserved (was RobotOdometry) = 6,
     CameraTriggerEvent = 7,
     ConfigAck = 8,
+    ChassisSpeeds = 9,
     FusedPose = 64,
     CanTx = 65,
     TimeSyncRequest = 66,
@@ -66,17 +66,12 @@ struct ImuPayload {
     std::uint32_t status_flags{0};
 };
 
-struct WheelOdometryPayload {
-    std::uint64_t teensy_time_us{0};
-    Pose2d chassis_delta;
-    std::array<double, 4> wheel_delta_m{};
-    std::uint32_t status_flags{0};
-};
-
-struct RobotOdometryPayload {
+struct ChassisSpeedsPayload {
     std::uint64_t teensy_time_us{0};
     std::uint64_t rio_time_us{0};
-    Pose2d field_to_robot;
+    double vx_mps{0.0};
+    double vy_mps{0.0};
+    double omega_radps{0.0};
     std::uint32_t status_flags{0};
 };
 
@@ -135,7 +130,7 @@ struct ConfigAckPayload {
 };
 
 struct ImuConfigPayload {
-    std::uint32_t accel_range_g{12};
+    std::uint32_t accel_range_g{24};
     std::uint32_t accel_odr_hz{1000};
     std::uint32_t accel_bandwidth_code{2};
     std::uint32_t gyro_range_dps{2000};
@@ -162,13 +157,9 @@ std::optional<DecodeResult> decodeFrame(const std::vector<std::uint8_t>& bytes);
 std::vector<std::uint8_t> encodeImuPayload(const ImuPayload& payload);
 std::optional<ImuPayload> decodeImuPayload(const std::vector<std::uint8_t>& bytes);
 
-std::vector<std::uint8_t> encodeWheelOdometryPayload(const WheelOdometryPayload& payload);
-std::optional<WheelOdometryPayload> decodeWheelOdometryPayload(
-    const std::vector<std::uint8_t>& bytes);
-
-std::vector<std::uint8_t> encodeRobotOdometryPayload(
-    const RobotOdometryPayload& payload);
-std::optional<RobotOdometryPayload> decodeRobotOdometryPayload(
+std::vector<std::uint8_t> encodeChassisSpeedsPayload(
+    const ChassisSpeedsPayload& payload);
+std::optional<ChassisSpeedsPayload> decodeChassisSpeedsPayload(
     const std::vector<std::uint8_t>& bytes);
 
 std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload);

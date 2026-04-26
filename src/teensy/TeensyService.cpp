@@ -275,49 +275,19 @@ void TeensyService::handleFrame(const Frame& frame) {
             }
             break;
         }
-        case MessageType::WheelOdometry: {
-            const auto decoded = decodeWheelOdometryPayload(frame.payload);
+        case MessageType::ChassisSpeeds: {
+            const auto decoded = decodeChassisSpeedsPayload(frame.payload);
             if (!decoded) {
                 std::lock_guard<std::mutex> g(mu_);
                 ++stats_.invalid_payloads;
                 return;
             }
 
-            WheelOdometrySample sample;
+            ChassisSpeedsSample sample;
             sample.timestamp = timestampFromTeensyTime(decoded->teensy_time_us, now);
-            sample.chassis_delta = decoded->chassis_delta;
-            sample.wheel_delta_m.assign(
-                decoded->wheel_delta_m.begin(),
-                decoded->wheel_delta_m.end());
-            sample.status_flags = decoded->status_flags;
-            bool time_sync_established = false;
-            {
-                std::lock_guard<std::mutex> g(mu_);
-                time_sync_established = stats_.time_sync_established;
-            }
-            if (!time_sync_established) {
-                sample.status_flags |= kStatusUnsynchronizedTime;
-            }
-            const bool published = measurement_sink_.publish(sample);
-            std::lock_guard<std::mutex> g(mu_);
-            if (published) {
-                ++stats_.inbound_wheel_odometry_samples;
-            } else {
-                ++stats_.inbound_measurements_dropped;
-            }
-            break;
-        }
-        case MessageType::RobotOdometry: {
-            const auto decoded = decodeRobotOdometryPayload(frame.payload);
-            if (!decoded) {
-                std::lock_guard<std::mutex> g(mu_);
-                ++stats_.invalid_payloads;
-                return;
-            }
-
-            RobotOdometrySample sample;
-            sample.timestamp = timestampFromTeensyTime(decoded->teensy_time_us, now);
-            sample.field_to_robot = decoded->field_to_robot;
+            sample.vx_mps = decoded->vx_mps;
+            sample.vy_mps = decoded->vy_mps;
+            sample.omega_radps = decoded->omega_radps;
             sample.rio_time_us = decoded->rio_time_us;
             sample.status_flags = decoded->status_flags;
             bool time_sync_established = false;
@@ -331,7 +301,7 @@ void TeensyService::handleFrame(const Frame& frame) {
             const bool published = measurement_sink_.publish(sample);
             std::lock_guard<std::mutex> g(mu_);
             if (published) {
-                ++stats_.inbound_robot_odometry_samples;
+                ++stats_.inbound_chassis_speeds_samples;
             } else {
                 ++stats_.inbound_measurements_dropped;
             }

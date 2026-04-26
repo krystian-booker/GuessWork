@@ -59,9 +59,22 @@ posest::AprilTagObservation makePriorObservation(
     return observation;
 }
 
+posest::ChassisSpeedsSample makeChassis(
+    posest::Timestamp timestamp,
+    double vx_mps = 0.0,
+    double vy_mps = 0.0,
+    double omega_radps = 0.0) {
+    posest::ChassisSpeedsSample sample;
+    sample.timestamp = timestamp;
+    sample.vx_mps = vx_mps;
+    sample.vy_mps = vy_mps;
+    sample.omega_radps = omega_radps;
+    return sample;
+}
+
 }  // namespace
 
-TEST(FusionService, ProcessesWheelOdometryWithGtsamAndPublishesEstimate) {
+TEST(FusionService, ProcessesChassisSpeedsWithGtsamAndPublishesEstimate) {
     posest::MeasurementBus bus(8);
     posest::fusion::FusionService fusion(bus);
     auto sink = std::make_shared<RecordingSink>();
@@ -69,16 +82,17 @@ TEST(FusionService, ProcessesWheelOdometryWithGtsamAndPublishesEstimate) {
 
     fusion.start();
 
-    posest::WheelOdometrySample odom;
-    odom.timestamp = std::chrono::steady_clock::now();
-    odom.chassis_delta.x_m = 1.5;
-    ASSERT_TRUE(bus.publish(odom));
+    const auto t0 = std::chrono::steady_clock::now();
+    // Bootstrap at the origin.
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    // 5.0 m/s for 300 ms → x = 1.5 m. Δt stays under max_chassis_dt_seconds.
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 300ms, 5.0)));
 
-    std::this_thread::sleep_for(50ms);
+    std::this_thread::sleep_for(100ms);
     fusion.stop();
 
     const auto stats = fusion.stats();
-    EXPECT_EQ(stats.measurements_processed, 1u);
+    EXPECT_EQ(stats.measurements_processed, 2u);
     EXPECT_EQ(stats.stale_measurements, 0u);
 
     const auto latest = fusion.latestEstimate();
@@ -87,9 +101,10 @@ TEST(FusionService, ProcessesWheelOdometryWithGtsamAndPublishesEstimate) {
     EXPECT_NEAR(latest->field_to_robot.y_m, 0.0, 1e-6);
     EXPECT_TRUE(covarianceIsFinite(*latest));
     EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusVisionUnavailable, 0u);
+    EXPECT_EQ(latest->status_flags & posest::fusion::kFusionStatusShockInflated, 0u);
 
     std::lock_guard<std::mutex> g(sink->mu);
-    ASSERT_EQ(sink->estimates.size(), 1u);
+    EXPECT_GE(sink->estimates.size(), 2u);
 }
 
 TEST(FusionService, UsesAggregatedAprilTagPoseAsSinglePrior) {
@@ -144,22 +159,21 @@ TEST(FusionService, MarksVisionUnavailableForEmptyTagObservationAfterInitializat
     fusion.start();
 
     const auto now = std::chrono::steady_clock::now();
-    posest::WheelOdometrySample odom;
-    odom.timestamp = now;
-    odom.chassis_delta.x_m = 1.0;
-    ASSERT_TRUE(bus.publish(odom));
+    ASSERT_TRUE(bus.publish(makeChassis(now)));
+    // 1.0 m/s for 100 ms → x = 0.1 m.
+    ASSERT_TRUE(bus.publish(makeChassis(now + 100ms, 1.0)));
 
     posest::AprilTagObservation observation;
     observation.camera_id = "cam0";
-    observation.capture_time = now + 1ms;
+    observation.capture_time = now + 200ms;
     ASSERT_TRUE(bus.publish(observation));
 
-    std::this_thread::sleep_for(50ms);
+    std::this_thread::sleep_for(100ms);
     fusion.stop();
 
     const auto latest = fusion.latestEstimate();
     ASSERT_TRUE(latest.has_value());
-    EXPECT_NEAR(latest->field_to_robot.x_m, 1.0, 1e-6);
+    EXPECT_NEAR(latest->field_to_robot.x_m, 0.1, 1e-6);
     EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusVisionUnavailable, 0u);
 }
 
@@ -168,9 +182,10 @@ TEST(FusionService, IgnoresUnsupportedMeasurements) {
     posest::fusion::FusionService fusion(bus);
     fusion.start();
 
-    posest::ImuSample imu;
-    imu.timestamp = std::chrono::steady_clock::now();
-    ASSERT_TRUE(bus.publish(imu));
+    // VIO is currently not consumed by FusionService; it should be dropped.
+    posest::VioMeasurement vio;
+    vio.timestamp = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(vio));
 
     std::this_thread::sleep_for(20ms);
     fusion.stop();
@@ -181,19 +196,14 @@ TEST(FusionService, IgnoresUnsupportedMeasurements) {
     EXPECT_FALSE(fusion.latestEstimate().has_value());
 }
 
-TEST(FusionService, RejectsStaleMeasurements) {
+TEST(FusionService, RejectsStaleChassisSpeedsMeasurements) {
     posest::MeasurementBus bus(8);
     posest::fusion::FusionService fusion(bus);
     fusion.start();
 
     const auto now = std::chrono::steady_clock::now();
-    posest::WheelOdometrySample newer;
-    newer.timestamp = now;
-    posest::WheelOdometrySample older;
-    older.timestamp = now - 1ms;
-
-    ASSERT_TRUE(bus.publish(newer));
-    ASSERT_TRUE(bus.publish(older));
+    ASSERT_TRUE(bus.publish(makeChassis(now)));
+    ASSERT_TRUE(bus.publish(makeChassis(now - 1ms)));
 
     std::this_thread::sleep_for(50ms);
     fusion.stop();
@@ -201,6 +211,100 @@ TEST(FusionService, RejectsStaleMeasurements) {
     const auto stats = fusion.stats();
     EXPECT_EQ(stats.measurements_processed, 1u);
     EXPECT_EQ(stats.stale_measurements, 1u);
+}
+
+TEST(FusionService, InflatesCovarianceOnImuShock) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    // Bootstrap.
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+
+    // ImuSample with |a - g| ≈ 70 m/s², well above the 50 m/s² threshold.
+    posest::ImuSample shock;
+    shock.timestamp = t0 + 30ms;
+    shock.accel_mps2 = {0.0, 0.0, 80.0};
+    ASSERT_TRUE(bus.publish(shock));
+
+    // ChassisSpeeds within the 50 ms window so the shock counts.
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 40ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusShockInflated, 0u);
+}
+
+TEST(FusionService, InflatesCovarianceOnFreefall) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+
+    // |a| ≈ 0.5 m/s² — below the 3 m/s² free-fall threshold.
+    posest::ImuSample airborne;
+    airborne.timestamp = t0 + 30ms;
+    airborne.accel_mps2 = {0.0, 0.0, 0.5};
+    ASSERT_TRUE(bus.publish(airborne));
+
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 40ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusShockInflated, 0u);
+}
+
+TEST(FusionService, DoesNotInflateCovarianceBelowThreshold) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+
+    // Normal driving: |a| ≈ 11 m/s², |a - g| ≈ 1.2 m/s². Neither branch fires.
+    posest::ImuSample steady;
+    steady.timestamp = t0 + 30ms;
+    steady.accel_mps2 = {0.0, 0.0, 11.0};
+    ASSERT_TRUE(bus.publish(steady));
+
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 40ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->status_flags & posest::fusion::kFusionStatusShockInflated, 0u);
+}
+
+TEST(FusionService, SkipsFactorOnLargeChassisGap) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    // Δt = 600 ms exceeds max_chassis_dt_seconds (default 0.5 s).
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 600ms, 5.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto latest = fusion.latestEstimate();
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_NE(latest->status_flags & posest::fusion::kFusionStatusChassisGap, 0u);
+    // Pose stayed at origin because the BetweenFactor was skipped.
+    EXPECT_NEAR(latest->field_to_robot.x_m, 0.0, 1e-6);
 }
 
 TEST(FusionConfig, BuildFusionConfigIgnoresRuntimeConfig) {
@@ -211,6 +315,6 @@ TEST(FusionConfig, BuildFusionConfigIgnoresRuntimeConfig) {
         .active = true,
     });
     const auto config = posest::fusion::buildFusionConfig(runtime_config);
-    EXPECT_GT(config.wheel_sigmas[0], 0.0);
+    EXPECT_GT(config.chassis_sigmas[0], 0.0);
     EXPECT_GT(config.origin_prior_sigmas[0], 0.0);
 }

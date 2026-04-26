@@ -1,6 +1,8 @@
 #include "posest/fusion/FusionService.h"
 
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -28,6 +30,10 @@ Timestamp timestampOf(const Measurement& measurement) {
         measurement);
 }
 
+double secondsBetween(Timestamp earlier, Timestamp later) {
+    return std::chrono::duration<double>(later - earlier).count();
+}
+
 gtsam::Pose3 toGtsamPose(const Pose3d& pose) {
     return gtsam::Pose3(
         gtsam::Rot3::RzRyRx(
@@ -38,12 +44,6 @@ gtsam::Pose3 toGtsamPose(const Pose3d& pose) {
             pose.translation_m.x,
             pose.translation_m.y,
             pose.translation_m.z));
-}
-
-gtsam::Pose3 toPlanarPose(const Pose2d& pose) {
-    return gtsam::Pose3(
-        gtsam::Rot3::RzRyRx(0.0, 0.0, pose.theta_rad),
-        gtsam::Point3(pose.x_m, pose.y_m, 0.0));
 }
 
 Pose2d toPose2d(const gtsam::Pose3& pose) {
@@ -68,10 +68,16 @@ gtsam::Key poseKey(std::uint64_t index) {
 
 }  // namespace
 
+struct ImuShockSample {
+    Timestamp timestamp{};
+    double abs_accel{0.0};
+    double accel_minus_g{0.0};
+};
+
 struct FusionBackend {
     explicit FusionBackend(FusionConfig config)
         : config_(std::move(config)),
-          wheel_noise_(diagonalNoise(config_.wheel_sigmas)),
+          chassis_noise_(diagonalNoise(config_.chassis_sigmas)),
           origin_prior_noise_(diagonalNoise(config_.origin_prior_sigmas)) {
         gtsam::ISAM2Params params;
         params.relinearizeThreshold = 0.01;
@@ -79,42 +85,81 @@ struct FusionBackend {
         isam_ = gtsam::ISAM2(params);
     }
 
-    std::optional<FusedPoseEstimate> addWheel(
-        const WheelOdometrySample& sample,
+    void addImu(const ImuSample& sample) {
+        const double dx = sample.accel_mps2.x - config_.gravity_local_mps2.x;
+        const double dy = sample.accel_mps2.y - config_.gravity_local_mps2.y;
+        const double dz = sample.accel_mps2.z - config_.gravity_local_mps2.z;
+        ImuShockSample entry;
+        entry.timestamp = sample.timestamp;
+        entry.abs_accel = std::sqrt(
+            sample.accel_mps2.x * sample.accel_mps2.x +
+            sample.accel_mps2.y * sample.accel_mps2.y +
+            sample.accel_mps2.z * sample.accel_mps2.z);
+        entry.accel_minus_g = std::sqrt(dx * dx + dy * dy + dz * dz);
+        imu_window_.push_back(entry);
+        pruneImuWindow(sample.timestamp);
+    }
+
+    std::optional<FusedPoseEstimate> addChassisSpeeds(
+        const ChassisSpeedsSample& sample,
         Timestamp timestamp) {
         std::uint32_t status_flags = kFusionStatusVisionUnavailable;
         if (sample.status_flags != 0u) {
             status_flags |= kFusionStatusDegradedInput;
         }
 
-        gtsam::NonlinearFactorGraph graph;
-        gtsam::Values initial_values;
-        const gtsam::Pose3 delta = toPlanarPose(sample.chassis_delta);
-
-        std::uint64_t next_index = 0;
-        gtsam::Key next_key = poseKey(0);
         if (!initialized_) {
+            // Bootstrap: anchor x0 at identity; no relative motion factor yet.
+            gtsam::NonlinearFactorGraph graph;
+            gtsam::Values initial_values;
             const gtsam::Pose3 origin;
             const gtsam::Key origin_key = poseKey(0);
-            next_index = 1;
-            next_key = poseKey(next_index);
             graph.add(gtsam::PriorFactor<gtsam::Pose3>(
                 origin_key, origin, origin_prior_noise_));
-            graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                origin_key, next_key, delta, wheel_noise_));
             initial_values.insert(origin_key, origin);
-            initial_values.insert(next_key, origin.compose(delta));
-        } else {
-            next_index = current_index_ + 1u;
-            next_key = poseKey(next_index);
-            graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                current_key_, next_key, delta, wheel_noise_));
-            initial_values.insert(next_key, current_pose_.compose(delta));
+            if (!update(graph, initial_values, origin_key, 0)) {
+                return std::nullopt;
+            }
+            last_chassis_time_ = timestamp;
+            return makeEstimate(origin_key, timestamp, status_flags);
         }
+
+        const double dt = secondsBetween(*last_chassis_time_, timestamp);
+        if (dt <= 0.0 || dt > config_.max_chassis_dt_seconds) {
+            // Skip the BetweenFactor; resync the cursor so the next sample
+            // integrates a sensible Δt instead of compounding the gap.
+            last_chassis_time_ = timestamp;
+            return estimateFromCurrent(timestamp, status_flags | kFusionStatusChassisGap);
+        }
+
+        const bool inflated = detectShockOrFreefall(timestamp);
+        gtsam::SharedNoiseModel step_noise = chassis_noise_;
+        if (inflated) {
+            std::array<double, 6> sigmas = config_.chassis_sigmas;
+            for (auto& sigma : sigmas) {
+                sigma *= config_.shock_inflation_factor;
+            }
+            step_noise = diagonalNoise(sigmas);
+            status_flags |= kFusionStatusShockInflated;
+        }
+
+        const gtsam::Pose3 delta(
+            gtsam::Rot3::Rz(sample.omega_radps * dt),
+            gtsam::Point3(sample.vx_mps * dt, sample.vy_mps * dt, 0.0));
+
+        const std::uint64_t next_index = current_index_ + 1u;
+        const gtsam::Key next_key = poseKey(next_index);
+
+        gtsam::NonlinearFactorGraph graph;
+        gtsam::Values initial_values;
+        graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+            current_key_, next_key, delta, step_noise));
+        initial_values.insert(next_key, current_pose_.compose(delta));
 
         if (!update(graph, initial_values, next_key, next_index)) {
             return estimateFromCurrent(timestamp, status_flags | kFusionStatusOptimizerError);
         }
+        last_chassis_time_ = timestamp;
         return makeEstimate(next_key, timestamp, status_flags);
     }
 
@@ -218,8 +263,28 @@ private:
         return estimate;
     }
 
+    void pruneImuWindow(Timestamp now) {
+        const auto window =
+            std::chrono::duration_cast<Timestamp::duration>(
+                std::chrono::duration<double>(config_.imu_window_seconds));
+        while (!imu_window_.empty() && imu_window_.front().timestamp + window < now) {
+            imu_window_.pop_front();
+        }
+    }
+
+    bool detectShockOrFreefall(Timestamp window_end) {
+        pruneImuWindow(window_end);
+        for (const auto& entry : imu_window_) {
+            if (entry.accel_minus_g > config_.shock_threshold_mps2 ||
+                entry.abs_accel < config_.freefall_threshold_mps2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     FusionConfig config_;
-    gtsam::SharedNoiseModel wheel_noise_;
+    gtsam::SharedNoiseModel chassis_noise_;
     gtsam::SharedNoiseModel origin_prior_noise_;
     gtsam::ISAM2 isam_;
     gtsam::Values estimate_;
@@ -227,6 +292,8 @@ private:
     gtsam::Key current_key_{poseKey(0)};
     std::uint64_t current_index_{0};
     bool initialized_{false};
+    std::optional<Timestamp> last_chassis_time_;
+    std::deque<ImuShockSample> imu_window_;
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& /*runtime_config*/) {
@@ -286,6 +353,16 @@ void FusionService::runLoop() {
 }
 
 void FusionService::process(const Measurement& measurement) {
+    if (const auto* imu = std::get_if<ImuSample>(&measurement)) {
+        // IMU samples feed the shock-detection window only; they don't push
+        // the global out-of-order cursor, since the 1 kHz IMU and ~100 Hz
+        // chassis-speeds streams interleave naturally.
+        backend_->addImu(*imu);
+        std::lock_guard<std::mutex> g(mu_);
+        ++stats_.measurements_processed;
+        return;
+    }
+
     if (!isSupportedMeasurement(measurement)) {
         return;
     }
@@ -296,8 +373,8 @@ void FusionService::process(const Measurement& measurement) {
     }
 
     std::optional<FusedPoseEstimate> estimate;
-    if (const auto* odom = std::get_if<WheelOdometrySample>(&measurement)) {
-        estimate = backend_->addWheel(*odom, measurement_time);
+    if (const auto* chassis = std::get_if<ChassisSpeedsSample>(&measurement)) {
+        estimate = backend_->addChassisSpeeds(*chassis, measurement_time);
     } else if (const auto* tags = std::get_if<AprilTagObservation>(&measurement)) {
         estimate = backend_->addAprilTags(*tags, measurement_time);
     }
@@ -308,7 +385,7 @@ void FusionService::process(const Measurement& measurement) {
 }
 
 bool FusionService::isSupportedMeasurement(const Measurement& measurement) const {
-    return std::holds_alternative<WheelOdometrySample>(measurement) ||
+    return std::holds_alternative<ChassisSpeedsSample>(measurement) ||
            std::holds_alternative<AprilTagObservation>(measurement);
 }
 

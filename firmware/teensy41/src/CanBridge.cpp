@@ -21,7 +21,8 @@ FlexCAN_T4FD<CAN3, RX_SIZE_64, TX_SIZE_32> g_can_bus;
 
 #endif  // POSEST_HAS_FLEXCAN_T4
 
-constexpr std::size_t kPoseFrameSize = can_schema::kRioPosePayloadBytes;
+constexpr std::size_t kChassisSpeedsFrameSize =
+    can_schema::kRioChassisSpeedsPayloadBytes;
 constexpr std::size_t kTimeSyncFrameSize = can_schema::kRioTimeSyncPayloadBytes;
 
 void writeFusedPoseFrame(
@@ -116,13 +117,13 @@ void CanBridge::handleRxFrame(
     const std::uint8_t* data,
     std::size_t length,
     std::uint64_t now_us) {
-    if (can_id == config_.rio_pose_can_id) {
-        if (length < can_schema::kRioPoseStatusOffset + 4u) {
+    if (can_id == config_.rio_chassis_speeds_can_id) {
+        if (length < can_schema::kRioChassisSpeedsStatusOffset + 4u) {
             ++rx_decode_failures_;
             status_flags_ |= kCanFrameTruncated;
             return;
         }
-        handleRioPose(data, length, now_us);
+        handleRioChassisSpeeds(data, length, now_us);
         return;
     }
     if (can_id == config_.rio_time_sync_can_id) {
@@ -137,23 +138,23 @@ void CanBridge::handleRxFrame(
     // Unknown ID — ignore quietly. This is normal on a shared bus.
 }
 
-void CanBridge::handleRioPose(
+void CanBridge::handleRioChassisSpeeds(
     const std::uint8_t* data,
     std::size_t /*length*/,
     std::uint64_t now_us) {
-    RobotOdometryPayload payload;
+    ChassisSpeedsPayload payload;
     payload.teensy_time_us = now_us;
     payload.rio_time_us = static_cast<std::uint64_t>(
-        readI64(data, can_schema::kRioPoseRioTimeOffset));
-    payload.field_to_robot.x_m = readDouble(data, can_schema::kRioPoseXOffset);
-    payload.field_to_robot.y_m = readDouble(data, can_schema::kRioPoseYOffset);
-    payload.field_to_robot.theta_rad =
-        readDouble(data, can_schema::kRioPoseThetaOffset);
-    payload.status_flags = readU32(data, can_schema::kRioPoseStatusOffset);
+        readI64(data, can_schema::kRioChassisSpeedsRioTimeOffset));
+    payload.vx_mps = readDouble(data, can_schema::kRioChassisSpeedsVxOffset);
+    payload.vy_mps = readDouble(data, can_schema::kRioChassisSpeedsVyOffset);
+    payload.omega_radps =
+        readDouble(data, can_schema::kRioChassisSpeedsOmegaOffset);
+    payload.status_flags = readU32(data, can_schema::kRioChassisSpeedsStatusOffset);
     if (!rio_offset_valid_) {
         payload.status_flags |= kStatusUnsynchronizedRioTime;
     }
-    enqueuePendingRobotOdometry(payload);
+    enqueuePendingChassisSpeeds(payload);
 }
 
 void CanBridge::handleRioTimeSync(
@@ -190,26 +191,26 @@ void CanBridge::handleRioTimeSync(
     }
 }
 
-void CanBridge::enqueuePendingRobotOdometry(const RobotOdometryPayload& payload) {
-    if (pending_count_ >= kPendingOdometryCapacity) {
+void CanBridge::enqueuePendingChassisSpeeds(const ChassisSpeedsPayload& payload) {
+    if (pending_count_ >= kPendingChassisSpeedsCapacity) {
         ++rx_decode_failures_;
         status_flags_ |= kCanRxOverrun;
         // Drop oldest to keep the freshest measurement.
-        pending_head_ = (pending_head_ + 1u) % kPendingOdometryCapacity;
+        pending_head_ = (pending_head_ + 1u) % kPendingChassisSpeedsCapacity;
         --pending_count_;
     }
     const std::size_t tail =
-        (pending_head_ + pending_count_) % kPendingOdometryCapacity;
-    pending_odometry_[tail] = payload;
+        (pending_head_ + pending_count_) % kPendingChassisSpeedsCapacity;
+    pending_chassis_speeds_[tail] = payload;
     ++pending_count_;
 }
 
-bool CanBridge::popPendingRobotOdometry(RobotOdometryPayload& out) {
+bool CanBridge::popPendingChassisSpeeds(ChassisSpeedsPayload& out) {
     if (pending_count_ == 0u) {
         return false;
     }
-    out = pending_odometry_[pending_head_];
-    pending_head_ = (pending_head_ + 1u) % kPendingOdometryCapacity;
+    out = pending_chassis_speeds_[pending_head_];
+    pending_head_ = (pending_head_ + 1u) % kPendingChassisSpeedsCapacity;
     --pending_count_;
     return true;
 }
@@ -275,7 +276,7 @@ CanBridgeStats CanBridge::stats() const {
     out.rio_offset_valid = rio_offset_valid_;
     out.rio_offset_us = rio_offset_us_ema_;
     out.last_rio_offset_time_us = last_rio_offset_time_us_;
-    out.pending_robot_odometry = static_cast<std::uint32_t>(pending_count_);
+    out.pending_chassis_speeds = static_cast<std::uint32_t>(pending_count_);
     out.status_flags = status_flags_;
     return out;
 }

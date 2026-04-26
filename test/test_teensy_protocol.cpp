@@ -75,42 +75,33 @@ TEST(TeensyProtocol, ImuPayloadRoundTrips) {
     EXPECT_EQ(decoded->status_flags, 0xA5u);
 }
 
-TEST(TeensyProtocol, WheelOdometryPayloadRoundTrips) {
-    posest::teensy::WheelOdometryPayload payload;
-    payload.teensy_time_us = 99;
-    payload.chassis_delta = {1.0, 2.0, 3.0};
-    payload.wheel_delta_m = {0.1, 0.2, 0.3, 0.4};
-    payload.status_flags = 7;
-
-    const auto decoded = posest::teensy::decodeWheelOdometryPayload(
-        posest::teensy::encodeWheelOdometryPayload(payload));
-
-    ASSERT_TRUE(decoded.has_value());
-    EXPECT_EQ(decoded->teensy_time_us, 99u);
-    EXPECT_DOUBLE_EQ(decoded->chassis_delta.theta_rad, 3.0);
-    EXPECT_DOUBLE_EQ(decoded->wheel_delta_m[3], 0.4);
-    EXPECT_EQ(decoded->status_flags, 7u);
-}
-
-TEST(TeensyProtocol, RobotOdometryPayloadRoundTrips) {
-    posest::teensy::RobotOdometryPayload payload;
+TEST(TeensyProtocol, ChassisSpeedsPayloadRoundTrips) {
+    posest::teensy::ChassisSpeedsPayload payload;
     payload.teensy_time_us = 1234;
     payload.rio_time_us = 5678;
-    payload.field_to_robot = {1.0, 2.0, 3.0};
-    payload.status_flags = posest::teensy::kStatusRobotSlipping |
-                           posest::teensy::kStatusUnsynchronizedRioTime;
+    payload.vx_mps = 1.5;
+    payload.vy_mps = -0.25;
+    payload.omega_radps = 0.75;
+    payload.status_flags = posest::teensy::kStatusUnsynchronizedRioTime;
 
-    const auto decoded = posest::teensy::decodeRobotOdometryPayload(
-        posest::teensy::encodeRobotOdometryPayload(payload));
+    const auto bytes = posest::teensy::encodeChassisSpeedsPayload(payload);
+    EXPECT_EQ(bytes.size(), 44u);
+    const auto decoded = posest::teensy::decodeChassisSpeedsPayload(bytes);
 
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded->teensy_time_us, 1234u);
     EXPECT_EQ(decoded->rio_time_us, 5678u);
-    EXPECT_DOUBLE_EQ(decoded->field_to_robot.x_m, 1.0);
-    EXPECT_DOUBLE_EQ(decoded->field_to_robot.y_m, 2.0);
-    EXPECT_DOUBLE_EQ(decoded->field_to_robot.theta_rad, 3.0);
-    EXPECT_NE(decoded->status_flags & posest::teensy::kStatusRobotSlipping, 0u);
+    EXPECT_DOUBLE_EQ(decoded->vx_mps, 1.5);
+    EXPECT_DOUBLE_EQ(decoded->vy_mps, -0.25);
+    EXPECT_DOUBLE_EQ(decoded->omega_radps, 0.75);
     EXPECT_NE(decoded->status_flags & posest::teensy::kStatusUnsynchronizedRioTime, 0u);
+}
+
+TEST(TeensyProtocol, ChassisSpeedsPayloadRejectsWrongSize) {
+    EXPECT_FALSE(posest::teensy::decodeChassisSpeedsPayload(
+        std::vector<std::uint8_t>(43, 0)).has_value());
+    EXPECT_FALSE(posest::teensy::decodeChassisSpeedsPayload(
+        std::vector<std::uint8_t>(45, 0)).has_value());
 }
 
 TEST(TeensyProtocol, CameraTriggerEventPayloadRoundTrips) {
@@ -181,8 +172,7 @@ TEST(TeensyProtocol, TeensyHealthPayloadAcceptsLegacy24ByteForm) {
 
 TEST(TeensyProtocol, RejectsBadPayloadSizes) {
     EXPECT_FALSE(posest::teensy::decodeImuPayload({1, 2, 3}).has_value());
-    EXPECT_FALSE(posest::teensy::decodeWheelOdometryPayload({1, 2, 3}).has_value());
-    EXPECT_FALSE(posest::teensy::decodeRobotOdometryPayload({1, 2, 3}).has_value());
+    EXPECT_FALSE(posest::teensy::decodeChassisSpeedsPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeCameraTriggerEventPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeTimeSyncResponsePayload({1, 2, 3}).has_value());
 }

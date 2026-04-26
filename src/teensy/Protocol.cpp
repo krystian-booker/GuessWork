@@ -172,75 +172,36 @@ std::optional<ImuPayload> decodeImuPayload(const std::vector<std::uint8_t>& byte
     return payload;
 }
 
-std::vector<std::uint8_t> encodeWheelOdometryPayload(
-    const WheelOdometryPayload& payload) {
-    std::vector<std::uint8_t> out;
-    out.reserve(68);
-    appendU64(out, payload.teensy_time_us);
-    appendDouble(out, payload.chassis_delta.x_m);
-    appendDouble(out, payload.chassis_delta.y_m);
-    appendDouble(out, payload.chassis_delta.theta_rad);
-    for (double wheel_delta : payload.wheel_delta_m) {
-        appendDouble(out, wheel_delta);
-    }
-    appendU32(out, payload.status_flags);
-    return out;
-}
-
-std::optional<WheelOdometryPayload> decodeWheelOdometryPayload(
-    const std::vector<std::uint8_t>& bytes) {
-    if (bytes.size() != 68u) {
-        return std::nullopt;
-    }
-
-    WheelOdometryPayload payload;
-    std::size_t offset = 0;
-    payload.teensy_time_us = readU64(bytes, offset);
-    offset += 8;
-    payload.chassis_delta.x_m = readDouble(bytes, offset);
-    offset += 8;
-    payload.chassis_delta.y_m = readDouble(bytes, offset);
-    offset += 8;
-    payload.chassis_delta.theta_rad = readDouble(bytes, offset);
-    offset += 8;
-    for (double& wheel_delta : payload.wheel_delta_m) {
-        wheel_delta = readDouble(bytes, offset);
-        offset += 8;
-    }
-    payload.status_flags = readU32(bytes, offset);
-    return payload;
-}
-
-std::vector<std::uint8_t> encodeRobotOdometryPayload(
-    const RobotOdometryPayload& payload) {
+std::vector<std::uint8_t> encodeChassisSpeedsPayload(
+    const ChassisSpeedsPayload& payload) {
     std::vector<std::uint8_t> out;
     out.reserve(44);
     appendU64(out, payload.teensy_time_us);
     appendU64(out, payload.rio_time_us);
-    appendDouble(out, payload.field_to_robot.x_m);
-    appendDouble(out, payload.field_to_robot.y_m);
-    appendDouble(out, payload.field_to_robot.theta_rad);
+    appendDouble(out, payload.vx_mps);
+    appendDouble(out, payload.vy_mps);
+    appendDouble(out, payload.omega_radps);
     appendU32(out, payload.status_flags);
     return out;
 }
 
-std::optional<RobotOdometryPayload> decodeRobotOdometryPayload(
+std::optional<ChassisSpeedsPayload> decodeChassisSpeedsPayload(
     const std::vector<std::uint8_t>& bytes) {
     if (bytes.size() != 44u) {
         return std::nullopt;
     }
 
-    RobotOdometryPayload payload;
+    ChassisSpeedsPayload payload;
     std::size_t offset = 0;
     payload.teensy_time_us = readU64(bytes, offset);
     offset += 8;
     payload.rio_time_us = readU64(bytes, offset);
     offset += 8;
-    payload.field_to_robot.x_m = readDouble(bytes, offset);
+    payload.vx_mps = readDouble(bytes, offset);
     offset += 8;
-    payload.field_to_robot.y_m = readDouble(bytes, offset);
+    payload.vy_mps = readDouble(bytes, offset);
     offset += 8;
-    payload.field_to_robot.theta_rad = readDouble(bytes, offset);
+    payload.omega_radps = readDouble(bytes, offset);
     offset += 8;
     payload.status_flags = readU32(bytes, offset);
     return payload;

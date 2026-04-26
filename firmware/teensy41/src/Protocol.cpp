@@ -77,29 +77,8 @@ bool encodeImuPayload(
     return true;
 }
 
-bool encodeWheelOdometryPayload(
-    const WheelOdometryPayload& payload,
-    std::uint8_t* out,
-    std::size_t capacity,
-    std::uint16_t& out_size) {
-    if (!out || !ensure(capacity, 68u)) {
-        return false;
-    }
-    std::size_t offset = 0;
-    appendU64(out, offset, payload.teensy_time_us);
-    appendDouble(out, offset, payload.chassis_delta.x_m);
-    appendDouble(out, offset, payload.chassis_delta.y_m);
-    appendDouble(out, offset, payload.chassis_delta.theta_rad);
-    for (double wheel_delta : payload.wheel_delta_m) {
-        appendDouble(out, offset, wheel_delta);
-    }
-    appendU32(out, offset, payload.status_flags);
-    out_size = static_cast<std::uint16_t>(offset);
-    return true;
-}
-
-bool encodeRobotOdometryPayload(
-    const RobotOdometryPayload& payload,
+bool encodeChassisSpeedsPayload(
+    const ChassisSpeedsPayload& payload,
     std::uint8_t* out,
     std::size_t capacity,
     std::uint16_t& out_size) {
@@ -109,9 +88,9 @@ bool encodeRobotOdometryPayload(
     std::size_t offset = 0;
     appendU64(out, offset, payload.teensy_time_us);
     appendU64(out, offset, payload.rio_time_us);
-    appendDouble(out, offset, payload.field_to_robot.x_m);
-    appendDouble(out, offset, payload.field_to_robot.y_m);
-    appendDouble(out, offset, payload.field_to_robot.theta_rad);
+    appendDouble(out, offset, payload.vx_mps);
+    appendDouble(out, offset, payload.vy_mps);
+    appendDouble(out, offset, payload.omega_radps);
     appendU32(out, offset, payload.status_flags);
     out_size = static_cast<std::uint16_t>(offset);
     return true;

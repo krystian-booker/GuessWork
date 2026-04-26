@@ -77,16 +77,11 @@ struct ImuSample {
     std::uint32_t status_flags{0};
 };
 
-struct WheelOdometrySample {
+struct ChassisSpeedsSample {
     Timestamp timestamp{};
-    Pose2d chassis_delta;
-    std::vector<double> wheel_delta_m;
-    std::uint32_t status_flags{0};
-};
-
-struct RobotOdometrySample {
-    Timestamp timestamp{};
-    Pose2d field_to_robot;
+    double vx_mps{0.0};
+    double vy_mps{0.0};
+    double omega_radps{0.0};
     std::uint64_t rio_time_us{0};
     std::uint32_t status_flags{0};
 };

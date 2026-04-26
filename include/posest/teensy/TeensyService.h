@@ -37,8 +37,7 @@ struct TeensyStats {
     std::uint64_t sequence_gaps{0};
     std::uint64_t invalid_payloads{0};
     std::uint64_t inbound_imu_samples{0};
-    std::uint64_t inbound_wheel_odometry_samples{0};
-    std::uint64_t inbound_robot_odometry_samples{0};
+    std::uint64_t inbound_chassis_speeds_samples{0};
     std::uint64_t inbound_camera_trigger_events{0};
     std::uint64_t inbound_measurements_dropped{0};
     std::uint64_t outbound_frames_queued{0};

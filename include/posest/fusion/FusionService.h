@@ -26,10 +26,33 @@ inline constexpr std::uint32_t kFusionStatusVisionUnavailable = 1u << 1u;
 inline constexpr std::uint32_t kFusionStatusMarginalUnavailable = 1u << 2u;
 inline constexpr std::uint32_t kFusionStatusOptimizerError = 1u << 3u;
 inline constexpr std::uint32_t kFusionStatusDegradedInput = 1u << 4u;
+inline constexpr std::uint32_t kFusionStatusShockInflated = 1u << 5u;
+inline constexpr std::uint32_t kFusionStatusChassisGap = 1u << 6u;
 
 struct FusionConfig {
-    std::array<double, 6> wheel_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
+    // Process noise on the per-Δt BetweenFactor built from integrated
+    // ChassisSpeeds. Order matches gtsam Pose3 tangent: [rx, ry, rz, tx, ty, tz].
+    std::array<double, 6> chassis_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
     std::array<double, 6> origin_prior_sigmas{10.0, 10.0, 3.14, 10.0, 10.0, 10.0};
+
+    // Fires the shock branch when |a - g_local| over imu_window_seconds
+    // exceeds this. 50 m/s^2 (~5g) is past normal driving accel for an FRC
+    // chassis but well below collision/wheel-slip transients.
+    double shock_threshold_mps2{50.0};
+    // Fires the free-fall branch when |a| drops below this. The robot in
+    // air-time over a bump or ramp reads ~0; normal driving never does.
+    double freefall_threshold_mps2{3.0};
+    // Multiplier applied to every chassis_sigma when either branch fires.
+    double shock_inflation_factor{100.0};
+    // IMU samples older than this (relative to the current chassis sample)
+    // are pruned from the shock-detection window.
+    double imu_window_seconds{0.05};
+    // ChassisSpeeds samples spaced more than this apart skip the integration
+    // step entirely (kFusionStatusChassisGap is set).
+    double max_chassis_dt_seconds{0.5};
+    // Local gravity vector in the IMU's robot frame. Subtracted before the
+    // shock-magnitude test. Override for tilted IMU mounts.
+    Vec3 gravity_local_mps2{0.0, 0.0, 9.80665};
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config);

@@ -106,9 +106,9 @@ void sendHealth(std::uint64_t now_us) {
     writeFrame(MessageType::TeensyHealth, g_payload_buffer, payload_size);
 }
 
-void sendRobotOdometry(const RobotOdometryPayload& payload) {
+void sendChassisSpeeds(const ChassisSpeedsPayload& payload) {
     std::uint16_t payload_size = 0;
-    if (!encodeRobotOdometryPayload(
+    if (!encodeChassisSpeedsPayload(
             payload,
             g_payload_buffer,
             sizeof(g_payload_buffer),
@@ -116,7 +116,7 @@ void sendRobotOdometry(const RobotOdometryPayload& payload) {
         g_error_flags |= kErrorInvalidPayload;
         return;
     }
-    writeFrame(MessageType::RobotOdometry, g_payload_buffer, payload_size);
+    writeFrame(MessageType::ChassisSpeeds, g_payload_buffer, payload_size);
 }
 
 void sendImuSample(const ImuPayload& sample) {
@@ -336,9 +336,9 @@ void loop() {
     g_imu.checkForMissedDataReady(now64);
 
     g_can.poll(now64);
-    RobotOdometryPayload odom;
-    while (g_can.popPendingRobotOdometry(odom)) {
-        sendRobotOdometry(odom);
+    ChassisSpeedsPayload chassis;
+    while (g_can.popPendingChassisSpeeds(chassis)) {
+        sendChassisSpeeds(chassis);
     }
 
     for (std::uint8_t i = 0; i < 4u; ++i) {

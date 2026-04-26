@@ -16,8 +16,7 @@ using Measurement = std::variant<
     AprilTagObservation,
     VioMeasurement,
     ImuSample,
-    WheelOdometrySample,
-    RobotOdometrySample,
+    ChassisSpeedsSample,
     CameraTriggerEvent>;
 
 class IMeasurementSink {
@@ -27,8 +26,7 @@ public:
     virtual bool publish(AprilTagObservation observation) = 0;
     virtual bool publish(VioMeasurement measurement) = 0;
     virtual bool publish(ImuSample sample) = 0;
-    virtual bool publish(WheelOdometrySample sample) = 0;
-    virtual bool publish(RobotOdometrySample sample) = 0;
+    virtual bool publish(ChassisSpeedsSample sample) = 0;
     virtual bool publish(CameraTriggerEvent event) = 0;
 };
 
@@ -42,8 +40,7 @@ public:
     bool publish(AprilTagObservation observation) override;
     bool publish(VioMeasurement measurement) override;
     bool publish(ImuSample sample) override;
-    bool publish(WheelOdometrySample sample) override;
-    bool publish(RobotOdometrySample sample) override;
+    bool publish(ChassisSpeedsSample sample) override;
     bool publish(CameraTriggerEvent event) override;
 
     std::optional<Measurement> take();

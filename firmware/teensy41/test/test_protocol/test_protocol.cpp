@@ -16,6 +16,22 @@ void test_time_sync_response_payload_size() {
     TEST_ASSERT_EQUAL_UINT16(20, size);
 }
 
+void test_chassis_speeds_payload_round_trips() {
+    std::uint8_t payload[kMaxPayloadSize]{};
+    std::uint16_t size = 0;
+    ChassisSpeedsPayload sample;
+    sample.teensy_time_us = 1234;
+    sample.rio_time_us = 5678;
+    sample.vx_mps = 1.5;
+    sample.vy_mps = -0.25;
+    sample.omega_radps = 0.75;
+    sample.status_flags = kStatusUnsynchronizedRioTime;
+
+    TEST_ASSERT_TRUE(
+        encodeChassisSpeedsPayload(sample, payload, sizeof(payload), size));
+    TEST_ASSERT_EQUAL_UINT16(44, size);
+}
+
 void test_frame_round_trip_through_decoder() {
     std::uint8_t payload[3]{1, 2, 3};
     std::uint8_t bytes[kMaxFrameSize]{};
@@ -49,6 +65,7 @@ int main(int argc, char** argv) {
     (void)argv;
     UNITY_BEGIN();
     RUN_TEST(test_time_sync_response_payload_size);
+    RUN_TEST(test_chassis_speeds_payload_round_trips);
     RUN_TEST(test_frame_round_trip_through_decoder);
     return UNITY_END();
 }

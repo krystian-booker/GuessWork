@@ -13,14 +13,14 @@ TEST(MeasurementBus, PreservesFifoOrderAcrossMeasurementTypes) {
 
     posest::ImuSample imu;
     imu.timestamp = t0;
-    posest::WheelOdometrySample odom;
-    odom.timestamp = t0 + 1ms;
-    posest::RobotOdometrySample robot_odom;
-    robot_odom.timestamp = t0 + 2ms;
+    posest::ChassisSpeedsSample chassis;
+    chassis.timestamp = t0 + 1ms;
+    posest::CameraTriggerEvent trigger;
+    trigger.timestamp = t0 + 2ms;
 
     EXPECT_TRUE(bus.publish(imu));
-    EXPECT_TRUE(bus.publish(odom));
-    EXPECT_TRUE(bus.publish(robot_odom));
+    EXPECT_TRUE(bus.publish(chassis));
+    EXPECT_TRUE(bus.publish(trigger));
 
     auto first = bus.take();
     auto second = bus.take();
@@ -30,15 +30,15 @@ TEST(MeasurementBus, PreservesFifoOrderAcrossMeasurementTypes) {
     ASSERT_TRUE(second.has_value());
     ASSERT_TRUE(third.has_value());
     EXPECT_TRUE(std::holds_alternative<posest::ImuSample>(*first));
-    EXPECT_TRUE(std::holds_alternative<posest::WheelOdometrySample>(*second));
-    EXPECT_TRUE(std::holds_alternative<posest::RobotOdometrySample>(*third));
+    EXPECT_TRUE(std::holds_alternative<posest::ChassisSpeedsSample>(*second));
+    EXPECT_TRUE(std::holds_alternative<posest::CameraTriggerEvent>(*third));
 }
 
 TEST(MeasurementBus, DropsNewestWhenBoundedQueueIsFull) {
     posest::MeasurementBus bus(1);
 
     EXPECT_TRUE(bus.publish(posest::ImuSample{}));
-    EXPECT_FALSE(bus.publish(posest::WheelOdometrySample{}));
+    EXPECT_FALSE(bus.publish(posest::ChassisSpeedsSample{}));
     EXPECT_EQ(bus.droppedNewestCount(), 1u);
     EXPECT_EQ(bus.size(), 1u);
 

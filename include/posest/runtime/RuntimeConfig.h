@@ -71,7 +71,7 @@ struct FieldLayoutConfig {
 };
 
 struct ImuConfig {
-    std::uint32_t accel_range_g{12};
+    std::uint32_t accel_range_g{24};
     std::uint32_t accel_odr_hz{1000};
     std::uint32_t accel_bandwidth_code{2};
     std::uint32_t gyro_range_dps{2000};

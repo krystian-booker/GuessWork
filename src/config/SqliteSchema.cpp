@@ -281,7 +281,7 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS imu_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    accel_range_g INTEGER NOT NULL DEFAULT 12,
+    accel_range_g INTEGER NOT NULL DEFAULT 24,
     accel_odr_hz INTEGER NOT NULL DEFAULT 1000,
     accel_bandwidth_code INTEGER NOT NULL DEFAULT 2,
     gyro_range_dps INTEGER NOT NULL DEFAULT 2000,

@@ -24,18 +24,17 @@ void expectEncodedSize(const Payload& payload, Encoder&& encoder) {
 
 TEST(TeensyProtocolGolden, FrameHeaderConstants) {
     EXPECT_EQ(posest::teensy::kFrameMagic, 0x4757u);
-    EXPECT_EQ(posest::teensy::kProtocolVersion, 1u);
+    EXPECT_EQ(posest::teensy::kProtocolVersion, 2u);
 }
 
 TEST(TeensyProtocolGolden, MessageTypeNumericValues) {
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::ImuSample), 1u);
-    EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::WheelOdometry), 2u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::CanRx), 3u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::TeensyHealth), 4u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::TimeSyncResponse), 5u);
-    EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::RobotOdometry), 6u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::CameraTriggerEvent), 7u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::ConfigAck), 8u);
+    EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::ChassisSpeeds), 9u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::FusedPose), 64u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::CanTx), 65u);
     EXPECT_EQ(static_cast<std::uint8_t>(posest::teensy::MessageType::TimeSyncRequest), 66u);
@@ -66,10 +65,8 @@ TEST(TeensyProtocolGolden, StatusFlagBits) {
 TEST(TeensyProtocolGolden, PayloadEncodedSizes) {
     expectEncodedSize<68>(posest::teensy::ImuPayload{},
                           posest::teensy::encodeImuPayload);
-    expectEncodedSize<68>(posest::teensy::WheelOdometryPayload{},
-                          posest::teensy::encodeWheelOdometryPayload);
-    expectEncodedSize<44>(posest::teensy::RobotOdometryPayload{},
-                          posest::teensy::encodeRobotOdometryPayload);
+    expectEncodedSize<44>(posest::teensy::ChassisSpeedsPayload{},
+                          posest::teensy::encodeChassisSpeedsPayload);
     expectEncodedSize<44>(posest::teensy::TeensyHealthPayload{},
                           posest::teensy::encodeTeensyHealthPayload);
     expectEncodedSize<20>(posest::teensy::CameraTriggerEventPayload{},

@@ -23,11 +23,7 @@ bool MeasurementBus::publish(ImuSample sample) {
     return push(std::move(sample));
 }
 
-bool MeasurementBus::publish(WheelOdometrySample sample) {
-    return push(std::move(sample));
-}
-
-bool MeasurementBus::publish(RobotOdometrySample sample) {
+bool MeasurementBus::publish(ChassisSpeedsSample sample) {
     return push(std::move(sample));
 }
 

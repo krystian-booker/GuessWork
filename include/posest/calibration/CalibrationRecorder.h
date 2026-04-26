@@ -51,8 +51,7 @@ public:
     bool publish(AprilTagObservation observation) override;
     bool publish(VioMeasurement measurement) override;
     bool publish(ImuSample sample) override;
-    bool publish(WheelOdometrySample sample) override;
-    bool publish(RobotOdometrySample sample) override;
+    bool publish(ChassisSpeedsSample sample) override;
     bool publish(CameraTriggerEvent event) override;
 
     CalibrationRecorderStats stats() const;
