@@ -1,5 +1,7 @@
 #include "posest/pipelines/AprilTagPipeline.h"
 
+#include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -208,6 +210,41 @@ AprilTagPipeline::AprilTagPipeline(
     detector_->decode_sharpening = config_.decode_sharpening;
     detector_->debug = config_.debug;
     apriltag_detector_add_family(detector_, family_);
+
+    stats_.pipeline_id = this->id();
+}
+
+AprilTagPipelineStats AprilTagPipeline::stats() const {
+    AprilTagPipelineStats out;
+    {
+        std::lock_guard<std::mutex> g(stats_mu_);
+        out = stats_;
+    }
+    out.mailbox_drops = droppedByMailbox();
+    return out;
+}
+
+void AprilTagPipeline::recordOutcome(
+    Outcome outcome,
+    std::chrono::steady_clock::time_point t0,
+    double rms_px) {
+    const auto t1 = std::chrono::steady_clock::now();
+    const std::int64_t lat_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    std::lock_guard<std::mutex> g(stats_mu_);
+    ++stats_.frames_processed;
+    switch (outcome) {
+        case Outcome::NoDetection:          ++stats_.frames_no_detection; break;
+        case Outcome::DroppedNoCalibration: ++stats_.frames_dropped_no_calibration; break;
+        case Outcome::DroppedByAmbiguity:   ++stats_.frames_dropped_by_ambiguity; break;
+        case Outcome::SolvedSingle:         ++stats_.frames_solved_single; break;
+        case Outcome::SolvedMulti:          ++stats_.frames_solved_multi; break;
+    }
+    stats_.last_solve_latency_us = lat_us;
+    stats_.max_solve_latency_us = std::max(stats_.max_solve_latency_us, lat_us);
+    if (outcome == Outcome::SolvedSingle || outcome == Outcome::SolvedMulti) {
+        stats_.last_reprojection_rms_px = rms_px;
+    }
 }
 
 AprilTagPipeline::~AprilTagPipeline() {
@@ -226,6 +263,8 @@ AprilTagPipeline::~AprilTagPipeline() {
 }
 
 void AprilTagPipeline::processFrame(const Frame& frame) {
+    const auto t0 = std::chrono::steady_clock::now();
+
     AprilTagObservation observation;
     observation.camera_id = frame.camera_id;
     observation.frame_sequence = frame.sequence;
@@ -236,6 +275,7 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
     cv::Mat gray = toGray8(frame.image);
     if (gray.empty()) {
         measurementSink().publish(std::move(observation));
+        recordOutcome(Outcome::NoDetection, t0, 0.0);
         return;
     }
     if (!gray.isContinuous()) {
@@ -252,6 +292,7 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
     zarray_t* detections = apriltag_detector_detect(detector_, &image);
     if (!detections) {
         measurementSink().publish(std::move(observation));
+        recordOutcome(Outcome::NoDetection, t0, 0.0);
         return;
     }
 
@@ -310,6 +351,17 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
         solver_index_to_detection_index.push_back(static_cast<int>(detection_index));
     }
 
+    // Outcome classification, defaults walk in this order (overridden once
+    // the solve runs and produces a definitive answer):
+    //   - count == 0        → NoDetection
+    //   - solver_input empty after detection loop → DroppedNoCalibration
+    //     (covers no calibration, no extrinsics, or no field-layout match)
+    //   - solver kept pose, single-tag path     → SolvedSingle
+    //   - solver kept pose, multi-tag path      → SolvedMulti
+    //   - solver dropped pose with ambiguity set → DroppedByAmbiguity
+    Outcome outcome = (count == 0) ? Outcome::NoDetection : Outcome::DroppedNoCalibration;
+    double rms_for_stats = 0.0;
+
     if (!solver_input.tags.empty()) {
         const AprilTagPoseSolveOutput solver_output = solveAprilTagPose(solver_input);
         observation.field_to_robot = solver_output.field_to_robot;
@@ -322,10 +374,30 @@ void AprilTagPipeline::processFrame(const Frame& frame) {
             observation.detections[static_cast<std::size_t>(detection_index)].ambiguity =
                 *solver_output.single_tag_ambiguity;
         }
+        // Scatter per-tag pose + reprojection error back onto each detection
+        // using the solver→detection index map built above.
+        for (std::size_t k = 0; k < solver_output.per_tag.size() &&
+                                k < solver_index_to_detection_index.size(); ++k) {
+            const int detection_index = solver_index_to_detection_index[k];
+            auto& detection = observation.detections[
+                static_cast<std::size_t>(detection_index)];
+            detection.camera_to_tag = solver_output.per_tag[k].camera_to_tag;
+            detection.reprojection_error_px =
+                solver_output.per_tag[k].reprojection_error_px;
+        }
+
+        if (solver_output.field_to_robot.has_value()) {
+            outcome = (solver_output.solved_tag_count >= 2)
+                ? Outcome::SolvedMulti : Outcome::SolvedSingle;
+            rms_for_stats = solver_output.reprojection_rms_px;
+        } else if (solver_output.single_tag_ambiguity.has_value()) {
+            outcome = Outcome::DroppedByAmbiguity;
+        }
     }
 
     apriltag_detections_destroy(detections);
     measurementSink().publish(std::move(observation));
+    recordOutcome(outcome, t0, rms_for_stats);
 }
 
 }  // namespace posest::pipelines

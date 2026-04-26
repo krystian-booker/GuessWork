@@ -115,6 +115,11 @@ RuntimeGraph::cameraProducers() const {
     return out;
 }
 
+std::vector<std::shared_ptr<IVisionPipeline>>
+RuntimeGraph::pipelines() const {
+    return pipeline_start_order_;
+}
+
 std::vector<std::string> RuntimeGraph::deadProducers() const {
     std::vector<std::string> out;
     for (const auto& entry : cameras_) {

@@ -34,6 +34,23 @@ struct AprilTagPoseSolveInput {
 };
 
 struct AprilTagPoseSolveOutput {
+    // Per-tag solve metadata, parallel-indexed to AprilTagPoseSolveInput::tags.
+    // Empty when the pose solve was not attempted (no calibration / empty
+    // input). Multi-tag entries carry the *layout-implied* camera→tag pose
+    // (cam_T_tag = cam_T_field · field_T_tag) — i.e. "where the global SQPNP
+    // solve thinks this tag should sit in camera frame given its layout
+    // position." Per-tag reprojection_error_px is the RMS over that tag's 4
+    // corners and signals how much that tag disagrees with the consensus
+    // global pose, which is the right signal for spotting a misprinted tag,
+    // a drifted wall mount, or a layout-file typo. Single-tag entries carry
+    // the orthogonal-iteration camera→tag pose directly and are populated
+    // even when the global pose was dropped by the ambiguity threshold.
+    struct PerTagOutput {
+        Pose3d camera_to_tag;
+        double reprojection_error_px{0.0};
+    };
+    std::vector<PerTagOutput> per_tag;
+
     std::optional<Pose3d> field_to_robot;
     std::array<double, 36> covariance{};
     double reprojection_rms_px{0.0};

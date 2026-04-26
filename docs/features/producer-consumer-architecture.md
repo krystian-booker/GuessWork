@@ -117,6 +117,7 @@ All `Frame::capture_time` values live in the `std::chrono::steady_clock` domain,
 
 - **Preferred:** the subclass supplies `out_capture_time` inside `captureOne()`, converted from whatever native timestamp the backend exposes (V4L2 `CLOCK_MONOTONIC` buffer stamp, GenICam/PTP hardware stamp, vendor SDK metadata). For cameras with their own epoch, do a one-shot startup calibration (capture `steady_clock::now()` and the camera tick together, store the offset).
 - **Fallback:** if `out_capture_time` is left `std::nullopt`, `ProducerBase::runLoop` stamps `steady_clock::now()` immediately after `captureOne()` returns. This is subject to scheduler jitter and should only be used when the backend genuinely has no better stamp.
+- **Trigger override:** when a `CameraTriggerCache` is wired and a Teensy-stamped pulse pairs with the captured frame, `ProducerBase::runLoop` overwrites `frame->capture_time` with the trigger event's `host_time` (still `steady_clock` — the Teensy µs is converted via `TeensyService::timestampFromTeensyTime` before being cached). This tightens the timestamp from "host saw the frame" to "shutter actually fired" without changing the time domain. The kernel-stamped value is only used if no trigger pairing happens.
 
 `MockProducer` stamps the *scheduled deadline* (`src/mock/MockProducer.cpp:50`), mimicking what a real camera's shutter-time stamp looks like. This is what the `SubclassSuppliedTimestampPassesThrough` and `FallbackStampsWithSteadyClockNowWhenSubclassOmits` tests in `test/test_producer_base.cpp` exercise.
 

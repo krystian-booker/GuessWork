@@ -470,12 +470,30 @@ std::string healthToJson(const DaemonHealth& health) {
         });
     }
 
+    nlohmann::json apriltag_pipelines_json = nlohmann::json::array();
+    for (const auto& s : health.apriltag_pipelines) {
+        apriltag_pipelines_json.push_back({
+            {"pipeline_id", s.pipeline_id},
+            {"frames_processed", s.frames_processed},
+            {"frames_no_detection", s.frames_no_detection},
+            {"frames_dropped_no_calibration", s.frames_dropped_no_calibration},
+            {"frames_dropped_by_ambiguity", s.frames_dropped_by_ambiguity},
+            {"frames_solved_single", s.frames_solved_single},
+            {"frames_solved_multi", s.frames_solved_multi},
+            {"mailbox_drops", s.mailbox_drops},
+            {"last_solve_latency_us", s.last_solve_latency_us},
+            {"max_solve_latency_us", s.max_solve_latency_us},
+            {"last_reprojection_rms_px", s.last_reprojection_rms_px},
+        });
+    }
+
     nlohmann::json out = {
         {"state", daemonStateName(health.state)},
         {"config_path", health.config_path},
         {"camera_count", health.camera_count},
         {"pipeline_count", health.pipeline_count},
         {"cameras", cameras_json},
+        {"apriltag_pipelines", apriltag_pipelines_json},
         {"measurements_dropped", health.measurements_dropped},
         {"measurements_processed", health.measurements_processed},
         {"stale_measurements", health.stale_measurements},
@@ -882,11 +900,21 @@ DaemonHealth DaemonController::health() const {
 
 void DaemonController::refreshHealth() {
     std::vector<CameraLiveStats> camera_stats;
+    std::vector<pipelines::AprilTagPipelineStats> apriltag_stats;
     if (graph_) {
         const auto camera_producers = graph_->cameraProducers();
         camera_stats.reserve(camera_producers.size());
         for (const auto& camera : camera_producers) {
             camera_stats.push_back({camera->id(), camera->liveStats()});
+        }
+        const auto vision_pipelines = graph_->pipelines();
+        apriltag_stats.reserve(vision_pipelines.size());
+        for (const auto& pipeline : vision_pipelines) {
+            const auto value = pipeline->pipelineStats();
+            if (const auto* tag_stats =
+                    std::get_if<pipelines::AprilTagPipelineStats>(&value)) {
+                apriltag_stats.push_back(*tag_stats);
+            }
         }
     }
 
@@ -908,6 +936,7 @@ void DaemonController::refreshHealth() {
         health_.teensy = teensy_->stats();
     }
     health_.cameras = std::move(camera_stats);
+    health_.apriltag_pipelines = std::move(apriltag_stats);
 }
 
 void DaemonController::markFailed(const std::string& error) {

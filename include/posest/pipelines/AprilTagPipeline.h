@@ -1,11 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "posest/MeasurementTypes.h"
+#include "posest/pipelines/PipelineStats.h"
 #include "posest/pipelines/VisionPipelineBase.h"
 #include "posest/runtime/PipelineConfig.h"
 
@@ -63,14 +66,39 @@ public:
         AprilTagPipelineConfig config = {});
     ~AprilTagPipeline() override;
 
+    // Snapshot of the pipeline's runtime counters. Lock-protected; safe to
+    // call concurrently with frame processing. `mailbox_drops` is filled
+    // from ConsumerBase::droppedByMailbox() at read time so callers see one
+    // consistent struct.
+    AprilTagPipelineStats stats() const;
+
+    PipelineStatsValue pipelineStats() const override {
+        return stats();
+    }
+
 protected:
     void processFrame(const Frame& frame) override;
 
 private:
+    enum class Outcome {
+        NoDetection,
+        DroppedNoCalibration,
+        DroppedByAmbiguity,
+        SolvedSingle,
+        SolvedMulti,
+    };
+    void recordOutcome(
+        Outcome outcome,
+        std::chrono::steady_clock::time_point t0,
+        double rms_px);
+
     AprilTagPipelineConfig config_;
     apriltag_detector* detector_{nullptr};
     apriltag_family* family_{nullptr};
     void (*family_destroy_)(apriltag_family*){nullptr};
+
+    mutable std::mutex stats_mu_;
+    AprilTagPipelineStats stats_;
 };
 
 }  // namespace posest::pipelines

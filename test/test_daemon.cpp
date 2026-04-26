@@ -219,6 +219,11 @@ TEST(DaemonHealth, HealthOnceJsonContainsExpectedFieldsForEmptyDb) {
     EXPECT_EQ(json.at("has_latest_pose"), false);
     ASSERT_TRUE(json.contains("teensy"));
     EXPECT_EQ(json.at("teensy").at("enabled"), false);
+    // §7.4 surface: the JSON always carries an `apriltag_pipelines` array
+    // (empty for an empty config) so downstream consumers can rely on the key.
+    ASSERT_TRUE(json.contains("apriltag_pipelines"));
+    EXPECT_TRUE(json.at("apriltag_pipelines").is_array());
+    EXPECT_TRUE(json.at("apriltag_pipelines").empty());
 
     std::filesystem::remove(path);
 }

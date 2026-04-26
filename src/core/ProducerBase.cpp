@@ -132,6 +132,11 @@ void ProducerBase::runLoop() {
             if (auto stamp = cache->lookup(id_, frame->capture_time)) {
                 frame->teensy_time_us = stamp->teensy_time_us;
                 frame->trigger_sequence = stamp->trigger_sequence;
+                // Tighten capture_time onto the Teensy-derived shutter time
+                // (same steady_clock domain, microsecond precision) so
+                // downstream measurements align against true exposure time
+                // rather than userspace receive time.
+                frame->capture_time = stamp->host_time;
             }
         }
 

@@ -247,11 +247,17 @@ AprilTagPoseSolveOutput solveMultiTag(const AprilTagPoseSolveInput& input) {
 
     std::vector<cv::Point2d> projected;
     cv::projectPoints(object_points, rvec, tvec, K, solve_dist_coeffs, projected);
+
+    // Single sweep accumulates the global RMS and per-tag (4-corner) buckets
+    // in lock-step. The per-tag bucket feeds AprilTagPoseSolveOutput::per_tag.
     double sum_sq = 0.0;
+    std::vector<double> per_tag_sum_sq(input.tags.size(), 0.0);
     for (std::size_t i = 0; i < projected.size(); ++i) {
         const double dx = projected[i].x - solve_image_points[i].x;
         const double dy = projected[i].y - solve_image_points[i].y;
-        sum_sq += dx * dx + dy * dy;
+        const double sq = dx * dx + dy * dy;
+        sum_sq += sq;
+        per_tag_sum_sq[i / 4] += sq;
     }
     const double rms_px = std::sqrt(sum_sq / static_cast<double>(projected.size()));
 
@@ -276,6 +282,15 @@ AprilTagPoseSolveOutput solveMultiTag(const AprilTagPoseSolveInput& input) {
     out.field_to_robot = affineToPose3d(field_T_robot);
     out.reprojection_rms_px = rms_px;
     out.solved_tag_count = static_cast<int>(input.tags.size());
+    out.per_tag.reserve(input.tags.size());
+    for (std::size_t i = 0; i < input.tags.size(); ++i) {
+        const cv::Affine3d cam_T_tag =
+            cam_T_field * pose3dToAffine(input.tags[i].field_to_tag);
+        AprilTagPoseSolveOutput::PerTagOutput entry;
+        entry.camera_to_tag = affineToPose3d(cam_T_tag);
+        entry.reprojection_error_px = std::sqrt(per_tag_sum_sq[i] / 4.0);
+        out.per_tag.push_back(entry);
+    }
     computeCovariance(out, mean_distance_m, rms_px, out.solved_tag_count, input.covariance);
     return out;
 }
@@ -320,17 +335,10 @@ AprilTagPoseSolveOutput solveSingleTag(const AprilTagPoseSolveInput& input) {
     if (pose2.R) matd_destroy(pose2.R);
     if (pose2.t) matd_destroy(pose2.t);
 
-    if (ambiguity > input.covariance.ambiguity_drop_threshold) {
-        return out;
-    }
-
+    // RMS is needed for both the per-tag entry (always emitted, even on
+    // ambiguity drop) and the covariance + global-pose path. Compute up
+    // front so we can write `per_tag` before the ambiguity-drop early return.
     const cv::Affine3d cam_T_tag = pose3dToAffine(camera_to_tag);
-    const cv::Affine3d tag_T_camera = cam_T_tag.inv();
-    const cv::Affine3d field_T_tag = pose3dToAffine(tag.field_to_tag);
-    const cv::Affine3d field_T_camera = field_T_tag * tag_T_camera;
-    const cv::Affine3d camera_T_robot = pose3dToAffine(input.camera_to_robot);
-    const cv::Affine3d field_T_robot = field_T_camera * camera_T_robot;
-
     const auto tag_corners = cornersInTagFrame(input.tag_size_m);
     const cv::Matx33d K_mat(
         input.calibration.fx, 0.0, input.calibration.cx,
@@ -354,6 +362,21 @@ AprilTagPoseSolveOutput solveSingleTag(const AprilTagPoseSolveInput& input) {
     const double rms_px = (valid_corners > 0)
         ? std::sqrt(sum_sq / static_cast<double>(valid_corners))
         : 0.0;
+
+    // Per-tag entry is orthogonal to the global pose — emit it even when the
+    // global pose is dropped by the ambiguity threshold.
+    out.per_tag.push_back({camera_to_tag, rms_px});
+
+    if (ambiguity > input.covariance.ambiguity_drop_threshold) {
+        return out;
+    }
+
+    const cv::Affine3d tag_T_camera = cam_T_tag.inv();
+    const cv::Affine3d field_T_tag = pose3dToAffine(tag.field_to_tag);
+    const cv::Affine3d field_T_camera = field_T_tag * tag_T_camera;
+    const cv::Affine3d camera_T_robot = pose3dToAffine(input.camera_to_robot);
+    const cv::Affine3d field_T_robot = field_T_camera * camera_T_robot;
+
     const double mean_distance_m = std::max(0.0, camera_to_tag.translation_m.z);
 
     out.field_to_robot = affineToPose3d(field_T_robot);

@@ -36,6 +36,14 @@ public:
     // capabilities()/setControl() without sprinkling dynamic_pointer_cast.
     std::vector<std::shared_ptr<CameraProducer>> cameraProducers() const;
 
+    // Ordered list of pipelines as they were started. Used by the daemon's
+    // health snapshot to enumerate per-pipeline stats via the polymorphic
+    // IVisionPipeline::pipelineStats() hook. Safe to call concurrently with
+    // a running graph: pipelines_ is built once in build() and immutable
+    // for the rest of the graph's lifetime; each pipeline owns its own
+    // stats lock.
+    std::vector<std::shared_ptr<IVisionPipeline>> pipelines() const;
+
     // Ids of cameras whose capture loops have exited on their own
     // (EndOfStream or Failed). Empty when every camera is Idle or Running.
     // Cheap; intended for periodic health polling.

@@ -213,6 +213,7 @@ public:
     struct Stamp {
         std::optional<std::uint64_t> teensy_time_us;
         std::optional<std::uint32_t> trigger_sequence;
+        std::chrono::steady_clock::time_point capture_time{};
     };
 
     std::vector<Stamp> take() const {
@@ -223,7 +224,7 @@ public:
 protected:
     void process(const posest::Frame& f) override {
         std::lock_guard<std::mutex> g(mu_);
-        stamps_.push_back({f.teensy_time_us, f.trigger_sequence});
+        stamps_.push_back({f.teensy_time_us, f.trigger_sequence, f.capture_time});
     }
 
 private:
@@ -293,6 +294,75 @@ TEST(ProducerBase, TriggerCacheLeavesFrameUnstampedWhenLookupMisses) {
     for (const auto& s : stamps) {
         EXPECT_FALSE(s.teensy_time_us.has_value());
         EXPECT_FALSE(s.trigger_sequence.has_value());
+    }
+}
+
+TEST(ProducerBase, TriggerCacheOverridesCaptureTime) {
+    // The producer stamps frames at `anchor`; the cached event's host_time is
+    // 1 ms earlier (the trigger fired before the host saw the frame). After
+    // pairing, frame->capture_time must reflect the Teensy-derived host_time,
+    // not the producer-supplied anchor.
+    const auto anchor =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    const auto trigger_host_time = anchor - std::chrono::milliseconds(1);
+
+    auto cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{4, "cam"}},
+        std::chrono::milliseconds(100));
+    posest::CameraTriggerEvent ev;
+    ev.pin = 4;
+    ev.trigger_sequence = 7u;
+    ev.teensy_time_us = 123456u;
+    ev.timestamp = trigger_host_time;
+    cache->recordEvent(ev);
+
+    StampedProducer prod("cam", 50, anchor);
+    prod.setTriggerCache(cache);
+    auto cons = std::make_shared<TriggerRecordingConsumer>("c");
+    prod.addConsumer(cons);
+
+    cons->start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+    while (prod.producedCount() < 50) std::this_thread::sleep_for(1ms);
+    prod.stop();
+    std::this_thread::sleep_for(5ms);
+    cons->stop();
+
+    const auto stamps = cons->take();
+    ASSERT_FALSE(stamps.empty());
+    for (const auto& s : stamps) {
+        ASSERT_TRUE(s.teensy_time_us.has_value());
+        EXPECT_EQ(s.capture_time, trigger_host_time);
+        EXPECT_NE(s.capture_time, anchor);
+    }
+}
+
+TEST(ProducerBase, TriggerCacheMissLeavesCaptureTimeUntouched) {
+    // No cached event → frame->capture_time stays at the subclass-supplied
+    // anchor. Guards the §7.1 "only on a hit" invariant: an empty cache must
+    // never silently rewrite capture_time.
+    const auto anchor =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    auto cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{4, "cam"}},
+        std::chrono::milliseconds(100));
+
+    StampedProducer prod("cam", 20, anchor);
+    prod.setTriggerCache(cache);
+    auto cons = std::make_shared<TriggerRecordingConsumer>("c");
+    prod.addConsumer(cons);
+
+    cons->start();
+    ASSERT_EQ(prod.start(), posest::ProducerState::Running);
+    while (prod.producedCount() < 20) std::this_thread::sleep_for(1ms);
+    prod.stop();
+    std::this_thread::sleep_for(5ms);
+    cons->stop();
+
+    const auto stamps = cons->take();
+    ASSERT_FALSE(stamps.empty());
+    for (const auto& s : stamps) {
+        EXPECT_EQ(s.capture_time, anchor);
     }
 }
 

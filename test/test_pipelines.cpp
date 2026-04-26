@@ -732,3 +732,67 @@ TEST(AprilTagPipelineContext, ExtrinsicsRespectsPipelineCalibrationVersionFilter
     EXPECT_DOUBLE_EQ(
         pipeline_config.camera_to_robot.at("cam0").translation_m.x, 2.0);
 }
+
+TEST(AprilTagPipeline, StatsCountersTrackOutcomeAndLatency) {
+    posest::MeasurementBus bus(8);
+    posest::pipelines::AprilTagPipelineConfig config;
+    config.quad_decimate = 1.0;
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
+
+    pipeline.start();
+    // Frame 1: blank canvas → no detections.
+    pipeline.deliver(makeFrame(cv::Mat(240, 320, CV_8UC1, cv::Scalar(255))));
+    (void)bus.take();
+    // Frame 2: rendered tag without calibration/extrinsics/layout in the
+    // pipeline config → solver path is skipped, classified DroppedNoCalibration.
+    pipeline.deliver(makeFrame(makeRenderedTag36h11(0)));
+    (void)bus.take();
+    pipeline.stop();
+
+    const auto s = pipeline.stats();
+    EXPECT_EQ(s.pipeline_id, "tags");
+    EXPECT_EQ(s.frames_processed, 2u);
+    EXPECT_GE(s.frames_no_detection, 1u);
+    EXPECT_GE(s.frames_dropped_no_calibration, 1u);
+    EXPECT_EQ(s.frames_solved_single, 0u);
+    EXPECT_EQ(s.frames_solved_multi, 0u);
+    EXPECT_GE(s.last_solve_latency_us, 0);
+    EXPECT_GE(s.max_solve_latency_us, s.last_solve_latency_us);
+}
+
+TEST(AprilTagPipeline, PipelineStatsHookReturnsAprilTagStatsAlternative) {
+    posest::MeasurementBus bus(4);
+    posest::pipelines::AprilTagPipelineConfig config;
+    posest::pipelines::AprilTagPipeline pipeline("tags", bus, config);
+
+    const auto value = pipeline.pipelineStats();
+    ASSERT_TRUE(std::holds_alternative<posest::pipelines::AprilTagPipelineStats>(value));
+    const auto& s = std::get<posest::pipelines::AprilTagPipelineStats>(value);
+    EXPECT_EQ(s.pipeline_id, "tags");
+    EXPECT_EQ(s.frames_processed, 0u);
+}
+
+TEST(Pipelines, RuntimeGraphPipelinesReturnsStartOrderEntries) {
+    posest::runtime::RuntimeConfig config;
+    posest::CameraConfig camera;
+    camera.id = "cam0";
+    camera.type = "mock";
+    camera.device = "mock";
+    config.cameras.push_back(camera);
+
+    posest::runtime::PipelineConfig pipeline;
+    pipeline.id = "mock_tags";
+    pipeline.type = "mock_apriltag";
+    config.pipelines.push_back(pipeline);
+    config.bindings.push_back({"cam0", "mock_tags"});
+
+    MockCameraFactory camera_factory;
+    posest::runtime::ProductionPipelineFactory pipeline_factory;
+    posest::MeasurementBus bus(8);
+    posest::runtime::RuntimeGraph graph(config, camera_factory, pipeline_factory, bus);
+    graph.build();
+
+    const auto pipelines = graph.pipelines();
+    ASSERT_EQ(pipelines.size(), 1u);
+    EXPECT_EQ(pipelines.front()->id(), "mock_tags");
+}

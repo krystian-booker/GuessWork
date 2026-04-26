@@ -171,6 +171,43 @@ TEST(AprilTagPoseSolver, MultiTagSqpnpRecoversIdentityPose) {
     for (int i = 0; i < 6; ++i) {
         EXPECT_GT(out.covariance[static_cast<std::size_t>(i * 6 + i)], 0.0);
     }
+    // Per-tag entries: layout-implied cam_T_tag (which equals each tag's
+    // field-to-tag pose under camera-at-origin) and small per-tag RMS for
+    // clean-projection inputs.
+    ASSERT_EQ(out.per_tag.size(), input.tags.size());
+    EXPECT_NEAR(out.per_tag[0].camera_to_tag.translation_m.x, -0.3, 1e-3);
+    EXPECT_NEAR(out.per_tag[0].camera_to_tag.translation_m.z, 1.0, 1e-3);
+    EXPECT_NEAR(out.per_tag[1].camera_to_tag.translation_m.x, 0.3, 1e-3);
+    EXPECT_NEAR(out.per_tag[1].camera_to_tag.translation_m.z, 1.0, 1e-3);
+    EXPECT_LT(out.per_tag[0].reprojection_error_px, 0.5);
+    EXPECT_LT(out.per_tag[1].reprojection_error_px, 0.5);
+}
+
+TEST(AprilTagPoseSolver, MultiTagPerTagRmsHighlightsDisagreeingTag) {
+    // Render a clean 2-tag scene, then perturb only tag #2's corners. The
+    // per-tag RMS for tag #2 should rise above tag #1's by a clear margin —
+    // this is the "which tag disagrees with consensus" debugging signal.
+    auto input = makeBaseInput(makePinholeCalibration());
+    const cv::Affine3d cam_T_field = cv::Affine3d::Identity();
+    const cv::Mat K = makeIntrinsicMat();
+
+    input.tags.push_back(makeProjectedTagInput(
+        1, posest::Pose3d{.translation_m = {-0.3, 0.0, 1.0}}, cam_T_field, K, {}));
+    input.tags.push_back(makeProjectedTagInput(
+        2, posest::Pose3d{.translation_m = {0.3, 0.0, 1.0}}, cam_T_field, K, {}));
+    // Non-rigid 3 px shifts on tag #2 only.
+    const std::array<cv::Point2d, 4> shifts{{
+        {3.0, 0.0}, {-3.0, 0.0}, {0.0, 3.0}, {0.0, -3.0},
+    }};
+    for (std::size_t i = 0; i < 4; ++i) {
+        input.tags[1].image_corners_px[i].x += shifts[i].x;
+        input.tags[1].image_corners_px[i].y += shifts[i].y;
+    }
+
+    const auto out = posest::pipelines::solveAprilTagPose(input);
+    ASSERT_EQ(out.per_tag.size(), 2u);
+    EXPECT_GT(out.per_tag[1].reprojection_error_px,
+              out.per_tag[0].reprojection_error_px + 1.0);
 }
 
 TEST(AprilTagPoseSolver, MultiTagSqpnpRecoversTranslatedRobot) {
@@ -362,6 +399,15 @@ TEST(AprilTagPoseSolver, SingleTagPathReportsAmbiguityFromOrthogonalIteration) {
     ASSERT_TRUE(out.single_tag_ambiguity.has_value());
     EXPECT_GE(*out.single_tag_ambiguity, 0.0);
     EXPECT_LE(*out.single_tag_ambiguity, 1.0);
+
+    // Per-tag entry must be populated regardless of whether the global pose
+    // survived the ambiguity threshold. The orthogonal-iteration result
+    // places the camera ~1 m in front of the tag (the rendered canvas above
+    // is centered with the camera at the origin), so cam_T_tag's z must be
+    // positive and reprojection_error_px small.
+    ASSERT_EQ(out.per_tag.size(), 1u);
+    EXPECT_GT(out.per_tag[0].camera_to_tag.translation_m.z, 0.0);
+    EXPECT_LT(out.per_tag[0].reprojection_error_px, 5.0);
 
     apriltag_detections_destroy(detections);
     apriltag_detector_destroy(detector);

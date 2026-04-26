@@ -16,6 +16,7 @@
 #include "posest/MeasurementBus.h"
 #include "posest/config/IConfigStore.h"
 #include "posest/fusion/FusionService.h"
+#include "posest/pipelines/PipelineStats.h"
 #include "posest/runtime/Factories.h"
 #include "posest/runtime/RuntimeGraph.h"
 #include "posest/runtime/WebService.h"
@@ -105,6 +106,7 @@ struct DaemonHealth {
     bool has_latest_pose{false};
     teensy::TeensyStats teensy;
     std::vector<CameraLiveStats> cameras;
+    std::vector<pipelines::AprilTagPipelineStats> apriltag_pipelines;
     std::string last_error;
     int shutdown_signal{0};
 };
