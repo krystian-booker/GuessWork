@@ -47,6 +47,7 @@ private:
 
     struct EventQueueEntry {
         CameraTriggerEventPayload event;
+        std::uint32_t raw_time_us{0};
     };
 
     void tickIsr();
@@ -54,6 +55,12 @@ private:
     void enqueueEventFromIsr(
         const Channel& channel,
         std::uint32_t event_time_us);
+
+    // Expand the 32-bit ISR-captured timestamp to 64 bits. Mirrors the IMU
+    // pattern in Bmi088Imu::expandTimestamp — runs only from the main-loop
+    // drain (popEvent), never from an ISR. Required so trigger timestamps
+    // do not silently wrap every ~71 minutes.
+    std::uint64_t expandTimestamp(std::uint32_t timestamp32);
 
     static bool isAllowedPin(std::int32_t pin);
     static bool dueTick(std::uint32_t now_tick, std::uint32_t target_tick);
@@ -67,6 +74,8 @@ private:
     std::uint32_t status_flags_{0};
     std::uint32_t master_period_us_{0};
     volatile std::uint32_t master_tick_count_{0};
+    std::uint32_t time64_high_{0};
+    std::uint32_t time64_low_prev_{0};
     bool timer_running_{false};
     IntervalTimer interval_timer_{};
 

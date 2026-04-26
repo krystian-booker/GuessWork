@@ -310,10 +310,21 @@ COMMIT;
 )sql";
 }
 
+const char* migration7Sql() {
+    return R"sql(
+BEGIN;
+
+UPDATE teensy_config SET baud_rate = 921600 WHERE baud_rate = 115200;
+
+PRAGMA user_version = 7;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 6;
+    return 7;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -348,6 +359,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 5) {
         exec(db, migration6Sql());
+        migrated_version = 6;
+    }
+    if (migrated_version == 6) {
+        exec(db, migration7Sql());
     }
 }
 

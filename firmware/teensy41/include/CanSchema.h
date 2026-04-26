@@ -11,6 +11,49 @@
 // trailing zero-padding so a future field can be added without touching the
 // wire format. The Teensy -> RIO fused-pose frame is unchanged so the FRC
 // robot code on the RIO does not need to be re-flashed for this contract bump.
+//
+// ---------------------------------------------------------------------------
+// RoboRIO clock-domain contract (read this before writing the RIO firmware).
+// ---------------------------------------------------------------------------
+//
+//  rio_time_us is the monotonic FPGA microsecond counter:
+//      rio_time_us = (uint64_t) HAL_GetFPGATime();
+//  or, equivalently in WPILib Java/C++:
+//      rio_time_us = (uint64_t)(Timer.getFPGATimestamp() * 1.0e6);
+//
+//  - Epoch: zero at RIO power-on / FPGA reset. Free-running 64-bit counter,
+//    so wraparound is not a real concern (~584,000 years).
+//  - Monotonicity: must be strictly non-decreasing across RIO firmware
+//    iterations. Do NOT swap epochs (e.g. to system wall-clock) mid-run.
+//  - Reboot: rio_time_us drops back to ~0 after RIO power cycle. The Teensy
+//    side detects this via 32 consecutive offset-gate rejections on 0x101
+//    pings and re-anchors automatically; expect ~0.3-30 s of dropped chassis
+//    samples depending on the configured ping rate.
+//
+// 0x101 ping rate (RoboRIO -> Teensy):
+//
+//  - Recommended: 100 Hz (1 ms period).
+//  - Teensy filter: alpha = 1/8 EMA, single-step rejection at +/- 5 ms,
+//    bootstrap window of 3 unconditional samples.
+//  - At 100 Hz the filter converges in ~10 samples (~100 ms) after RIO
+//    power-on or after a reboot-triggered re-bootstrap.
+//
+// 0x100 chassis speeds (RoboRIO -> Teensy):
+//
+//  - rio_time_us must be the FPGA microsecond at the instant kinematics is
+//    computed (the moment the wheel speeds are sampled), NOT the time the
+//    CAN frame is queued for transmit. Otherwise the host's RIO->host time
+//    conversion will reflect TX-queue latency rather than measurement time.
+//  - status_flags: bit 0 = stale wheel encoder data, bit 1 = wheel slip
+//    detected. The Teensy passes status_flags through verbatim and OR's in
+//    its own kStatusUnsynchronizedRioTime if its local offset is invalid.
+//
+// Endianness:
+//
+//  - All multi-byte fields are little-endian (matches both Teensy and RIO
+//    native byte order; no byte-swap on either side).
+//  - double = IEEE 754 binary64.
+//  - Trailing pad bytes MUST be zero on transmit; receivers ignore them.
 
 namespace posest::firmware::can_schema {
 

@@ -51,7 +51,8 @@ void CanBridge::begin(const CanBusConfig& config) {
     next_pose_tx_us_ = micros();
     rio_offset_valid_ = false;
     rio_offset_us_ema_ = 0;
-    rio_bootstrap_remaining_ = 3;
+    rio_bootstrap_remaining_ = kRioBootstrapSamples;
+    rio_consecutive_rejections_ = 0;
     pending_head_ = 0;
     pending_count_ = 0;
     error_flags_ = 0;
@@ -98,7 +99,10 @@ void CanBridge::poll(std::uint64_t now_us) {
 #endif
 
     maybeSendFusedPose(now_us);
+    checkRioStaleness(now_us);
+}
 
+void CanBridge::checkRioStaleness(std::uint64_t now_us) {
     if (rio_offset_valid_ && config_.rio_offset_stale_us > 0u &&
         now_us > last_rio_offset_time_us_ &&
         now_us - last_rio_offset_time_us_ > config_.rio_offset_stale_us) {
@@ -163,6 +167,22 @@ void CanBridge::handleRioTimeSync(
     std::uint64_t now_us) {
     const std::uint64_t rio_time_us =
         readU64(data, can_schema::kRioTimeSyncRioTimeOffset);
+    applyRioTimeSync(rio_time_us, now_us);
+}
+
+// rio_time_us is the RoboRIO FPGA microsecond counter (monotonic since RIO
+// power-on). offset_new = teensy_recv - rio_send approximates the constant
+// clock skew between the two domains, modulo CAN bus latency. The EMA filters
+// out latency jitter; the abs_delta gate rejects single-sample outliers.
+//
+// Bootstrap: accept the first kRioBootstrapSamples unconditionally so the
+// EMA anchors before the gate engages.
+//
+// RIO reboot: rio_time_us drops to ~0, every subsequent ping fails the gate.
+// After kRioRejectionResetThreshold consecutive rejections we force a
+// re-bootstrap so the filter re-anchors on the new RIO epoch instead of
+// staying stuck on the pre-reboot offset forever.
+void CanBridge::applyRioTimeSync(std::uint64_t rio_time_us, std::uint64_t now_us) {
     const std::int64_t offset_new =
         static_cast<std::int64_t>(now_us) - static_cast<std::int64_t>(rio_time_us);
 
@@ -173,8 +193,17 @@ void CanBridge::handleRioTimeSync(
         const std::int64_t abs_delta = delta < 0 ? -delta : delta;
         if (abs_delta > kRioMaxStepUs) {
             ++rio_pings_rejected_;
+            ++rio_consecutive_rejections_;
             status_flags_ |= kRioStatusPingRejected;
-            return;
+            if (rio_consecutive_rejections_ < kRioRejectionResetThreshold) {
+                return;
+            }
+            // Sustained rejection: assume the RoboRIO rebooted and start
+            // over. Fall through and let this sample re-anchor as the new
+            // bootstrap baseline.
+            rio_offset_valid_ = false;
+            rio_bootstrap_remaining_ = kRioBootstrapSamples;
+            rio_consecutive_rejections_ = 0;
         }
     }
 
@@ -186,6 +215,7 @@ void CanBridge::handleRioTimeSync(
     }
     rio_offset_valid_ = true;
     last_rio_offset_time_us_ = now_us;
+    rio_consecutive_rejections_ = 0;
     if (rio_bootstrap_remaining_ > 0u) {
         --rio_bootstrap_remaining_;
     }

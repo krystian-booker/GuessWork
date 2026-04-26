@@ -38,6 +38,7 @@ struct TeensyStats {
     std::uint64_t invalid_payloads{0};
     std::uint64_t inbound_imu_samples{0};
     std::uint64_t inbound_chassis_speeds_samples{0};
+    std::uint64_t inbound_chassis_speeds_dropped_pre_sync{0};
     std::uint64_t inbound_camera_trigger_events{0};
     std::uint64_t inbound_measurements_dropped{0};
     std::uint64_t outbound_frames_queued{0};
@@ -53,7 +54,11 @@ struct TeensyStats {
     std::uint64_t time_sync_samples_rejected{0};
     double time_sync_skew_ppm{0.0};
     bool rio_time_sync_established{false};
-    std::int64_t rio_to_host_offset_us{0};
+    // Filtered offset between the RoboRIO FPGA microsecond clock and the
+    // Teensy local micros() clock, sourced from TeensyHealthPayload at 10 Hz.
+    // Composing this with TimeSyncFilter::apply yields rio_time_us -> host
+    // steady_clock for ChassisSpeeds samples.
+    std::int64_t rio_to_teensy_offset_us{0};
     std::optional<ConfigAckPayload> last_trigger_ack;
     std::optional<ConfigAckPayload> last_imu_ack;
 };

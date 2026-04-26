@@ -94,7 +94,7 @@ struct CanBusConfig {
 
 struct TeensyConfig {
     std::string serial_port;
-    std::uint32_t baud_rate{115200};
+    std::uint32_t baud_rate{921600};
     std::uint32_t reconnect_interval_ms{1000};
     std::uint32_t read_timeout_ms{20};
     std::uint32_t fused_pose_can_id{0};

@@ -44,21 +44,20 @@ Messages currently defined (`Protocol.h`):
 | Type | ID | Direction | Wire status |
 | --- | ---: | --- | --- |
 | `ImuSample` | 1 | Teensy → host | Sent on every BMI088 DRDY |
-| `WheelOdometry` | 2 | Teensy → host | Encoder defined, **no producer in firmware** |
 | `CanRx` | 3 | Teensy → host | **Reserved; never produced** |
 | `TeensyHealth` | 4 | Teensy → host | Sent at 10 Hz |
 | `TimeSyncResponse` | 5 | Teensy → host | Sent for every request |
-| `RobotOdometry` | 6 | Teensy → host | Encoder defined, **no producer in firmware** |
 | `CameraTriggerEvent` | 7 | Teensy → host | Sent on every rising edge of every active sync output |
+| `ChassisSpeeds` | 9 | Teensy → host | Emitted from CAN ID `0x100` decode; carries `rio_time_us`, `vx`, `vy`, `omega` |
 | `FusedPose` | 64 | Host → Teensy | Decoded; stored in `CanBridge::latest_pose_` |
 | `CanTx` | 65 | Host → Teensy | **Counted as unsupported** |
 | `TimeSyncRequest` | 66 | Host → Teensy | Decoded immediately and answered |
-| `ConfigCommand` | 67 | Host → Teensy | Only `CameraTriggers` kind is implemented |
+| `ConfigCommand` | 67 | Host → Teensy | `CameraTriggers` and `ImuConfig` kinds supported |
 
 Helper status bits (`Protocol.h`):
 
 - `kStatusUnsynchronizedTime` — the host has not yet established a Teensy↔host offset; the included `teensy_time_us` cannot be trusted in the host clock.
-- `kStatusUnsynchronizedRioTime` — declared in the host header for use on `RobotOdometry`. **Never set by anyone today.**
+- `kStatusUnsynchronizedRioTime` — set on `ChassisSpeeds` while the RoboRIO↔Teensy offset is not yet valid.
 - `kStatusRobotSlipping` — declared, never set.
 
 ### 2.2 USB‑CDC transport
@@ -211,7 +210,7 @@ Each rising edge of the synchronized DRDY runs `onDataReadyIsr(micros())` which 
 ### 6.1 What is implemented today
 
 - The transceiver (TJA1051T/3,118) is on the carrier board (per the user). The TJA1051T/3 is a high‑speed CAN transceiver rated for data rates up to 5 Mbit/s and is **CAN‑FD compatible** at the physical layer; it does **not** implement Signal Improvement Capability (SIC), so longer/higher‑speed busses may need a SIC‑class part later.
-- Wire format: `WheelOdometryPayload`, `RobotOdometryPayload`, `CanRx`, `CanTx`, `FusedPose`, and `kStatusUnsynchronizedRioTime` are defined on both sides of USB.
+- Wire format: `ChassisSpeedsPayload`, `CanRx`, `CanTx`, `FusedPose`, and `kStatusUnsynchronizedRioTime` are defined on both sides of USB.
 - `TeensyService::publish(FusedPoseEstimate)` (the `IFusionOutputSink` implementation) encodes a `FusedPose` frame and queues it for the worker thread.
 - The firmware `CanBridge` class (`firmware/teensy41/include/CanBridge.h`) decodes and stores the latest `FusedPosePayload` and counts unsupported `CanTx` requests. It does not own a CAN driver, transmit FIFO, or receive callback.
 - `MessageType::CanTx` from the host is handled by `g_can.handleUnsupportedCanTx()` and sets `kErrorCanUnsupported`. There is no `CanRx` producer.
@@ -221,7 +220,7 @@ Each rising edge of the synchronized DRDY runs `onDataReadyIsr(micros())` which 
 | Requirement | Status |
 | --- | --- |
 | Talk to the RoboRIO over CAN‑FD via TJA1051T/3 | ❌ no driver, no controller setup, no transceiver init |
-| Receive wheel odometry | ❌ `WheelOdometry`/`RobotOdometry` decoders exist on the host but **nothing produces these frames in firmware**. The associated handlers in `TeensyService::handleFrame` are dead code paths. |
+| Receive chassis speeds | ✅ `ChassisSpeeds` decode handler in `TeensyService::handleFrame` publishes a `ChassisSpeedsSample` onto `MeasurementBus`. |
 | Send fused pose back to the RoboRIO | ⚠️ Half done. Host‑side `FusedPose` flows to the firmware, where it is stored in `CanBridge::latest_pose_`. **It is never put on the CAN bus** because there is no CAN driver. |
 | Sync timestamps across host/Teensy/RoboRIO | ❌ Only host↔Teensy is implemented (§3). The RoboRIO leg has no implementation. |
 
@@ -230,12 +229,12 @@ Each rising edge of the synchronized DRDY runs `onDataReadyIsr(micros())` which 
 - **Choose and integrate a Teensy 4.1 CAN driver.** The Teensy 4.1 has CAN1, CAN2, and **CAN3 with FD support**; the typical library is `FlexCAN_T4` (FD via `FlexCAN_T4FD`). Pick a CAN3 TX/RX pin pair, add the driver as a PlatformIO `lib_deps`, wire `CanBridge::begin()` to configure baud (typical FRC nominal: 1 Mbit; data‑phase: 2–5 Mbit), filters, and TX/RX mailboxes.
 - **Confirm transceiver class.** TJA1051T/3 is FD‑capable but not a SIC part; confirm the TX/RX pinout matches the chosen FlexCAN bus and that bus length / termination support the chosen FD data‑phase rate. If higher rates / longer bus are needed, swap to a TJA1463/TJA1463A‑class SIC transceiver.
 - **Define the CAN message contract with the RoboRIO.** Today neither side has a fixed ID/payload schema for wheel odometry from the RoboRIO or fused pose to the RoboRIO. This needs a documented arbitration‑ID map and the CAN‑FD frame layouts (DLC, BRS, etc.) on both ends.
-- **Wire a `WheelOdometry` / `RobotOdometry` producer in firmware.** `CanBridge` should publish a typed payload onto the existing USB protocol whenever a CAN frame matching the configured RX IDs arrives. Today the encoders exist but nothing calls them on the firmware side.
+- **`ChassisSpeeds` producer in firmware** is wired (`CanBridge::handleRioChassisSpeeds`).
 - **Wire fused‑pose CAN TX.** `CanBridge::setLatestFusedPose` only stores; add a periodic TX (rate‑limited to e.g. `pose_publish_hz` from `TeensyConfig`) that builds the CAN‑FD frame from `latest_pose_`.
 - **Implement Teensy ↔ RoboRIO time sync.** Two viable approaches:
-  - **Round‑trip in CAN.** Send a periodic `TimeSyncRequest` CAN frame to the RoboRIO carrying `teensy_time_us`; the RoboRIO replies with `(teensy_time_us, rio_time_us)`. The Teensy applies the same midpoint formula as host↔Teensy and stores `rio_offset_us`. Every outbound `RobotOdometry` then carries both `teensy_time_us` (already in the schema) and the **measured** `rio_time_us`.
+  - **Round‑trip in CAN.** Send a periodic `TimeSyncRequest` CAN frame to the RoboRIO carrying `teensy_time_us`; the RoboRIO replies with `(teensy_time_us, rio_time_us)`. The Teensy applies the same midpoint formula as host↔Teensy and stores `rio_offset_us`. Every outbound `ChassisSpeeds` then carries both `teensy_time_us` (already in the schema) and the **measured** `rio_time_us`.
   - **Piggyback the offset.** Have the RoboRIO publish its monotonic clock at a high rate; Teensy estimates the offset from observed RX times. Lower precision but no extra request frames.
-  - Either way, set `kStatusUnsynchronizedRioTime` on `RobotOdometry` until the offset is measured. That bit is declared but **never written** today.
+  - Either way, set `kStatusUnsynchronizedRioTime` on `ChassisSpeeds` until the offset is measured. That bit is declared but **never written** today.
 - **Surface the third clock domain.** Once `rio_time_us` is meaningfully stamped, the host needs a `rio_offset_us` analogous to `time_sync_offset_us` so the GTSAM graph can place RoboRIO‑derived measurements in the host steady clock. That's a host‑side change in `TeensyService` (a new `rio_to_host_offset_us` field) and in any consumer that needs RoboRIO time.
 
 ---
@@ -271,7 +270,7 @@ Reconnect policy: `TeensyService::workerLoop()` retries forever; `reconnect_inte
 | Time sync host ↔ Teensy | ✅ | 9‑sample windowed filter with outlier rejection (`min_rtt × 2 + 1 ms`), 1/8 EMA, linear‑regression skew (ppm). Math lives in `posest::teensy::TimeSyncFilter`. |
 | Time sync Teensy ↔ RoboRIO | ✅ | Owned by `CanBridge`; offset surfaced in `TeensyHealth.rio_offset_us`. |
 | CAN driver and transceiver init | ✅ | `CanBridge` owns a `FlexCAN_T4FD<CAN3>` instance at the configured nominal/data rates. |
-| CAN RX → `RobotOdometry` USB frames | ✅ | Decode of arbitration ID `0x100` (placeholder schema). |
+| CAN RX → `ChassisSpeeds` USB frames | ✅ | Decode of arbitration ID `0x100` (placeholder schema). |
 | CAN TX of fused pose | ✅ | Latest `FusedPose` re‑published on `0x180` at `pose_publish_hz`. |
 | Firmware/host protocol header drift detection | ✅ | `scripts/check_protocol_constants.py` runs as a CTest case (`protocol_constants_drift`). |
 
@@ -283,7 +282,7 @@ Roughly in priority order to close the requirement gap:
 
 1. **CAN‑FD driver bring‑up.** Pick the FlexCAN bus and pins, add `FlexCAN_T4`, replace `CanBridge` with a real implementation that owns RX filters and a TX queue. Ship it before the schema work — the rest of CAN depends on a working bus.
 2. **Define the RoboRIO CAN schema.** Arbitration IDs, payload layouts, frame rate, and endianness for at minimum: wheel odometry (RoboRIO→Teensy) and fused pose (Teensy→RoboRIO). Document it in `firmware/teensy41/README.md` and mirror in `include/posest/teensy/Protocol.h` if any of those get re‑exported over USB.
-3. **Wire RoboRIO time sync.** Once the bus is up, add a per‑second time‑sync exchange and start populating `RobotOdometryPayload.rio_time_us` and `kStatusUnsynchronizedRioTime` honestly.
+3. **Wire RoboRIO time sync.** Once the bus is up, add a per‑second time‑sync exchange and start populating `ChassisSpeedsPayload.rio_time_us` and `kStatusUnsynchronizedRioTime` honestly.
 4. **Harden host↔Teensy sync.** Add round‑trip outlier rejection and a slow‑decay offset filter so the host clock remains stable across long sessions.
 5. **Move triggers to hardware timing.** Switch `CameraTriggerScheduler` to `IntervalTimer`/FlexPWM, and adopt a master tick so harmonic rates align exactly. Removes both jitter and the period‑rounding drift.
 6. **Make IMU configuration data‑driven.** Expose range/ODR/bandwidth in `TeensyConfig` (or a dedicated `ImuConfig`) and apply on connect, the same way camera triggers are pushed.

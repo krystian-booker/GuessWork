@@ -26,11 +26,9 @@ constexpr std::size_t kMaxFrameSize = kHeaderSize + kMaxPayloadSize + kCrcSize;
 
 enum class MessageType : std::uint8_t {
     ImuSample = 1,
-    // Reserved (was WheelOdometry) = 2,
     CanRx = 3,
     TeensyHealth = 4,
     TimeSyncResponse = 5,
-    // Reserved (was RobotOdometry) = 6,
     CameraTriggerEvent = 7,
     ConfigAck = 8,
     ChassisSpeeds = 9,

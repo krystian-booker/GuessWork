@@ -590,6 +590,94 @@ PRAGMA user_version = 2;
     std::filesystem::remove(path);
 }
 
+TEST(SqliteConfigStore, MigrationSevenBumpsLegacyDefaultBaudRate) {
+    const auto path = tempDbPath("v6_baud_migration");
+    std::filesystem::remove(path);
+
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &db), SQLITE_OK);
+    execSql(db, R"sql(
+CREATE TABLE teensy_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    serial_port TEXT NOT NULL,
+    fused_pose_can_id INTEGER NOT NULL,
+    status_can_id INTEGER NOT NULL,
+    pose_publish_hz REAL NOT NULL,
+    baud_rate INTEGER NOT NULL DEFAULT 115200,
+    reconnect_interval_ms INTEGER NOT NULL DEFAULT 1000,
+    read_timeout_ms INTEGER NOT NULL DEFAULT 20,
+    time_sync_interval_ms INTEGER NOT NULL DEFAULT 1000
+);
+INSERT INTO teensy_config (id, serial_port, fused_pose_can_id, status_can_id,
+    pose_publish_hz, baud_rate)
+    VALUES (1, '/dev/ttyACM0', 0, 0, 50.0, 115200);
+PRAGMA user_version = 6;
+)sql");
+
+    posest::config::applyMigrations(db);
+    sqlite3_close(db);
+
+    EXPECT_EQ(readUserVersion(path), posest::config::currentSchemaVersion());
+
+    sqlite3* check = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &check), SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    ASSERT_EQ(
+        sqlite3_prepare_v2(
+            check, "SELECT baud_rate FROM teensy_config WHERE id = 1", -1, &stmt,
+            nullptr),
+        SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    EXPECT_EQ(sqlite3_column_int(stmt, 0), 921600);
+    sqlite3_finalize(stmt);
+    sqlite3_close(check);
+
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, MigrationSevenLeavesNonDefaultBaudRateAlone) {
+    const auto path = tempDbPath("v6_baud_preserve");
+    std::filesystem::remove(path);
+
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &db), SQLITE_OK);
+    execSql(db, R"sql(
+CREATE TABLE teensy_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    serial_port TEXT NOT NULL,
+    fused_pose_can_id INTEGER NOT NULL,
+    status_can_id INTEGER NOT NULL,
+    pose_publish_hz REAL NOT NULL,
+    baud_rate INTEGER NOT NULL DEFAULT 115200,
+    reconnect_interval_ms INTEGER NOT NULL DEFAULT 1000,
+    read_timeout_ms INTEGER NOT NULL DEFAULT 20,
+    time_sync_interval_ms INTEGER NOT NULL DEFAULT 1000
+);
+INSERT INTO teensy_config (id, serial_port, fused_pose_can_id, status_can_id,
+    pose_publish_hz, baud_rate)
+    VALUES (1, '/dev/ttyACM0', 0, 0, 50.0, 460800);
+PRAGMA user_version = 6;
+)sql");
+
+    posest::config::applyMigrations(db);
+    sqlite3_close(db);
+
+    sqlite3* check = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &check), SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    ASSERT_EQ(
+        sqlite3_prepare_v2(
+            check, "SELECT baud_rate FROM teensy_config WHERE id = 1", -1, &stmt,
+            nullptr),
+        SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    EXPECT_EQ(sqlite3_column_int(stmt, 0), 460800);
+    sqlite3_finalize(stmt);
+    sqlite3_close(check);
+
+    std::filesystem::remove(path);
+}
+
 TEST(CalibrationParsers, ParsesKalibrCamchainYaml) {
     const auto path = writeTempFile(
         "kalibr",

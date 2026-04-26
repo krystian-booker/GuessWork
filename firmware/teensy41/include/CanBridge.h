@@ -71,8 +71,17 @@ public:
     std::uint32_t unsupportedCanTxFrames() const { return unsupported_can_tx_frames_; }
     bool rioOffsetValid() const { return rio_offset_valid_; }
     std::int64_t rioOffsetUs() const { return rio_offset_us_ema_; }
+    std::uint32_t rioConsecutiveRejections() const { return rio_consecutive_rejections_; }
     std::uint32_t rioStatusFlags() const;
     CanBridgeStats stats() const;
+
+    // Test hooks. Production paths use the private byte-buffer overloads
+    // driven by handleRxFrame / poll; these expose the same logic to unit
+    // tests that cannot stand up FlexCAN_T4.
+    void testHookFeedRioTimeSync(std::uint64_t rio_time_us, std::uint64_t now_us) {
+        applyRioTimeSync(rio_time_us, now_us);
+    }
+    void testHookCheckStaleness(std::uint64_t now_us) { checkRioStaleness(now_us); }
 
 private:
     void handleRxFrame(std::uint32_t can_id,
@@ -83,6 +92,8 @@ private:
                                 std::uint64_t now_us);
     void handleRioTimeSync(const std::uint8_t* data, std::size_t length,
                             std::uint64_t now_us);
+    void applyRioTimeSync(std::uint64_t rio_time_us, std::uint64_t now_us);
+    void checkRioStaleness(std::uint64_t now_us);
     void enqueuePendingChassisSpeeds(const ChassisSpeedsPayload& payload);
     void maybeSendFusedPose(std::uint64_t now_us);
     bool transmitTeensyPose(const FusedPosePayload& pose, std::uint64_t now_us);
@@ -105,7 +116,10 @@ private:
     std::uint64_t last_rio_offset_time_us_{0};
     std::uint32_t rio_pings_received_{0};
     std::uint32_t rio_pings_rejected_{0};
-    std::uint32_t rio_bootstrap_remaining_{3};
+    std::uint32_t rio_consecutive_rejections_{0};
+    static constexpr std::uint32_t kRioBootstrapSamples = 3;
+    static constexpr std::uint32_t kRioRejectionResetThreshold = 32;
+    std::uint32_t rio_bootstrap_remaining_{kRioBootstrapSamples};
 
     std::uint32_t rx_frames_{0};
     std::uint32_t tx_frames_{0};

@@ -116,13 +116,12 @@ Message directions:
 | Type | ID | Direction | Status |
 | --- | ---: | --- | --- |
 | `ImuSample` | 1 | Teensy to host | BMI088 producer enabled after successful init |
-| `WheelOdometry` | 2 | Teensy to host | Encoder path present, currently unused (RIO sends pose, not per-wheel deltas) |
 | `CanRx` | 3 | Teensy to host | Reserved |
 | `TeensyHealth` | 4 | Teensy to host | Sent at 10 Hz; carries `rio_offset_us` and IMU saturation counts |
 | `TimeSyncResponse` | 5 | Teensy to host | Sent for every time sync request |
-| `RobotOdometry` | 6 | Teensy to host | Emitted from CAN ID `0x100` decode; carries `rio_time_us` |
 | `CameraTriggerEvent` | 7 | Teensy to host | One frame per rising edge of every armed sync output |
 | `ConfigAck` | 8 | Teensy to host | Reply to every `ConfigCommand`; carries effective trigger periods / IMU config |
+| `ChassisSpeeds` | 9 | Teensy to host | Emitted from CAN ID `0x100` decode; carries `rio_time_us`, `vx`, `vy`, `omega` |
 | `FusedPose` | 64 | Host to Teensy | Decoded and re-published on CAN ID `0x180` at `pose_publish_hz` |
 | `CanTx` | 65 | Host to Teensy | Reserved; currently rejected as unsupported |
 | `TimeSyncRequest` | 66 | Host to Teensy | Decoded immediately |
@@ -182,8 +181,9 @@ The firmware drives the Teensy 4.1 CAN3 bus (RX = pin 30, TX = pin 31) via
 RoboRIO bus. The default rates are `1 Mbit/s` nominal and `2 Mbit/s` data phase,
 configurable through `TeensyConfig::CanBusConfig` in the host SQLite store.
 
-Placeholder message catalogue (deliberately thin until the RoboRIO contract is
-finalized — see `firmware/teensy41/include/CanSchema.h`):
+Message catalogue — see `firmware/teensy41/include/CanSchema.h` for the full
+RoboRIO clock-domain contract (FPGA microsecond semantics, recommended ping
+rate, reboot recovery behavior):
 
 | Direction | CAN ID | Bytes | Layout |
 | --- | ---: | ---: | --- |
@@ -191,11 +191,12 @@ finalized — see `firmware/teensy41/include/CanSchema.h`):
 | RIO → Teensy time sync | `0x101` | 16 | `uint64 rio_time_us`, `uint32 ping_seq`, `uint32 reserved` |
 | Teensy → RIO pose | `0x180` | 48 | `int64 teensy_time_us`, `double x_m`, `double y_m`, `double theta_rad`, `uint32 status_flags`, 12 B pad |
 
-`0x100` decodes into a `RobotOdometry` USB frame the host can ingest as a
-`RobotOdometrySample`. `0x101` drives the RoboRIO time-sync filter (offset =
-`teensy_recv_us − rio_time_us`, EMA `α = 1/8`, single-step rejection at 5 ms).
-`0x180` is emitted at `pose_publish_hz` from the most recent `FusedPose`
-forwarded from the host.
+`0x100` decodes into a `ChassisSpeeds` USB frame the host can ingest as a
+`ChassisSpeedsSample`. `0x101` drives the RoboRIO time-sync filter (offset =
+`teensy_recv_us − rio_time_us`, EMA `α = 1/8`, single-step rejection at 5 ms,
+auto-resync after 32 consecutive rejections — see `CanSchema.h` for the full
+RoboRIO clock-domain contract). `0x180` is emitted at `pose_publish_hz` from
+the most recent `FusedPose` forwarded from the host.
 
 The current RoboRIO offset is reported in `TeensyHealth.rio_offset_us`, with
 `rio_status_flags` carrying `kHealthRioUnsynchronized` until at least one

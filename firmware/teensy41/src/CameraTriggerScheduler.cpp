@@ -13,6 +13,8 @@ void CameraTriggerScheduler::begin() {
         pinMode(pin, OUTPUT);
         digitalWriteFast(pin, LOW);
     }
+    time64_low_prev_ = micros();
+    time64_high_ = 0;
     active_instance_ = this;
 }
 
@@ -141,15 +143,18 @@ void CameraTriggerScheduler::update(std::uint32_t now_us) {
 }
 
 bool CameraTriggerScheduler::popEvent(CameraTriggerEventPayload& event) {
+    std::uint32_t raw_time_us = 0;
     noInterrupts();
     if (event_count_ == 0u) {
         interrupts();
         return false;
     }
     event = events_[event_head_].event;
+    raw_time_us = events_[event_head_].raw_time_us;
     event_head_ = (event_head_ + 1u) % kCameraTriggerEventQueueCapacity;
     --event_count_;
     interrupts();
+    event.teensy_time_us = expandTimestamp(raw_time_us);
     return true;
 }
 
@@ -238,11 +243,32 @@ void CameraTriggerScheduler::enqueueEventFromIsr(
     }
     const std::size_t tail =
         (event_head_ + event_count_) % kCameraTriggerEventQueueCapacity;
-    events_[tail].event.teensy_time_us = event_time_us;
+    events_[tail].raw_time_us = event_time_us;
+    events_[tail].event.teensy_time_us = 0;
     events_[tail].event.pin = static_cast<std::int32_t>(channel.pin);
     events_[tail].event.trigger_sequence = channel.trigger_sequence;
     events_[tail].event.status_flags = status_flags_;
     ++event_count_;
+}
+
+std::uint64_t CameraTriggerScheduler::expandTimestamp(std::uint32_t timestamp32) {
+    // Mirrors Bmi088Imu::expandTimestamp. Sample the 32-bit clock fresh so
+    // the high-half anchor never reflects a stale reference; bump high every
+    // time the low half wraps. Runs only from the main-loop drain.
+    const std::uint32_t now_low = micros();
+    if (now_low < time64_low_prev_) {
+        ++time64_high_;
+    }
+    time64_low_prev_ = now_low;
+
+    std::uint32_t high = time64_high_;
+    if (timestamp32 > now_low) {
+        if (high == 0u) {
+            return static_cast<std::uint64_t>(timestamp32);
+        }
+        --high;
+    }
+    return (static_cast<std::uint64_t>(high) << 32u) | timestamp32;
 }
 
 bool CameraTriggerScheduler::isAllowedPin(std::int32_t pin) {

@@ -66,6 +66,60 @@ posest::teensy::Frame decodeWrittenFrame(
     throw std::runtime_error("expected written frame was not found");
 }
 
+// Establishes host<->Teensy time sync by replying to one of the periodic
+// TimeSyncRequest frames. Returns teensy_transmit_time_us so callers can
+// stamp follow-on payloads consistently. `sequence` is the inbound frame
+// sequence number; pass a value above any subsequent feeder sequences to
+// avoid spurious sequence_gaps in tests that assert on the counter.
+std::uint64_t primeTimeSync(
+    posest::teensy::FakeSerialTransport& fake,
+    posest::teensy::TeensyService& service,
+    std::uint32_t sequence = 0) {
+    if (!fake.waitForWriteCount(3, 500ms)) {
+        throw std::runtime_error("teensy never sent the expected initial writes");
+    }
+    const auto request_frame = decodeWrittenFrame(
+        fake.writes(), posest::teensy::MessageType::TimeSyncRequest);
+    const auto request =
+        posest::teensy::decodeTimeSyncRequestPayload(request_frame.payload);
+    if (!request) {
+        throw std::runtime_error("malformed TimeSyncRequest");
+    }
+    posest::teensy::TimeSyncResponsePayload response;
+    response.request_sequence = request->request_sequence;
+    response.teensy_receive_time_us = request->host_send_time_us + 100;
+    response.teensy_transmit_time_us = request->host_send_time_us + 200;
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::TimeSyncResponse,
+        sequence,
+        posest::teensy::encodeTimeSyncResponsePayload(response));
+    if (!waitFor([&] { return service.stats().time_sync_established; })) {
+        throw std::runtime_error("host<->Teensy time sync never established");
+    }
+    return response.teensy_transmit_time_us;
+}
+
+// Establishes Teensy<->RIO time sync by feeding a TeensyHealth frame with
+// rio_status_flags clear and the requested offset on the wire.
+void primeRioSync(
+    posest::teensy::FakeSerialTransport& fake,
+    posest::teensy::TeensyService& service,
+    std::int64_t rio_to_teensy_offset_us,
+    std::uint32_t sequence = 1) {
+    posest::teensy::TeensyHealthPayload health;
+    health.rio_offset_us = rio_to_teensy_offset_us;
+    health.rio_status_flags = 0;  // clear kHealthRioUnsynchronized
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::TeensyHealth,
+        sequence,
+        posest::teensy::encodeTeensyHealthPayload(health));
+    if (!waitFor([&] { return service.stats().rio_time_sync_established; })) {
+        throw std::runtime_error("Teensy<->RIO time sync never established");
+    }
+}
+
 }  // namespace
 
 TEST(TeensyService, DisabledEmptySerialPortStartsAndStopsWithoutOpening) {
@@ -87,7 +141,7 @@ TEST(TeensyService, DisabledEmptySerialPortStartsAndStopsWithoutOpening) {
     EXPECT_EQ(fake.openCount(), 0u);
 }
 
-TEST(TeensyService, PublishesInboundImuAndChassisSpeedsSamples) {
+TEST(TeensyService, PublishesImuSamplesEvenBeforeTimeSync) {
     posest::MeasurementBus bus(8);
     posest::teensy::FakeSerialTransport fake;
     auto state = fake.sharedState();
@@ -104,47 +158,147 @@ TEST(TeensyService, PublishesInboundImuAndChassisSpeedsSamples) {
     imu_payload.teensy_time_us = 10;
     imu_payload.accel_mps2 = {1.0, 2.0, 3.0};
     imu_payload.gyro_radps = {4.0, 5.0, 6.0};
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::ImuSample,
+        0,
+        posest::teensy::encodeImuPayload(imu_payload));
 
-    posest::teensy::Frame imu_frame;
-    imu_frame.type = posest::teensy::MessageType::ImuSample;
-    imu_frame.sequence = 0;
-    imu_frame.payload = posest::teensy::encodeImuPayload(imu_payload);
-    fake.pushReadBytes(posest::teensy::encodeFrame(imu_frame));
+    ASSERT_TRUE(waitFor([&] {
+        return service.stats().inbound_imu_samples == 1u;
+    }));
 
+    auto measurement = bus.take();
+    ASSERT_TRUE(measurement.has_value());
+    const auto& imu = std::get<posest::ImuSample>(*measurement);
+    EXPECT_DOUBLE_EQ(imu.accel_mps2.y, 2.0);
+    EXPECT_NE(imu.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
+
+    service.stop();
+}
+
+TEST(TeensyService, DropsChassisSpeedsBeforeBothSyncsEstablished) {
+    posest::MeasurementBus bus(8);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); });
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+
+    // No TimeSyncResponse and no TeensyHealth — neither leg of the clock
+    // chain is established. The chassis frame must be dropped, not published
+    // with a fallback (Teensy-receive) timestamp.
     posest::teensy::ChassisSpeedsPayload chassis_payload;
     chassis_payload.teensy_time_us = 20;
     chassis_payload.rio_time_us = 21;
     chassis_payload.vx_mps = 1.0;
-    chassis_payload.vy_mps = 0.5;
-    chassis_payload.omega_radps = 0.25;
-
-    posest::teensy::Frame chassis_frame;
-    chassis_frame.type = posest::teensy::MessageType::ChassisSpeeds;
-    chassis_frame.sequence = 1;
-    chassis_frame.payload = posest::teensy::encodeChassisSpeedsPayload(chassis_payload);
-    fake.pushReadBytes(posest::teensy::encodeFrame(chassis_frame));
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::ChassisSpeeds,
+        1,
+        posest::teensy::encodeChassisSpeedsPayload(chassis_payload));
 
     ASSERT_TRUE(waitFor([&] {
-        const auto stats = service.stats();
-        return stats.inbound_imu_samples == 1u &&
-               stats.inbound_chassis_speeds_samples == 1u;
+        return service.stats().inbound_chassis_speeds_dropped_pre_sync >= 1u;
     }));
+    EXPECT_EQ(service.stats().inbound_chassis_speeds_samples, 0u);
 
-    auto first = bus.take();
-    auto second = bus.take();
-    ASSERT_TRUE(first.has_value());
-    ASSERT_TRUE(second.has_value());
+    service.stop();
+}
 
-    const auto& imu = std::get<posest::ImuSample>(*first);
-    EXPECT_DOUBLE_EQ(imu.accel_mps2.y, 2.0);
-    EXPECT_NE(imu.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
+TEST(TeensyService, DropsChassisSpeedsWhenOnlyHostSyncEstablished) {
+    posest::MeasurementBus bus(8);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); });
 
-    const auto& chassis = std::get<posest::ChassisSpeedsSample>(*second);
-    EXPECT_DOUBLE_EQ(chassis.vx_mps, 1.0);
-    EXPECT_DOUBLE_EQ(chassis.vy_mps, 0.5);
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+
+    const std::uint64_t teensy_transmit = primeTimeSync(fake, service);
+    EXPECT_TRUE(service.stats().time_sync_established);
+    EXPECT_FALSE(service.stats().rio_time_sync_established);
+
+    posest::teensy::ChassisSpeedsPayload chassis_payload;
+    chassis_payload.teensy_time_us = teensy_transmit;
+    chassis_payload.rio_time_us = 1234;
+    chassis_payload.vx_mps = 1.0;
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::ChassisSpeeds,
+        1,
+        posest::teensy::encodeChassisSpeedsPayload(chassis_payload));
+
+    ASSERT_TRUE(waitFor([&] {
+        return service.stats().inbound_chassis_speeds_dropped_pre_sync >= 1u;
+    }));
+    EXPECT_EQ(service.stats().inbound_chassis_speeds_samples, 0u);
+
+    service.stop();
+}
+
+TEST(TeensyService, PublishesChassisSpeedsAfterBothSyncsEstablished) {
+    posest::MeasurementBus bus(8);
+    posest::teensy::FakeSerialTransport fake;
+    auto state = fake.sharedState();
+    posest::teensy::TeensyService service(
+        fastConfig(),
+        {},
+        bus,
+        [state] { return std::make_unique<posest::teensy::FakeSerialTransport>(state); });
+
+    service.start();
+    ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+
+    primeTimeSync(fake, service);
+    constexpr std::int64_t kRioToTeensyOffset = 50'000;
+    primeRioSync(fake, service, kRioToTeensyOffset);
+
+    posest::teensy::ChassisSpeedsPayload chassis_payload;
+    chassis_payload.teensy_time_us = 0;  // ignored after Fix 3
+    chassis_payload.rio_time_us = 700'000;
+    chassis_payload.vx_mps = 1.5;
+    chassis_payload.vy_mps = -0.5;
+    chassis_payload.omega_radps = 0.25;
+    pushEncodedFrame(
+        fake,
+        posest::teensy::MessageType::ChassisSpeeds,
+        1,
+        posest::teensy::encodeChassisSpeedsPayload(chassis_payload));
+
+    ASSERT_TRUE(waitFor([&] {
+        return service.stats().inbound_chassis_speeds_samples == 1u;
+    }));
+    EXPECT_EQ(service.stats().inbound_chassis_speeds_dropped_pre_sync, 0u);
+
+    auto measurement = bus.take();
+    ASSERT_TRUE(measurement.has_value());
+    const auto& chassis = std::get<posest::ChassisSpeedsSample>(*measurement);
+    EXPECT_EQ(chassis.rio_time_us, 700'000u);
+    EXPECT_DOUBLE_EQ(chassis.vx_mps, 1.5);
     EXPECT_DOUBLE_EQ(chassis.omega_radps, 0.25);
-    EXPECT_EQ(chassis.rio_time_us, 21u);
-    EXPECT_NE(chassis.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
+
+    // The published timestamp must equal TimeSyncFilter::apply(rio_time +
+    // rio_to_teensy_offset). The filter offset is roughly the negative
+    // teensy-vs-host midpoint difference established in primeTimeSync; with
+    // a near-zero RTT in the fake transport the offset is dominated by the
+    // teensy_transmit_time_us value, so we just assert the timestamp is in
+    // a sane neighborhood of (rio_time + rio_offset) interpreted as us.
+    const auto expected_teensy_time =
+        static_cast<std::int64_t>(chassis_payload.rio_time_us) + kRioToTeensyOffset;
+    const auto stamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        chassis.timestamp.time_since_epoch()).count();
+    EXPECT_GT(stamp_us, expected_teensy_time - 1'000'000);
+    EXPECT_LT(stamp_us, expected_teensy_time + 1'000'000'000);
 
     service.stop();
 }
@@ -278,6 +432,8 @@ TEST(TeensyService, HandlesSustainedOneKilohertzImuTraffic) {
 
     service.start();
     ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
+    primeTimeSync(fake, service, /*sequence=*/0);
+    primeRioSync(fake, service, /*rio_to_teensy_offset_us=*/0, /*sequence=*/1);
 
     std::atomic<std::size_t> consumed{0};
     std::thread drainer([&] {
@@ -291,7 +447,7 @@ TEST(TeensyService, HandlesSustainedOneKilohertzImuTraffic) {
     });
 
     std::thread feeder([&] {
-        std::uint32_t sequence = 0;
+        std::uint32_t sequence = 2;
         auto next_sample_time = std::chrono::steady_clock::now();
         for (std::size_t i = 0; i < kImuSamples; ++i) {
             posest::teensy::ImuPayload imu;
@@ -436,29 +592,11 @@ TEST(TeensyService, TimeSyncResponseEstablishesClockOffset) {
 
     service.start();
     ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
-    ASSERT_TRUE(fake.waitForWriteCount(3, 500ms));
-
-    const auto request_frame = decodeWrittenFrame(
-        fake.writes(),
-        posest::teensy::MessageType::TimeSyncRequest);
-    const auto request = posest::teensy::decodeTimeSyncRequestPayload(request_frame.payload);
-    ASSERT_TRUE(request.has_value());
-
-    posest::teensy::TimeSyncResponsePayload response;
-    response.request_sequence = request->request_sequence;
-    response.teensy_receive_time_us = request->host_send_time_us + 100;
-    response.teensy_transmit_time_us = request->host_send_time_us + 200;
-
-    posest::teensy::Frame frame;
-    frame.type = posest::teensy::MessageType::TimeSyncResponse;
-    frame.sequence = 0;
-    frame.payload = posest::teensy::encodeTimeSyncResponsePayload(response);
-    fake.pushReadBytes(posest::teensy::encodeFrame(frame));
-
-    ASSERT_TRUE(waitFor([&] { return service.stats().time_sync_established; }));
+    primeTimeSync(fake, service);
+    primeRioSync(fake, service, /*rio_to_teensy_offset_us=*/0);
 
     posest::teensy::ChassisSpeedsPayload chassis_payload;
-    chassis_payload.teensy_time_us = response.teensy_transmit_time_us;
+    chassis_payload.teensy_time_us = 0;
     chassis_payload.rio_time_us = 1234;
     chassis_payload.vx_mps = 4.0;
     chassis_payload.vy_mps = 5.0;

@@ -283,21 +283,37 @@ void TeensyService::handleFrame(const Frame& frame) {
                 return;
             }
 
+            // The canonical timestamp for a chassis-speed measurement is the
+            // RoboRIO FPGA instant when kinematics was computed, mapped into
+            // host steady_clock via two offsets:
+            //   teensy_time = rio_time + rio_to_teensy_offset    (CanBridge EMA)
+            //   host_time   = TimeSyncFilter::apply(teensy_time) (host EMA + skew)
+            // Both legs must be established before publishing; we drop samples
+            // during the bootstrap window rather than fall back on Teensy-side
+            // receive time (which would mix CAN bus latency into the factor).
+            Timestamp host_timestamp;
+            {
+                std::lock_guard<std::mutex> g(mu_);
+                if (!time_sync_filter_.established() ||
+                    !stats_.rio_time_sync_established) {
+                    ++stats_.inbound_chassis_speeds_dropped_pre_sync;
+                    return;
+                }
+                const std::int64_t teensy_time_signed =
+                    static_cast<std::int64_t>(decoded->rio_time_us) +
+                    stats_.rio_to_teensy_offset_us;
+                const std::int64_t host_time_us =
+                    time_sync_filter_.apply(teensy_time_signed);
+                host_timestamp = Timestamp{std::chrono::microseconds(host_time_us)};
+            }
+
             ChassisSpeedsSample sample;
-            sample.timestamp = timestampFromTeensyTime(decoded->teensy_time_us, now);
+            sample.timestamp = host_timestamp;
             sample.vx_mps = decoded->vx_mps;
             sample.vy_mps = decoded->vy_mps;
             sample.omega_radps = decoded->omega_radps;
             sample.rio_time_us = decoded->rio_time_us;
             sample.status_flags = decoded->status_flags;
-            bool time_sync_established = false;
-            {
-                std::lock_guard<std::mutex> g(mu_);
-                time_sync_established = stats_.time_sync_established;
-            }
-            if (!time_sync_established) {
-                sample.status_flags |= kStatusUnsynchronizedTime;
-            }
             const bool published = measurement_sink_.publish(sample);
             std::lock_guard<std::mutex> g(mu_);
             if (published) {
@@ -376,7 +392,7 @@ void TeensyService::handleFrame(const Frame& frame) {
                 break;
             }
             std::lock_guard<std::mutex> g(mu_);
-            stats_.rio_to_host_offset_us = decoded->rio_offset_us;
+            stats_.rio_to_teensy_offset_us = decoded->rio_offset_us;
             stats_.rio_time_sync_established =
                 (decoded->rio_status_flags & kHealthRioUnsynchronized) == 0u;
             break;
