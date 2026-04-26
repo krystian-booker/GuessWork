@@ -88,6 +88,11 @@ void sendHealth(std::uint64_t now_us) {
     health.trigger_status_flags = g_triggers.statusFlags();
     health.rx_queue_depth = static_cast<std::uint32_t>(g_decoder.bufferedBytes());
     health.tx_queue_depth = g_can.txQueueDepth();
+    health.rio_offset_us = g_can.rioOffsetUs();
+    health.rio_status_flags = g_can.rioStatusFlags();
+    const auto imu_stats = g_imu.stats();
+    health.accel_saturations = imu_stats.accel_saturations;
+    health.gyro_saturations = imu_stats.gyro_saturations;
 
     std::uint16_t payload_size = 0;
     if (!encodeTeensyHealthPayload(
@@ -99,6 +104,19 @@ void sendHealth(std::uint64_t now_us) {
         return;
     }
     writeFrame(MessageType::TeensyHealth, g_payload_buffer, payload_size);
+}
+
+void sendRobotOdometry(const RobotOdometryPayload& payload) {
+    std::uint16_t payload_size = 0;
+    if (!encodeRobotOdometryPayload(
+            payload,
+            g_payload_buffer,
+            sizeof(g_payload_buffer),
+            payload_size)) {
+        g_error_flags |= kErrorInvalidPayload;
+        return;
+    }
+    writeFrame(MessageType::RobotOdometry, g_payload_buffer, payload_size);
 }
 
 void sendImuSample(const ImuPayload& sample) {
@@ -123,23 +141,107 @@ void sendCameraTriggerEvent(const CameraTriggerEventPayload& event) {
     writeFrame(MessageType::CameraTriggerEvent, g_payload_buffer, payload_size);
 }
 
+void sendConfigAck(
+    const ConfigAckHeader& header,
+    const TriggerAckEntry* trigger_entries,
+    std::size_t trigger_entry_count,
+    const ImuConfigAckEntry* imu_entry) {
+    std::uint16_t payload_size = 0;
+    if (!encodeConfigAckPayload(
+            header,
+            trigger_entries,
+            trigger_entry_count,
+            imu_entry,
+            g_payload_buffer,
+            sizeof(g_payload_buffer),
+            payload_size)) {
+        g_error_flags |= kErrorInvalidPayload;
+        return;
+    }
+    writeFrame(MessageType::ConfigAck, g_payload_buffer, payload_size);
+}
+
+std::uint32_t triggerStatusToAckFlags(std::uint32_t trigger_status) {
+    std::uint32_t flags = 0;
+    if (trigger_status & kTriggerUnsupportedCount) flags |= kConfigAckUnsupportedCount;
+    if (trigger_status & kTriggerInvalidPin) flags |= kConfigAckInvalidPin;
+    if (trigger_status & kTriggerDuplicatePin) flags |= kConfigAckDuplicatePin;
+    if (trigger_status & kTriggerInvalidRate) flags |= kConfigAckInvalidRate;
+    if (trigger_status & kTriggerPulseTooWide) flags |= kConfigAckPulseTooWide;
+    return flags;
+}
+
 void applyCameraTriggerConfig(const Frame& frame) {
     CameraTriggerCommand commands[kMaxCameraSyncOutputs]{};
     std::size_t count = 0;
     if (!decodeCameraTriggerConfigPayload(frame, commands, kMaxCameraSyncOutputs, count)) {
         g_error_flags |= kErrorInvalidPayload;
+        ConfigAckHeader header;
+        header.kind = static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers);
+        header.status_flags = kConfigAckUnsupportedCount;
+        header.effective_count = 0;
         if (frame.payload_size >= 8u && readU32(frame.payload, 4) > kMaxCameraSyncOutputs) {
             g_triggers.apply(nullptr, kMaxCameraSyncOutputs + 1u, micros());
         }
+        sendConfigAck(header, nullptr, 0, nullptr);
         return;
     }
     g_triggers.apply(commands, count, micros());
+
+    TriggerAckEntry entries[kMaxCameraSyncOutputs]{};
+    const std::size_t effective = g_triggers.effectiveEntries(entries, kMaxCameraSyncOutputs);
+    ConfigAckHeader header;
+    header.kind = static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers);
+    header.status_flags = triggerStatusToAckFlags(g_triggers.statusFlags());
+    header.effective_count = static_cast<std::uint32_t>(effective);
+    sendConfigAck(header, entries, effective, nullptr);
+}
+
+void applyImuConfig(const Frame& frame) {
+    ImuConfigCommand command;
+    ConfigAckHeader header;
+    header.kind = static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig);
+    if (!decodeImuConfigPayload(frame, command)) {
+        g_error_flags |= kErrorInvalidPayload;
+        header.status_flags = kConfigAckInvalidImuConfig;
+        header.effective_count = 0;
+        sendConfigAck(header, nullptr, 0, nullptr);
+        return;
+    }
+
+    ImuConfigAckEntry effective{};
+    const bool ok = g_imu.reconfigure(command, micros64(), effective);
+    header.status_flags = ok ? 0u : kConfigAckInvalidImuConfig;
+    if (g_imu.errorFlags() & kErrorImuSelfTestFailure) {
+        header.status_flags |= kConfigAckImuSelfTestFailure;
+    }
+    header.effective_count = 1;
+    sendConfigAck(header, nullptr, 0, &effective);
+}
+
+void dispatchConfigCommand(const Frame& frame) {
+    if (frame.payload_size < 4u) {
+        g_error_flags |= kErrorInvalidPayload;
+        return;
+    }
+    const std::uint32_t kind = readU32(frame.payload, 0);
+    if (kind == static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers)) {
+        applyCameraTriggerConfig(frame);
+    } else if (kind == static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
+        applyImuConfig(frame);
+    } else {
+        ConfigAckHeader header;
+        header.kind = kind;
+        header.status_flags = kConfigAckUnknownKind;
+        header.effective_count = 0;
+        sendConfigAck(header, nullptr, 0, nullptr);
+    }
 }
 
 void handleFrame(const Frame& frame, std::uint64_t receive_time_us) {
     switch (frame.type) {
         case MessageType::ConfigCommand:
-            applyCameraTriggerConfig(frame);
+            dispatchConfigCommand(frame);
             break;
         case MessageType::TimeSyncRequest: {
             TimeSyncRequestPayload request;
@@ -206,7 +308,12 @@ void setup() {
     pinMode(kStatusLedPin, OUTPUT);
     digitalWrite(kStatusLedPin, LOW);
     g_triggers.begin();
-    g_can.begin();
+    {
+        CanBusConfig can_config;
+        // Defaults match RuntimeConfig::CanBusConfig; the host can override via
+        // a future ConfigCommandKind::CanConfig push (not yet wired).
+        g_can.begin(can_config);
+    }
     if (!g_imu.begin(micros64())) {
         g_error_flags |= kErrorImuInitFailure;
     }
@@ -228,9 +335,15 @@ void loop() {
     updateLed(now32);
     g_imu.checkForMissedDataReady(now64);
 
+    g_can.poll(now64);
+    RobotOdometryPayload odom;
+    while (g_can.popPendingRobotOdometry(odom)) {
+        sendRobotOdometry(odom);
+    }
+
     for (std::uint8_t i = 0; i < 4u; ++i) {
         ImuPayload sample;
-        if (!g_imu.poll(now64, sample)) {
+        if (!g_imu.poll(sample)) {
             break;
         }
         sendImuSample(sample);

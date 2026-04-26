@@ -25,6 +25,7 @@ posest::runtime::TeensyConfig fastConfig() {
     config.serial_port = "/dev/fake-teensy";
     config.reconnect_interval_ms = 5;
     config.read_timeout_ms = 2;
+    config.time_sync_interval_ms = 5;
     return config;
 }
 
@@ -402,7 +403,14 @@ TEST(TeensyService, SendsFusedPoseFramesAndDropsWhenQueueIsFull) {
     service.publish(estimate);
 
     ASSERT_TRUE(waitFor([&] {
-        return service.stats().outbound_frames_sent >= 3u;
+        for (const auto& bytes : fake.writes()) {
+            auto decoded = posest::teensy::decodeFrame(bytes);
+            if (decoded &&
+                decoded->frame.type == posest::teensy::MessageType::FusedPose) {
+                return true;
+            }
+        }
+        return false;
     }));
     const auto fused = decodeWrittenFrame(
         fake.writes(),
@@ -467,7 +475,7 @@ TEST(TeensyService, TimeSyncResponseEstablishesClockOffset) {
 
     service.start();
     ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
-    ASSERT_TRUE(fake.waitForWriteCount(2, 500ms));
+    ASSERT_TRUE(fake.waitForWriteCount(3, 500ms));
 
     const auto request_frame = decodeWrittenFrame(
         fake.writes(),
@@ -527,7 +535,7 @@ TEST(TeensyService, CameraTriggerEventIsRecordedInCacheAfterTimeSync) {
 
     service.start();
     ASSERT_TRUE(fake.waitForOpenCount(1, 500ms));
-    ASSERT_TRUE(fake.waitForWriteCount(2, 500ms));
+    ASSERT_TRUE(fake.waitForWriteCount(3, 500ms));
 
     const auto request_frame = decodeWrittenFrame(
         fake.writes(),

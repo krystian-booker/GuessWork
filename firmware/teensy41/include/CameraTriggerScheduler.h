@@ -3,10 +3,14 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <IntervalTimer.h>
+
 #include "FirmwareConfig.h"
 #include "Protocol.h"
 
 namespace posest::firmware {
+
+constexpr std::size_t kCameraTriggerEventQueueCapacity = 32;
 
 class CameraTriggerScheduler final {
 public:
@@ -15,39 +19,58 @@ public:
         const CameraTriggerCommand* commands,
         std::size_t count,
         std::uint32_t now_us);
+    // Software-polled fallback. With the IntervalTimer running this is a no-op;
+    // it remains so main.cpp can keep its existing call site without harm.
     void update(std::uint32_t now_us);
     void disableAll();
 
     std::uint32_t statusFlags() const { return status_flags_; }
     bool popEvent(CameraTriggerEventPayload& event);
+    std::size_t effectiveEntries(TriggerAckEntry* out, std::size_t capacity) const;
+    std::uint32_t masterPeriodUs() const { return master_period_us_; }
+
+    static CameraTriggerScheduler* activeInstance() { return active_instance_; }
 
 private:
-    struct EventQueueEntry {
-        CameraTriggerEventPayload event;
-    };
-
     struct Channel {
         bool enabled{false};
         bool high{false};
         std::uint8_t pin{0};
         std::uint32_t period_us{0};
         std::uint32_t pulse_width_us{0};
-        std::uint32_t next_rise_us{0};
-        std::uint32_t fall_us{0};
-        std::uint32_t trigger_sequence{0};
+        std::uint32_t period_ticks{0};
+        std::uint32_t pulse_ticks{0};
+        std::uint32_t next_rise_tick{0};
+        std::uint32_t next_fall_tick{0};
+        volatile std::uint32_t trigger_sequence{0};
     };
 
-    void pushEvent(const Channel& channel, std::uint32_t now_us);
+    struct EventQueueEntry {
+        CameraTriggerEventPayload event;
+    };
+
+    void tickIsr();
+    static void tickThunk();
+    void enqueueEventFromIsr(
+        const Channel& channel,
+        std::uint32_t event_time_us);
+
     static bool isAllowedPin(std::int32_t pin);
-    static bool due(std::uint32_t now_us, std::uint32_t target_us);
-    static std::uint32_t normalizePhase(std::int64_t phase_offset_us, std::uint32_t period_us);
+    static bool dueTick(std::uint32_t now_tick, std::uint32_t target_tick);
     static std::uint32_t periodFromRate(double rate_hz);
+    static std::uint32_t gcdU32(std::uint32_t a, std::uint32_t b);
 
     Channel channels_[kMaxCameraSyncOutputs]{};
-    EventQueueEntry events_[16]{};
-    std::size_t event_head_{0};
-    std::size_t event_count_{0};
+    EventQueueEntry events_[kCameraTriggerEventQueueCapacity]{};
+    volatile std::size_t event_head_{0};
+    volatile std::size_t event_count_{0};
     std::uint32_t status_flags_{0};
+    std::uint32_t master_period_us_{0};
+    volatile std::uint32_t master_tick_count_{0};
+    bool timer_running_{false};
+    IntervalTimer interval_timer_{};
+
+    static CameraTriggerScheduler* active_instance_;
 };
 
 }  // namespace posest::firmware

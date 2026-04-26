@@ -70,6 +70,28 @@ struct FieldLayoutConfig {
     std::vector<FieldTagConfig> tags;
 };
 
+struct ImuConfig {
+    std::uint32_t accel_range_g{12};
+    std::uint32_t accel_odr_hz{1000};
+    std::uint32_t accel_bandwidth_code{2};
+    std::uint32_t gyro_range_dps{2000};
+    std::uint32_t gyro_bandwidth_code{2};
+    std::uint32_t data_sync_rate_hz{1000};
+    bool run_selftest_on_boot{true};
+};
+
+struct CanBusConfig {
+    bool enabled{false};
+    std::uint32_t nominal_bitrate_bps{1'000'000};
+    std::uint32_t data_bitrate_bps{2'000'000};
+    std::uint32_t pose_publish_hz{100};
+    std::uint32_t rio_offset_stale_ms{1000};
+    // Placeholder arbitration IDs documented in firmware/teensy41/README.md.
+    std::uint32_t rio_pose_can_id{0x100};
+    std::uint32_t rio_time_sync_can_id{0x101};
+    std::uint32_t teensy_pose_can_id{0x180};
+};
+
 struct TeensyConfig {
     std::string serial_port;
     std::uint32_t baud_rate{115200};
@@ -78,6 +100,9 @@ struct TeensyConfig {
     std::uint32_t fused_pose_can_id{0};
     std::uint32_t status_can_id{0};
     double pose_publish_hz{50.0};
+    std::uint32_t time_sync_interval_ms{1000};
+    ImuConfig imu;
+    CanBusConfig can;
 };
 
 struct CameraTriggerConfig {

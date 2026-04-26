@@ -16,6 +16,12 @@ constexpr std::uint32_t kStatusUnsynchronizedTime = 1u << 0u;
 constexpr std::uint32_t kStatusUnsynchronizedRioTime = 1u << 1u;
 constexpr std::uint32_t kStatusRobotSlipping = 1u << 2u;
 
+// Bits set on TeensyHealthPayload::rio_status_flags. These mirror the
+// firmware's CanBridge status surface and are independent of the per-sample
+// status flags above.
+constexpr std::uint32_t kHealthRioUnsynchronized = 1u << 0u;
+constexpr std::uint32_t kHealthRioPingRejected = 1u << 1u;
+
 enum class MessageType : std::uint8_t {
     ImuSample = 1,
     WheelOdometry = 2,
@@ -24,6 +30,7 @@ enum class MessageType : std::uint8_t {
     TimeSyncResponse = 5,
     RobotOdometry = 6,
     CameraTriggerEvent = 7,
+    ConfigAck = 8,
     FusedPose = 64,
     CanTx = 65,
     TimeSyncRequest = 66,
@@ -32,7 +39,18 @@ enum class MessageType : std::uint8_t {
 
 enum class ConfigCommandKind : std::uint32_t {
     CameraTriggers = 1,
+    ImuConfig = 2,
 };
+
+// Bits set on ConfigAckPayload::status_flags. 0 == accepted.
+constexpr std::uint32_t kConfigAckUnsupportedCount = 1u << 0u;
+constexpr std::uint32_t kConfigAckInvalidPin = 1u << 1u;
+constexpr std::uint32_t kConfigAckDuplicatePin = 1u << 2u;
+constexpr std::uint32_t kConfigAckInvalidRate = 1u << 3u;
+constexpr std::uint32_t kConfigAckPulseTooWide = 1u << 4u;
+constexpr std::uint32_t kConfigAckInvalidImuConfig = 1u << 5u;
+constexpr std::uint32_t kConfigAckImuSelfTestFailure = 1u << 6u;
+constexpr std::uint32_t kConfigAckUnknownKind = 1u << 7u;
 
 struct Frame {
     MessageType type{MessageType::TeensyHealth};
@@ -68,6 +86,10 @@ struct TeensyHealthPayload {
     std::uint32_t trigger_status_flags{0};
     std::uint32_t rx_queue_depth{0};
     std::uint32_t tx_queue_depth{0};
+    std::int64_t rio_offset_us{0};
+    std::uint32_t rio_status_flags{0};
+    std::uint32_t accel_saturations{0};
+    std::uint32_t gyro_saturations{0};
 };
 
 struct CameraTriggerEventPayload {
@@ -86,6 +108,40 @@ struct TimeSyncResponsePayload {
     std::uint32_t request_sequence{0};
     std::uint64_t teensy_receive_time_us{0};
     std::uint64_t teensy_transmit_time_us{0};
+};
+
+struct TriggerAckEntry {
+    std::int32_t pin{-1};
+    std::uint32_t period_us{0};
+    std::uint32_t pulse_us{0};
+};
+
+struct ImuConfigAckEntry {
+    std::uint32_t accel_range_g{0};
+    std::uint32_t accel_odr_hz{0};
+    std::uint32_t accel_bandwidth_code{0};
+    std::uint32_t gyro_range_dps{0};
+    std::uint32_t gyro_bandwidth_code{0};
+    std::uint32_t data_sync_rate_hz{0};
+    std::uint32_t reserved{0};
+};
+
+struct ConfigAckPayload {
+    std::uint32_t kind{0};
+    std::uint32_t status_flags{0};
+    std::uint32_t effective_count{0};
+    std::vector<TriggerAckEntry> trigger_entries;
+    std::optional<ImuConfigAckEntry> imu_entry;
+};
+
+struct ImuConfigPayload {
+    std::uint32_t accel_range_g{12};
+    std::uint32_t accel_odr_hz{1000};
+    std::uint32_t accel_bandwidth_code{2};
+    std::uint32_t gyro_range_dps{2000};
+    std::uint32_t gyro_bandwidth_code{2};
+    std::uint32_t data_sync_rate_hz{1000};
+    std::uint32_t run_selftest_on_boot{1};
 };
 
 struct DecodeResult {
@@ -132,6 +188,14 @@ std::optional<TimeSyncRequestPayload> decodeTimeSyncRequestPayload(
 std::vector<std::uint8_t> encodeTimeSyncResponsePayload(
     const TimeSyncResponsePayload& payload);
 std::optional<TimeSyncResponsePayload> decodeTimeSyncResponsePayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeConfigAckPayload(const ConfigAckPayload& payload);
+std::optional<ConfigAckPayload> decodeConfigAckPayload(
+    const std::vector<std::uint8_t>& bytes);
+
+std::vector<std::uint8_t> encodeImuConfigPayload(const ImuConfigPayload& payload);
+std::optional<ImuConfigPayload> decodeImuConfigPayload(
     const std::vector<std::uint8_t>& bytes);
 
 class StreamDecoder final {

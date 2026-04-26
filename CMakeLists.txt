@@ -90,6 +90,7 @@ add_library(posest_teensy
     src/teensy/SerialTransport.cpp
     src/teensy/FakeSerialTransport.cpp
     src/teensy/TeensyService.cpp
+    src/teensy/TimeSyncFilter.cpp
 )
 target_link_libraries(posest_teensy PUBLIC posest_core posest_fusion posest_runtime)
 
@@ -159,7 +160,9 @@ add_executable(posest_tests
     test/test_pipelines.cpp
     test/test_apriltag_pose_solver.cpp
     test/test_teensy_protocol.cpp
+    test/test_teensy_protocol_golden.cpp
     test/test_teensy_service.cpp
+    test/test_time_sync_filter.cpp
     test/test_calibration_recorder.cpp
     test/test_config_schema.cpp
     test/test_camera_producer.cpp
@@ -187,3 +190,13 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(posest_tests)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME protocol_constants_drift
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/scripts/check_protocol_constants.py
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+endif()

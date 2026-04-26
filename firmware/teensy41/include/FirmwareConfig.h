@@ -32,6 +32,7 @@ constexpr std::uint32_t kErrorImuMissedDrdy = 1u << 6u;
 constexpr std::uint32_t kErrorImuSampleOverrun = 1u << 7u;
 constexpr std::uint32_t kErrorImuAccelSaturated = 1u << 8u;
 constexpr std::uint32_t kErrorImuGyroSaturated = 1u << 9u;
+constexpr std::uint32_t kErrorImuSelfTestFailure = 1u << 10u;
 
 constexpr std::uint32_t kTriggerUnsupportedCount = 1u << 0u;
 constexpr std::uint32_t kTriggerInvalidPin = 1u << 1u;
@@ -39,5 +40,16 @@ constexpr std::uint32_t kTriggerDuplicatePin = 1u << 2u;
 constexpr std::uint32_t kTriggerInvalidRate = 1u << 3u;
 constexpr std::uint32_t kTriggerPulseTooWide = 1u << 4u;
 constexpr std::uint32_t kTriggerOverrun = 1u << 5u;
+
+constexpr std::uint32_t kCanInitFailure = 1u << 0u;
+constexpr std::uint32_t kCanBusOff = 1u << 1u;
+constexpr std::uint32_t kCanRxOverrun = 1u << 2u;
+constexpr std::uint32_t kCanTxOverrun = 1u << 3u;
+constexpr std::uint32_t kCanFrameTruncated = 1u << 4u;
+constexpr std::uint32_t kCanRxDecodeFailure = 1u << 5u;
+
+// Firmware-internal CanBridge status_flags_ bits. These never cross USB; the
+// wire-visible bits live in Protocol.h (kHealthRio*, kStatus*).
+constexpr std::uint32_t kRioStatusPingRejected = 1u << 1u;
 
 }  // namespace posest::firmware

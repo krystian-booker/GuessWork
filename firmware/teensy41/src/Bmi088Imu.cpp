@@ -8,6 +8,163 @@
 
 namespace posest::firmware {
 
+namespace {
+
+double accelRangeFactor(std::uint32_t range_g) {
+    switch (range_g) {
+        case 3:
+            return 3.0;
+        case 6:
+            return 6.0;
+        case 24:
+            return 24.0;
+        case 12:
+        default:
+            return 12.0;
+    }
+}
+
+double gyroRangeFactor(std::uint32_t range_dps) {
+    switch (range_dps) {
+        case 125:
+            return 125.0;
+        case 250:
+            return 250.0;
+        case 500:
+            return 500.0;
+        case 1000:
+            return 1000.0;
+        case 2000:
+        default:
+            return 2000.0;
+    }
+}
+
+bool mapAccelRange(std::uint32_t range_g, std::uint8_t& out) {
+    switch (range_g) {
+        case 3:
+            out = BMI088_ACCEL_RANGE_3G;
+            return true;
+        case 6:
+            out = BMI088_ACCEL_RANGE_6G;
+            return true;
+        case 12:
+            out = BMI088_ACCEL_RANGE_12G;
+            return true;
+        case 24:
+            out = BMI088_ACCEL_RANGE_24G;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool mapAccelOdr(std::uint32_t hz, std::uint8_t& out) {
+    switch (hz) {
+        case 12:  // 12.5 Hz rounded
+            out = BMI08_ACCEL_ODR_12_5_HZ;
+            return true;
+        case 25:
+            out = BMI08_ACCEL_ODR_25_HZ;
+            return true;
+        case 50:
+            out = BMI08_ACCEL_ODR_50_HZ;
+            return true;
+        case 100:
+            out = BMI08_ACCEL_ODR_100_HZ;
+            return true;
+        case 200:
+            out = BMI08_ACCEL_ODR_200_HZ;
+            return true;
+        case 400:
+            out = BMI08_ACCEL_ODR_400_HZ;
+            return true;
+        case 800:
+            out = BMI08_ACCEL_ODR_800_HZ;
+            return true;
+        case 1600:
+            out = BMI08_ACCEL_ODR_1600_HZ;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool mapAccelBandwidth(std::uint32_t code, std::uint8_t& out) {
+    switch (code) {
+        case 0:
+            out = BMI08_ACCEL_BW_OSR4;
+            return true;
+        case 1:
+            out = BMI08_ACCEL_BW_OSR2;
+            return true;
+        case 2:
+            out = BMI08_ACCEL_BW_NORMAL;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool mapGyroRange(std::uint32_t dps, std::uint8_t& out) {
+    switch (dps) {
+        case 125:
+            out = BMI08_GYRO_RANGE_125_DPS;
+            return true;
+        case 250:
+            out = BMI08_GYRO_RANGE_250_DPS;
+            return true;
+        case 500:
+            out = BMI08_GYRO_RANGE_500_DPS;
+            return true;
+        case 1000:
+            out = BMI08_GYRO_RANGE_1000_DPS;
+            return true;
+        case 2000:
+            out = BMI08_GYRO_RANGE_2000_DPS;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool mapGyroBandwidth(std::uint32_t code, std::uint8_t& out) {
+    switch (code) {
+        case 0:
+            out = BMI08_GYRO_BW_532_ODR_2000_HZ;
+            return true;
+        case 1:
+            out = BMI08_GYRO_BW_230_ODR_2000_HZ;
+            return true;
+        case 2:
+            out = BMI08_GYRO_BW_116_ODR_1000_HZ;
+            return true;
+        case 3:
+            out = BMI08_GYRO_BW_47_ODR_400_HZ;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool mapDataSyncMode(std::uint32_t hz, std::uint8_t& out) {
+    switch (hz) {
+        case 400:
+            out = BMI08_ACCEL_DATA_SYNC_MODE_400HZ;
+            return true;
+        case 1000:
+            out = BMI08_ACCEL_DATA_SYNC_MODE_1000HZ;
+            return true;
+        case 2000:
+            out = BMI08_ACCEL_DATA_SYNC_MODE_2000HZ;
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
 Bmi088Imu* Bmi088Imu::active_instance_ = nullptr;
 
 bool Bmi088Imu::begin(std::uint64_t now_us) {
@@ -15,6 +172,12 @@ bool Bmi088Imu::begin(std::uint64_t now_us) {
     initialized_ = false;
     samples_since_temperature_ = kTemperatureSampleInterval;
     last_data_ready_time_us_ = now_us;
+    accel_range_g_ = 12;
+    gyro_range_dps_ = 2000;
+    accel_scale_ = (kGravityMps2 * accelRangeFactor(accel_range_g_)) / 32768.0;
+    gyro_scale_ = (gyroRangeFactor(gyro_range_dps_) * kDegToRad) / 32768.0;
+    time64_high_ = static_cast<std::uint32_t>(now_us >> 32u);
+    time64_low_prev_ = static_cast<std::uint32_t>(now_us & 0xFFFFFFFFu);
 
     pinMode(kBmi088ProtocolSelectPin, OUTPUT);
     digitalWrite(kBmi088ProtocolSelectPin, LOW);
@@ -31,7 +194,17 @@ bool Bmi088Imu::begin(std::uint64_t now_us) {
     SPI1.begin();
     delay(10);
 
-    if (!initializeBoschApi() || !configureDataSync()) {
+    if (!initializeBoschApi()) {
+        stats_.error_flags |= kErrorImuInitFailure;
+        return false;
+    }
+
+    if (!runSelfTest()) {
+        stats_.error_flags |= kErrorImuSelfTestFailure;
+        return false;
+    }
+
+    if (!configureDataSync(1000)) {
         stats_.error_flags |= kErrorImuInitFailure;
         return false;
     }
@@ -43,7 +216,46 @@ bool Bmi088Imu::begin(std::uint64_t now_us) {
     return true;
 }
 
-bool Bmi088Imu::poll(std::uint64_t reference_time_us, ImuPayload& payload) {
+bool Bmi088Imu::reconfigure(
+    const ImuConfigCommand& command,
+    std::uint64_t now_us,
+    ImuConfigAckEntry& effective) {
+    (void)now_us;
+    if (!command.valid) {
+        return false;
+    }
+    if (!applyAccelMeasConf(command.accel_range_g,
+                            command.accel_odr_hz,
+                            command.accel_bandwidth_code)) {
+        return false;
+    }
+    if (!applyGyroMeasConf(command.gyro_range_dps,
+                           command.gyro_bandwidth_code)) {
+        return false;
+    }
+    if (command.run_selftest_on_boot && !runSelfTest()) {
+        stats_.error_flags |= kErrorImuSelfTestFailure;
+        return false;
+    }
+    if (!configureDataSync(command.data_sync_rate_hz)) {
+        return false;
+    }
+    accel_range_g_ = command.accel_range_g;
+    gyro_range_dps_ = command.gyro_range_dps;
+    accel_scale_ = (kGravityMps2 * accelRangeFactor(accel_range_g_)) / 32768.0;
+    gyro_scale_ = (gyroRangeFactor(gyro_range_dps_) * kDegToRad) / 32768.0;
+
+    effective.accel_range_g = accel_range_g_;
+    effective.accel_odr_hz = command.accel_odr_hz;
+    effective.accel_bandwidth_code = command.accel_bandwidth_code;
+    effective.gyro_range_dps = gyro_range_dps_;
+    effective.gyro_bandwidth_code = command.gyro_bandwidth_code;
+    effective.data_sync_rate_hz = command.data_sync_rate_hz;
+    effective.reserved = 0;
+    return true;
+}
+
+bool Bmi088Imu::poll(ImuPayload& payload) {
     if (!initialized_) {
         return false;
     }
@@ -59,7 +271,7 @@ bool Bmi088Imu::poll(std::uint64_t reference_time_us, ImuPayload& payload) {
         stats_.error_flags |= kErrorImuSampleOverrun;
     }
 
-    return readSynchronizedSample(timestamp32, reference_time_us, payload);
+    return readSynchronizedSample(timestamp32, payload);
 }
 
 void Bmi088Imu::checkForMissedDataReady(std::uint64_t now_us) {
@@ -102,6 +314,18 @@ double Bmi088Imu::accelRawToMps2(std::int16_t raw) {
 double Bmi088Imu::gyroRawToRadps(std::int16_t raw) {
     const double dps = (static_cast<double>(raw) * kGyroRangeDps) / 32768.0;
     return dps * kDegToRad;
+}
+
+double Bmi088Imu::accelRawToMps2Scaled(std::int16_t raw) const {
+    const double scale = accel_scale_ > 0.0 ? accel_scale_
+                                            : (kGravityMps2 * kAccelRangeG) / 32768.0;
+    return static_cast<double>(raw) * scale;
+}
+
+double Bmi088Imu::gyroRawToRadpsScaled(std::int16_t raw) const {
+    const double scale = gyro_scale_ > 0.0 ? gyro_scale_
+                                           : (kGyroRangeDps * kDegToRad) / 32768.0;
+    return static_cast<double>(raw) * scale;
 }
 
 bool Bmi088Imu::popDrdyTimestamp(
@@ -179,12 +403,81 @@ bool Bmi088Imu::initializeBoschApi() {
     return true;
 }
 
-bool Bmi088Imu::configureDataSync() {
+bool Bmi088Imu::runSelfTest() {
+    std::int8_t result = bmi08xa_perform_selftest(&dev_);
+    recordResult(result);
+    if (result != BMI08_OK) {
+        return false;
+    }
+    result = bmi08g_perform_selftest(&dev_);
+    recordResult(result);
+    if (result != BMI08_OK) {
+        return false;
+    }
+    // Self-test leaves both sensors in suspend/idle; bring power back up.
+    dev_.accel_cfg.power = BMI08_ACCEL_PM_ACTIVE;
+    result = bmi08a_set_power_mode(&dev_);
+    recordResult(result);
+    if (result != BMI08_OK) {
+        return false;
+    }
+    dev_.gyro_cfg.power = BMI08_GYRO_PM_NORMAL;
+    result = bmi08g_set_power_mode(&dev_);
+    recordResult(result);
+    return result == BMI08_OK;
+}
+
+bool Bmi088Imu::applyAccelMeasConf(std::uint32_t range_g,
+                                   std::uint32_t odr_hz,
+                                   std::uint32_t bandwidth_code) {
+    std::uint8_t range = 0;
+    std::uint8_t odr = 0;
+    std::uint8_t bw = 0;
+    if (!mapAccelRange(range_g, range) || !mapAccelOdr(odr_hz, odr) ||
+        !mapAccelBandwidth(bandwidth_code, bw)) {
+        return false;
+    }
+    dev_.accel_cfg.range = range;
+    dev_.accel_cfg.odr = odr;
+    dev_.accel_cfg.bw = bw;
+    const std::int8_t result = bmi08a_set_meas_conf(&dev_);
+    recordResult(result);
+    return result == BMI08_OK;
+}
+
+bool Bmi088Imu::applyGyroMeasConf(std::uint32_t range_dps,
+                                  std::uint32_t bandwidth_code) {
+    std::uint8_t range = 0;
+    std::uint8_t bw = 0;
+    if (!mapGyroRange(range_dps, range) || !mapGyroBandwidth(bandwidth_code, bw)) {
+        return false;
+    }
+    dev_.gyro_cfg.range = range;
+    dev_.gyro_cfg.bw = bw;
+    const std::int8_t result = bmi08g_set_meas_conf(&dev_);
+    recordResult(result);
+    return result == BMI08_OK;
+}
+
+bool Bmi088Imu::configureDataSync(std::uint32_t data_sync_rate_hz) {
+    std::uint8_t mode = 0;
+    if (!mapDataSyncMode(data_sync_rate_hz, mode)) {
+        return false;
+    }
     dev_.accel_cfg.range = BMI088_ACCEL_RANGE_12G;
     dev_.gyro_cfg.range = BMI08_GYRO_RANGE_2000_DPS;
+    if (mapAccelRange(accel_range_g_, dev_.accel_cfg.range) == false) {
+        // Fall back to 12g.
+        accel_range_g_ = 12;
+        dev_.accel_cfg.range = BMI088_ACCEL_RANGE_12G;
+    }
+    if (mapGyroRange(gyro_range_dps_, dev_.gyro_cfg.range) == false) {
+        gyro_range_dps_ = 2000;
+        dev_.gyro_cfg.range = BMI08_GYRO_RANGE_2000_DPS;
+    }
 
     struct bmi08_data_sync_cfg sync_cfg{};
-    sync_cfg.mode = BMI08_ACCEL_DATA_SYNC_MODE_1000HZ;
+    sync_cfg.mode = mode;
     std::int8_t result = bmi08xa_configure_data_synchronization(sync_cfg, &dev_);
     recordResult(result);
     if (result != BMI08_OK) {
@@ -223,7 +516,6 @@ bool Bmi088Imu::configureDataSync() {
 
 bool Bmi088Imu::readSynchronizedSample(
     std::uint32_t timestamp32,
-    std::uint64_t reference_time_us,
     ImuPayload& payload) {
     struct bmi08_sensor_data accel{};
     struct bmi08_sensor_data gyro{};
@@ -235,16 +527,16 @@ bool Bmi088Imu::readSynchronizedSample(
     }
 
     payload = ImuPayload{};
-    payload.teensy_time_us = expandTimestamp(timestamp32, reference_time_us);
+    payload.teensy_time_us = expandTimestamp(timestamp32);
     last_data_ready_time_us_ = payload.teensy_time_us;
     payload.accel_mps2 = {
-        accelRawToMps2(accel.x),
-        accelRawToMps2(accel.y),
-        accelRawToMps2(accel.z)};
+        accelRawToMps2Scaled(accel.x),
+        accelRawToMps2Scaled(accel.y),
+        accelRawToMps2Scaled(accel.z)};
     payload.gyro_radps = {
-        gyroRawToRadps(gyro.x),
-        gyroRawToRadps(gyro.y),
-        gyroRawToRadps(gyro.z)};
+        gyroRawToRadpsScaled(gyro.x),
+        gyroRawToRadpsScaled(gyro.y),
+        gyroRawToRadpsScaled(gyro.z)};
     payload.temperature_c = latest_temperature_c_;
     payload.status_flags = 0;
 
@@ -303,13 +595,27 @@ void Bmi088Imu::recordReadFailure(std::int8_t result) {
     stats_.error_flags |= kErrorImuSpiFailure;
 }
 
-std::uint64_t Bmi088Imu::expandTimestamp(
-    std::uint32_t timestamp32,
-    std::uint64_t reference_time_us) const {
-    const std::uint32_t reference_low = static_cast<std::uint32_t>(reference_time_us);
-    const std::int32_t delta = static_cast<std::int32_t>(timestamp32 - reference_low);
-    const std::int64_t expanded = static_cast<std::int64_t>(reference_time_us) + delta;
-    return expanded < 0 ? 0u : static_cast<std::uint64_t>(expanded);
+std::uint64_t Bmi088Imu::expandTimestamp(std::uint32_t timestamp32) {
+    // Sample the 32-bit clock fresh inside this function so the high-half
+    // anchor never reflects a stale reference. We track the most recent low
+    // value we've seen and bump high every time it wraps.
+    const std::uint32_t now_low = micros();
+    if (now_low < time64_low_prev_) {
+        ++time64_high_;
+    }
+    time64_low_prev_ = now_low;
+
+    // Reconstruct the queued ISR timestamp: it is at or before now_low, but
+    // may have been recorded just before a wrap. If timestamp32 > now_low it
+    // must belong to the previous high half.
+    std::uint32_t high = time64_high_;
+    if (timestamp32 > now_low) {
+        if (high == 0u) {
+            return static_cast<std::uint64_t>(timestamp32);
+        }
+        --high;
+    }
+    return (static_cast<std::uint64_t>(high) << 32u) | timestamp32;
 }
 
 bool Bmi088Imu::isSaturated(std::int16_t raw) {

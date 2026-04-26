@@ -34,7 +34,15 @@ struct Bmi088Stats {
 class Bmi088Imu final {
 public:
     bool begin(std::uint64_t now_us);
-    bool poll(std::uint64_t reference_time_us, ImuPayload& payload);
+    bool reconfigure(
+        const ImuConfigCommand& command,
+        std::uint64_t now_us,
+        ImuConfigAckEntry& effective);
+    bool poll(ImuPayload& payload);
+    // Legacy entry point retained for ABI compatibility with older callers.
+    bool poll(std::uint64_t /*reference_time_us*/, ImuPayload& payload) {
+        return poll(payload);
+    }
     void checkForMissedDataReady(std::uint64_t now_us);
     void onDataReadyIsr(std::uint32_t timestamp_us);
 
@@ -46,6 +54,8 @@ public:
 
     static double accelRawToMps2(std::int16_t raw);
     static double gyroRawToRadps(std::int16_t raw);
+    double accelRawToMps2Scaled(std::int16_t raw) const;
+    double gyroRawToRadpsScaled(std::int16_t raw) const;
 
 private:
     struct SpiTarget {
@@ -55,13 +65,19 @@ private:
 
     bool popDrdyTimestamp(std::uint32_t& timestamp_us, std::uint32_t& overrun_count);
     bool initializeBoschApi();
-    bool configureDataSync();
-    bool readSynchronizedSample(std::uint32_t timestamp32, std::uint64_t reference_time_us,
+    bool configureDataSync(std::uint32_t data_sync_rate_hz);
+    bool runSelfTest();
+    bool applyAccelMeasConf(std::uint32_t range_g,
+                            std::uint32_t odr_hz,
+                            std::uint32_t bandwidth_code);
+    bool applyGyroMeasConf(std::uint32_t range_dps,
+                           std::uint32_t bandwidth_code);
+    bool readSynchronizedSample(std::uint32_t timestamp32,
                                 ImuPayload& payload);
     bool readTemperatureIfDue(double& temperature_c);
     void recordResult(std::int8_t result);
     void recordReadFailure(std::int8_t result);
-    std::uint64_t expandTimestamp(std::uint32_t timestamp32, std::uint64_t reference_time_us) const;
+    std::uint64_t expandTimestamp(std::uint32_t timestamp32);
 
     static bool isSaturated(std::int16_t raw);
     static BMI08_INTF_RET_TYPE spiRead(
@@ -85,6 +101,13 @@ private:
     static constexpr std::uint32_t kSpiFrequencyHz = 5000000;
     static constexpr std::uint32_t kTemperatureSampleInterval = 100;
     static constexpr std::uint64_t kMissedDrdyTimeoutUs = 10000;
+
+    std::uint32_t accel_range_g_{12};
+    std::uint32_t gyro_range_dps_{2000};
+    double accel_scale_{0.0};
+    double gyro_scale_{0.0};
+    std::uint32_t time64_high_{0};
+    std::uint32_t time64_low_prev_{0};
 
     struct bmi08_dev dev_{};
     SpiTarget accel_target_{this, kBmi088AccelCsPin};

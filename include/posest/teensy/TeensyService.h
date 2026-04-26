@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,6 +19,7 @@
 #include "posest/runtime/RuntimeConfig.h"
 #include "posest/teensy/Protocol.h"
 #include "posest/teensy/SerialTransport.h"
+#include "posest/teensy/TimeSyncFilter.h"
 
 namespace posest {
 class CameraTriggerCache;
@@ -48,6 +50,13 @@ struct TeensyStats {
     bool time_sync_established{false};
     std::int64_t time_sync_offset_us{0};
     std::uint64_t time_sync_round_trip_us{0};
+    std::uint64_t time_sync_samples_accepted{0};
+    std::uint64_t time_sync_samples_rejected{0};
+    double time_sync_skew_ppm{0.0};
+    bool rio_time_sync_established{false};
+    std::int64_t rio_to_host_offset_us{0};
+    std::optional<ConfigAckPayload> last_trigger_ack;
+    std::optional<ConfigAckPayload> last_imu_ack;
 };
 
 class TeensyService final : public fusion::IFusionOutputSink {
@@ -86,6 +95,8 @@ private:
     Timestamp timestampFromTeensyTime(std::uint64_t teensy_time_us, Timestamp fallback);
     std::vector<std::uint8_t> encodeCameraTriggerConfigPayload() const;
     void sendCameraTriggerConfig(ISerialTransport& transport);
+    std::vector<std::uint8_t> encodeImuConfigCommandPayload() const;
+    void sendImuConfig(ISerialTransport& transport);
     void markDisconnected(const std::string& error);
     void sleepUntilReconnectOrStop();
     static std::uint64_t steadyMicros(Timestamp timestamp);
@@ -109,6 +120,7 @@ private:
     TeensyStats stats_;
     std::optional<std::uint32_t> pending_time_sync_sequence_;
     std::uint64_t pending_time_sync_host_send_us_{0};
+    TimeSyncFilter time_sync_filter_;
     std::atomic<std::uint32_t> next_time_sync_sequence_{0};
     std::atomic<std::uint32_t> next_sequence_{0};
 };

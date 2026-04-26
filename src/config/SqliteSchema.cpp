@@ -275,10 +275,45 @@ COMMIT;
 )sql";
 }
 
+const char* migration6Sql() {
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS imu_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    accel_range_g INTEGER NOT NULL DEFAULT 12,
+    accel_odr_hz INTEGER NOT NULL DEFAULT 1000,
+    accel_bandwidth_code INTEGER NOT NULL DEFAULT 2,
+    gyro_range_dps INTEGER NOT NULL DEFAULT 2000,
+    gyro_bandwidth_code INTEGER NOT NULL DEFAULT 2,
+    data_sync_rate_hz INTEGER NOT NULL DEFAULT 1000,
+    run_selftest_on_boot INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS can_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    nominal_bitrate_bps INTEGER NOT NULL DEFAULT 1000000,
+    data_bitrate_bps INTEGER NOT NULL DEFAULT 2000000,
+    pose_publish_hz INTEGER NOT NULL DEFAULT 100,
+    rio_offset_stale_ms INTEGER NOT NULL DEFAULT 1000,
+    rio_pose_can_id INTEGER NOT NULL DEFAULT 256,
+    rio_time_sync_can_id INTEGER NOT NULL DEFAULT 257,
+    teensy_pose_can_id INTEGER NOT NULL DEFAULT 384
+);
+
+ALTER TABLE teensy_config
+    ADD COLUMN time_sync_interval_ms INTEGER NOT NULL DEFAULT 1000;
+
+PRAGMA user_version = 6;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 5;
+    return 6;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -309,6 +344,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 4) {
         exec(db, migration5Sql());
+        migrated_version = 5;
+    }
+    if (migrated_version == 5) {
+        exec(db, migration6Sql());
     }
 }
 

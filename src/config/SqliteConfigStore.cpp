@@ -479,7 +479,7 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
         Statement stmt(
             db_,
             "SELECT serial_port, fused_pose_can_id, status_can_id, pose_publish_hz, "
-            "baud_rate, reconnect_interval_ms, read_timeout_ms "
+            "baud_rate, reconnect_interval_ms, read_timeout_ms, time_sync_interval_ms "
             "FROM teensy_config WHERE id = 1");
         if (stmt.stepRow()) {
             config.teensy.serial_port = stmt.columnText(0);
@@ -493,6 +493,56 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
                 checkedUint32(stmt.columnInt64(5), "reconnect_interval_ms");
             config.teensy.read_timeout_ms =
                 checkedUint32(stmt.columnInt64(6), "read_timeout_ms");
+            config.teensy.time_sync_interval_ms =
+                checkedUint32(stmt.columnInt64(7), "time_sync_interval_ms");
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT accel_range_g, accel_odr_hz, accel_bandwidth_code, "
+            "gyro_range_dps, gyro_bandwidth_code, data_sync_rate_hz, "
+            "run_selftest_on_boot FROM imu_config WHERE id = 1");
+        if (stmt.stepRow()) {
+            config.teensy.imu.accel_range_g =
+                checkedUint32(stmt.columnInt64(0), "accel_range_g");
+            config.teensy.imu.accel_odr_hz =
+                checkedUint32(stmt.columnInt64(1), "accel_odr_hz");
+            config.teensy.imu.accel_bandwidth_code =
+                checkedUint32(stmt.columnInt64(2), "accel_bandwidth_code");
+            config.teensy.imu.gyro_range_dps =
+                checkedUint32(stmt.columnInt64(3), "gyro_range_dps");
+            config.teensy.imu.gyro_bandwidth_code =
+                checkedUint32(stmt.columnInt64(4), "gyro_bandwidth_code");
+            config.teensy.imu.data_sync_rate_hz =
+                checkedUint32(stmt.columnInt64(5), "data_sync_rate_hz");
+            config.teensy.imu.run_selftest_on_boot = stmt.columnInt64(6) != 0;
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
+            "SELECT enabled, nominal_bitrate_bps, data_bitrate_bps, pose_publish_hz, "
+            "rio_offset_stale_ms, rio_pose_can_id, rio_time_sync_can_id, "
+            "teensy_pose_can_id FROM can_config WHERE id = 1");
+        if (stmt.stepRow()) {
+            config.teensy.can.enabled = stmt.columnInt64(0) != 0;
+            config.teensy.can.nominal_bitrate_bps =
+                checkedUint32(stmt.columnInt64(1), "nominal_bitrate_bps");
+            config.teensy.can.data_bitrate_bps =
+                checkedUint32(stmt.columnInt64(2), "data_bitrate_bps");
+            config.teensy.can.pose_publish_hz =
+                checkedUint32(stmt.columnInt64(3), "pose_publish_hz");
+            config.teensy.can.rio_offset_stale_ms =
+                checkedUint32(stmt.columnInt64(4), "rio_offset_stale_ms");
+            config.teensy.can.rio_pose_can_id =
+                checkedUint32(stmt.columnInt64(5), "rio_pose_can_id");
+            config.teensy.can.rio_time_sync_can_id =
+                checkedUint32(stmt.columnInt64(6), "rio_time_sync_can_id");
+            config.teensy.can.teensy_pose_can_id =
+                checkedUint32(stmt.columnInt64(7), "teensy_pose_can_id");
         }
     }
 
@@ -519,6 +569,8 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM pipelines");
     exec(db_, "DELETE FROM cameras");
     exec(db_, "DELETE FROM teensy_config");
+    exec(db_, "DELETE FROM imu_config");
+    exec(db_, "DELETE FROM can_config");
 
     for (const auto& camera : config.cameras) {
         Statement insert(
@@ -721,8 +773,8 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             db_,
             "INSERT INTO teensy_config "
             "(id, serial_port, fused_pose_can_id, status_can_id, pose_publish_hz, "
-            "baud_rate, reconnect_interval_ms, read_timeout_ms) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?)");
+            "baud_rate, reconnect_interval_ms, read_timeout_ms, time_sync_interval_ms) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, config.teensy.serial_port);
         insert.bindInt64(2, static_cast<sqlite3_int64>(config.teensy.fused_pose_can_id));
         insert.bindInt64(3, static_cast<sqlite3_int64>(config.teensy.status_can_id));
@@ -730,6 +782,54 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindInt64(5, static_cast<sqlite3_int64>(config.teensy.baud_rate));
         insert.bindInt64(6, static_cast<sqlite3_int64>(config.teensy.reconnect_interval_ms));
         insert.bindInt64(7, static_cast<sqlite3_int64>(config.teensy.read_timeout_ms));
+        insert.bindInt64(8, static_cast<sqlite3_int64>(config.teensy.time_sync_interval_ms));
+        insert.stepDone();
+    }
+
+    {
+        Statement insert(
+            db_,
+            "INSERT INTO imu_config "
+            "(id, accel_range_g, accel_odr_hz, accel_bandwidth_code, "
+            "gyro_range_dps, gyro_bandwidth_code, data_sync_rate_hz, "
+            "run_selftest_on_boot) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindInt64(1, static_cast<sqlite3_int64>(config.teensy.imu.accel_range_g));
+        insert.bindInt64(2, static_cast<sqlite3_int64>(config.teensy.imu.accel_odr_hz));
+        insert.bindInt64(3,
+            static_cast<sqlite3_int64>(config.teensy.imu.accel_bandwidth_code));
+        insert.bindInt64(4, static_cast<sqlite3_int64>(config.teensy.imu.gyro_range_dps));
+        insert.bindInt64(5,
+            static_cast<sqlite3_int64>(config.teensy.imu.gyro_bandwidth_code));
+        insert.bindInt64(6,
+            static_cast<sqlite3_int64>(config.teensy.imu.data_sync_rate_hz));
+        insert.bindInt(7, config.teensy.imu.run_selftest_on_boot ? 1 : 0);
+        insert.stepDone();
+    }
+
+    {
+        Statement insert(
+            db_,
+            "INSERT INTO can_config "
+            "(id, enabled, nominal_bitrate_bps, data_bitrate_bps, pose_publish_hz, "
+            "rio_offset_stale_ms, rio_pose_can_id, rio_time_sync_can_id, "
+            "teensy_pose_can_id) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindInt(1, config.teensy.can.enabled ? 1 : 0);
+        insert.bindInt64(2,
+            static_cast<sqlite3_int64>(config.teensy.can.nominal_bitrate_bps));
+        insert.bindInt64(3,
+            static_cast<sqlite3_int64>(config.teensy.can.data_bitrate_bps));
+        insert.bindInt64(4,
+            static_cast<sqlite3_int64>(config.teensy.can.pose_publish_hz));
+        insert.bindInt64(5,
+            static_cast<sqlite3_int64>(config.teensy.can.rio_offset_stale_ms));
+        insert.bindInt64(6,
+            static_cast<sqlite3_int64>(config.teensy.can.rio_pose_can_id));
+        insert.bindInt64(7,
+            static_cast<sqlite3_int64>(config.teensy.can.rio_time_sync_can_id));
+        insert.bindInt64(8,
+            static_cast<sqlite3_int64>(config.teensy.can.teensy_pose_can_id));
         insert.stepDone();
     }
 

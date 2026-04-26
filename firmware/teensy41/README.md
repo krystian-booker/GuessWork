@@ -116,15 +116,17 @@ Message directions:
 | Type | ID | Direction | Status |
 | --- | ---: | --- | --- |
 | `ImuSample` | 1 | Teensy to host | BMI088 producer enabled after successful init |
-| `WheelOdometry` | 2 | Teensy to host | Encoder path present, producer disabled |
+| `WheelOdometry` | 2 | Teensy to host | Encoder path present, currently unused (RIO sends pose, not per-wheel deltas) |
 | `CanRx` | 3 | Teensy to host | Reserved |
-| `TeensyHealth` | 4 | Teensy to host | Sent at 10 Hz |
+| `TeensyHealth` | 4 | Teensy to host | Sent at 10 Hz; carries `rio_offset_us` and IMU saturation counts |
 | `TimeSyncResponse` | 5 | Teensy to host | Sent for every time sync request |
-| `RobotOdometry` | 6 | Teensy to host | Encoder path present, producer disabled |
-| `FusedPose` | 64 | Host to Teensy | Decoded and stored for future CAN output |
-| `CanTx` | 65 | Host to Teensy | Counted as unsupported in this phase |
+| `RobotOdometry` | 6 | Teensy to host | Emitted from CAN ID `0x100` decode; carries `rio_time_us` |
+| `CameraTriggerEvent` | 7 | Teensy to host | One frame per rising edge of every armed sync output |
+| `ConfigAck` | 8 | Teensy to host | Reply to every `ConfigCommand`; carries effective trigger periods / IMU config |
+| `FusedPose` | 64 | Host to Teensy | Decoded and re-published on CAN ID `0x180` at `pose_publish_hz` |
+| `CanTx` | 65 | Host to Teensy | Reserved; currently rejected as unsupported |
 | `TimeSyncRequest` | 66 | Host to Teensy | Decoded immediately |
-| `ConfigCommand` | 67 | Host to Teensy | Camera trigger config supported |
+| `ConfigCommand` | 67 | Host to Teensy | `CameraTriggers` and `ImuConfig` kinds supported |
 
 `ImuSample` is sent on each synchronized BMI088 DRDY event. The timestamp is
 the Teensy-side DRDY time in microseconds. Acceleration is converted to `m/s^2`,
@@ -152,9 +154,55 @@ The per-trigger fields repeat `count` times. The firmware accepts at most six
 triggers and only pins 2 through 7. Invalid channels are disabled rather than
 pulsed, and the health frame reports trigger status flags.
 
-## CAN Boundary
+## IMU Config
 
-The firmware includes a `CanBridge` boundary that stores the latest fused pose
-and reports unsupported `CanTx` requests. It does not transmit CAN frames yet.
-Before enabling real CAN output, select the Teensy 4.1 CAN port/pins, add a
-3.3 V CAN transceiver, and finalize RoboRIO CAN packet layouts and IDs.
+`ConfigCommandKind::ImuConfig` payload (28 bytes after the 4-byte kind):
+
+| Field | Size | Notes |
+| --- | ---: | --- |
+| Kind, value `2` | 4 | |
+| Accel range, g (`3`, `6`, `12`, `24`) | 4 | Mapped to `BMI088_ACCEL_RANGE_*` |
+| Accel ODR, Hz (`12`, `25`, `50`, `100`, `200`, `400`, `800`, `1600`) | 4 | |
+| Accel bandwidth code (`0` OSR4, `1` OSR2, `2` Normal) | 4 | |
+| Gyro range, dps (`125`, `250`, `500`, `1000`, `2000`) | 4 | |
+| Gyro bandwidth code (`0`–`3`) | 4 | |
+| Data-sync rate, Hz (`400`, `1000`, `2000`) | 4 | |
+| Run self-test on boot | 4 | Non-zero requests boot-time self-test |
+
+The firmware re-runs `bmi08xa_perform_selftest` / `bmi08g_perform_selftest`
+when the bit is set, and gates streaming on the result via
+`kErrorImuSelfTestFailure`. It then re-runs `bmi08xa_configure_data_synchronization`
+with the requested mode. The resulting effective configuration is reported back
+in `ConfigAck`.
+
+## CAN-FD Bridge
+
+The firmware drives the Teensy 4.1 CAN3 bus (RX = pin 30, TX = pin 31) via
+`FlexCAN_T4FD`. A TJA1051T/3 transceiver sits between the Teensy and the
+RoboRIO bus. The default rates are `1 Mbit/s` nominal and `2 Mbit/s` data phase,
+configurable through `TeensyConfig::CanBusConfig` in the host SQLite store.
+
+Placeholder message catalogue (deliberately thin until the RoboRIO contract is
+finalized — see `firmware/teensy41/include/CanSchema.h`):
+
+| Direction | CAN ID | Bytes | Layout |
+| --- | ---: | ---: | --- |
+| RIO → Teensy pose | `0x100` | 48 | `int64 rio_time_us`, `double x_m`, `double y_m`, `double theta_rad`, `uint32 status_flags`, 12 B pad |
+| RIO → Teensy time sync | `0x101` | 16 | `uint64 rio_time_us`, `uint32 ping_seq`, `uint32 reserved` |
+| Teensy → RIO pose | `0x180` | 48 | `int64 teensy_time_us`, `double x_m`, `double y_m`, `double theta_rad`, `uint32 status_flags`, 12 B pad |
+
+`0x100` decodes into a `RobotOdometry` USB frame the host can ingest as a
+`RobotOdometrySample`. `0x101` drives the RoboRIO time-sync filter (offset =
+`teensy_recv_us − rio_time_us`, EMA `α = 1/8`, single-step rejection at 5 ms).
+`0x180` is emitted at `pose_publish_hz` from the most recent `FusedPose`
+forwarded from the host.
+
+The current RoboRIO offset is reported in `TeensyHealth.rio_offset_us`, with
+`rio_status_flags` carrying `kHealthRioUnsynchronized` until at least one
+ping has been accepted (and again once the offset is stale).
+
+## Protocol Drift Check
+
+Both `include/posest/teensy/Protocol.h` and `firmware/teensy41/include/Protocol.h`
+must agree on enum and constant values. CTest runs
+`scripts/check_protocol_constants.py` to fail the build if either side drifts.

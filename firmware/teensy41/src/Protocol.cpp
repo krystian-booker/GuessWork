@@ -2,69 +2,11 @@
 
 #include <cstring>
 
+#include "ByteCodec.h"
+
 namespace posest::firmware {
 
 namespace {
-
-void appendU16(std::uint8_t* out, std::size_t& offset, std::uint16_t value) {
-    out[offset++] = static_cast<std::uint8_t>(value & 0xFFu);
-    out[offset++] = static_cast<std::uint8_t>((value >> 8u) & 0xFFu);
-}
-
-void appendU32(std::uint8_t* out, std::size_t& offset, std::uint32_t value) {
-    for (int shift = 0; shift <= 24; shift += 8) {
-        out[offset++] = static_cast<std::uint8_t>(
-            (value >> static_cast<unsigned>(shift)) & 0xFFu);
-    }
-}
-
-void appendU64(std::uint8_t* out, std::size_t& offset, std::uint64_t value) {
-    for (int shift = 0; shift <= 56; shift += 8) {
-        out[offset++] = static_cast<std::uint8_t>(
-            (value >> static_cast<unsigned>(shift)) & 0xFFu);
-    }
-}
-
-void appendDouble(std::uint8_t* out, std::size_t& offset, double value) {
-    std::uint64_t bits = 0;
-    static_assert(sizeof(bits) == sizeof(value));
-    std::memcpy(&bits, &value, sizeof(value));
-    appendU64(out, offset, bits);
-}
-
-std::uint16_t readU16(const std::uint8_t* bytes, std::size_t offset) {
-    return static_cast<std::uint16_t>(bytes[offset]) |
-           static_cast<std::uint16_t>(
-               static_cast<std::uint16_t>(bytes[offset + 1]) << 8u);
-}
-
-std::uint32_t readU32(const std::uint8_t* bytes, std::size_t offset) {
-    return static_cast<std::uint32_t>(bytes[offset]) |
-           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8u) |
-           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16u) |
-           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24u);
-}
-
-std::uint64_t readU64(const std::uint8_t* bytes, std::size_t offset) {
-    std::uint64_t value = 0;
-    for (int shift = 0; shift <= 56; shift += 8) {
-        value |= static_cast<std::uint64_t>(bytes[offset + static_cast<std::size_t>(shift / 8)])
-                 << static_cast<unsigned>(shift);
-    }
-    return value;
-}
-
-std::int64_t readI64(const std::uint8_t* bytes, std::size_t offset) {
-    return static_cast<std::int64_t>(readU64(bytes, offset));
-}
-
-double readDouble(const std::uint8_t* bytes, std::size_t offset) {
-    const std::uint64_t bits = readU64(bytes, offset);
-    double value = 0.0;
-    static_assert(sizeof(bits) == sizeof(value));
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
 
 bool ensure(std::size_t capacity, std::size_t required) {
     return capacity >= required;
@@ -180,7 +122,7 @@ bool encodeTeensyHealthPayload(
     std::uint8_t* out,
     std::size_t capacity,
     std::uint16_t& out_size) {
-    if (!out || !ensure(capacity, 24u)) {
+    if (!out || !ensure(capacity, 44u)) {
         return false;
     }
     std::size_t offset = 0;
@@ -189,6 +131,10 @@ bool encodeTeensyHealthPayload(
     appendU32(out, offset, payload.trigger_status_flags);
     appendU32(out, offset, payload.rx_queue_depth);
     appendU32(out, offset, payload.tx_queue_depth);
+    appendU64(out, offset, static_cast<std::uint64_t>(payload.rio_offset_us));
+    appendU32(out, offset, payload.rio_status_flags);
+    appendU32(out, offset, payload.accel_saturations);
+    appendU32(out, offset, payload.gyro_saturations);
     out_size = static_cast<std::uint16_t>(offset);
     return true;
 }
@@ -243,6 +189,78 @@ bool decodeFusedPosePayload(const Frame& frame, FusedPosePayload& payload) {
     payload.field_to_robot.y_m = readDouble(frame.payload, 8);
     payload.field_to_robot.theta_rad = readDouble(frame.payload, 16);
     payload.status_flags = readU32(frame.payload, 24);
+    return true;
+}
+
+bool decodeImuConfigPayload(const Frame& frame, ImuConfigCommand& command) {
+    if (frame.payload_size < 12u) {
+        return false;
+    }
+    if (readU32(frame.payload, 0) !=
+        static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
+        return false;
+    }
+    if (frame.payload_size != 32u) {
+        return false;
+    }
+    command.valid = true;
+    command.accel_range_g = readU32(frame.payload, 4);
+    command.accel_odr_hz = readU32(frame.payload, 8);
+    command.accel_bandwidth_code = readU32(frame.payload, 12);
+    command.gyro_range_dps = readU32(frame.payload, 16);
+    command.gyro_bandwidth_code = readU32(frame.payload, 20);
+    command.data_sync_rate_hz = readU32(frame.payload, 24);
+    command.run_selftest_on_boot = readU32(frame.payload, 28) != 0u;
+    return true;
+}
+
+bool encodeConfigAckPayload(
+    const ConfigAckHeader& header,
+    const TriggerAckEntry* trigger_entries,
+    std::size_t trigger_entry_count,
+    const ImuConfigAckEntry* imu_entry,
+    std::uint8_t* out,
+    std::size_t capacity,
+    std::uint16_t& out_size) {
+    if (!out) {
+        return false;
+    }
+    std::size_t required = 12u;
+    if (header.kind == static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers)) {
+        required += trigger_entry_count * 12u;
+    } else if (header.kind == static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
+        if (!imu_entry) {
+            return false;
+        }
+        required += 28u;
+    }
+    if (!ensure(capacity, required)) {
+        return false;
+    }
+
+    std::size_t offset = 0;
+    appendU32(out, offset, header.kind);
+    appendU32(out, offset, header.status_flags);
+    appendU32(out, offset, header.effective_count);
+
+    if (header.kind == static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers)) {
+        for (std::size_t i = 0; i < trigger_entry_count; ++i) {
+            const TriggerAckEntry& entry = trigger_entries[i];
+            appendU32(out, offset, static_cast<std::uint32_t>(entry.pin));
+            appendU32(out, offset, entry.period_us);
+            appendU32(out, offset, entry.pulse_us);
+        }
+    } else if (header.kind == static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
+        appendU32(out, offset, imu_entry->accel_range_g);
+        appendU32(out, offset, imu_entry->accel_odr_hz);
+        appendU32(out, offset, imu_entry->accel_bandwidth_code);
+        appendU32(out, offset, imu_entry->gyro_range_dps);
+        appendU32(out, offset, imu_entry->gyro_bandwidth_code);
+        appendU32(out, offset, imu_entry->data_sync_rate_hz);
+        appendU32(out, offset, imu_entry->reserved);
+    }
+
+    out_size = static_cast<std::uint16_t>(offset);
     return true;
 }
 

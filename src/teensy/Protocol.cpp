@@ -248,18 +248,25 @@ std::optional<RobotOdometryPayload> decodeRobotOdometryPayload(
 
 std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload) {
     std::vector<std::uint8_t> out;
-    out.reserve(24);
+    out.reserve(44);
     appendU64(out, payload.uptime_us);
     appendU32(out, payload.error_flags);
     appendU32(out, payload.trigger_status_flags);
     appendU32(out, payload.rx_queue_depth);
     appendU32(out, payload.tx_queue_depth);
+    appendU64(out, static_cast<std::uint64_t>(payload.rio_offset_us));
+    appendU32(out, payload.rio_status_flags);
+    appendU32(out, payload.accel_saturations);
+    appendU32(out, payload.gyro_saturations);
     return out;
 }
 
 std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     const std::vector<std::uint8_t>& bytes) {
-    if (bytes.size() != 24u) {
+    // Accept both the legacy 24-byte payload (rio fields default to 0) and the
+    // current 44-byte form so older firmware can still report basic health
+    // while the host has been updated.
+    if (bytes.size() != 24u && bytes.size() != 44u) {
         return std::nullopt;
     }
     TeensyHealthPayload payload;
@@ -268,6 +275,12 @@ std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     payload.trigger_status_flags = readU32(bytes, 12);
     payload.rx_queue_depth = readU32(bytes, 16);
     payload.tx_queue_depth = readU32(bytes, 20);
+    if (bytes.size() == 44u) {
+        payload.rio_offset_us = static_cast<std::int64_t>(readU64(bytes, 24));
+        payload.rio_status_flags = readU32(bytes, 32);
+        payload.accel_saturations = readU32(bytes, 36);
+        payload.gyro_saturations = readU32(bytes, 40);
+    }
     return payload;
 }
 
@@ -328,6 +341,133 @@ std::optional<TimeSyncResponsePayload> decodeTimeSyncResponsePayload(
         return std::nullopt;
     }
     return TimeSyncResponsePayload{readU32(bytes, 0), readU64(bytes, 4), readU64(bytes, 12)};
+}
+
+namespace {
+
+constexpr std::size_t kConfigAckHeaderSize = 12;
+constexpr std::size_t kTriggerAckEntrySize = 12;
+constexpr std::size_t kImuConfigAckBodySize = 28;
+constexpr std::size_t kImuConfigPayloadSize = 28;
+
+}  // namespace
+
+std::vector<std::uint8_t> encodeConfigAckPayload(const ConfigAckPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(kConfigAckHeaderSize + payload.trigger_entries.size() * kTriggerAckEntrySize +
+                (payload.imu_entry ? kImuConfigAckBodySize : 0u));
+    appendU32(out, payload.kind);
+    appendU32(out, payload.status_flags);
+    appendU32(out, payload.effective_count);
+
+    if (payload.kind == static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers)) {
+        for (const auto& entry : payload.trigger_entries) {
+            appendU32(out, static_cast<std::uint32_t>(entry.pin));
+            appendU32(out, entry.period_us);
+            appendU32(out, entry.pulse_us);
+        }
+    } else if (payload.kind == static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig) &&
+               payload.imu_entry) {
+        const auto& entry = *payload.imu_entry;
+        appendU32(out, entry.accel_range_g);
+        appendU32(out, entry.accel_odr_hz);
+        appendU32(out, entry.accel_bandwidth_code);
+        appendU32(out, entry.gyro_range_dps);
+        appendU32(out, entry.gyro_bandwidth_code);
+        appendU32(out, entry.data_sync_rate_hz);
+        appendU32(out, entry.reserved);
+    }
+    return out;
+}
+
+std::optional<ConfigAckPayload> decodeConfigAckPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() < kConfigAckHeaderSize) {
+        return std::nullopt;
+    }
+    ConfigAckPayload payload;
+    payload.kind = readU32(bytes, 0);
+    payload.status_flags = readU32(bytes, 4);
+    payload.effective_count = readU32(bytes, 8);
+
+    if (payload.kind == static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers)) {
+        const std::size_t expected =
+            kConfigAckHeaderSize +
+            static_cast<std::size_t>(payload.effective_count) * kTriggerAckEntrySize;
+        if (bytes.size() != expected) {
+            return std::nullopt;
+        }
+        payload.trigger_entries.reserve(payload.effective_count);
+        std::size_t offset = kConfigAckHeaderSize;
+        for (std::uint32_t i = 0; i < payload.effective_count; ++i) {
+            TriggerAckEntry entry;
+            entry.pin = static_cast<std::int32_t>(readU32(bytes, offset));
+            offset += 4;
+            entry.period_us = readU32(bytes, offset);
+            offset += 4;
+            entry.pulse_us = readU32(bytes, offset);
+            offset += 4;
+            payload.trigger_entries.push_back(entry);
+        }
+        return payload;
+    }
+
+    if (payload.kind == static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
+        if (bytes.size() != kConfigAckHeaderSize + kImuConfigAckBodySize) {
+            return std::nullopt;
+        }
+        ImuConfigAckEntry entry;
+        std::size_t offset = kConfigAckHeaderSize;
+        entry.accel_range_g = readU32(bytes, offset);
+        offset += 4;
+        entry.accel_odr_hz = readU32(bytes, offset);
+        offset += 4;
+        entry.accel_bandwidth_code = readU32(bytes, offset);
+        offset += 4;
+        entry.gyro_range_dps = readU32(bytes, offset);
+        offset += 4;
+        entry.gyro_bandwidth_code = readU32(bytes, offset);
+        offset += 4;
+        entry.data_sync_rate_hz = readU32(bytes, offset);
+        offset += 4;
+        entry.reserved = readU32(bytes, offset);
+        payload.imu_entry = entry;
+        return payload;
+    }
+
+    if (bytes.size() != kConfigAckHeaderSize) {
+        return std::nullopt;
+    }
+    return payload;
+}
+
+std::vector<std::uint8_t> encodeImuConfigPayload(const ImuConfigPayload& payload) {
+    std::vector<std::uint8_t> out;
+    out.reserve(kImuConfigPayloadSize);
+    appendU32(out, payload.accel_range_g);
+    appendU32(out, payload.accel_odr_hz);
+    appendU32(out, payload.accel_bandwidth_code);
+    appendU32(out, payload.gyro_range_dps);
+    appendU32(out, payload.gyro_bandwidth_code);
+    appendU32(out, payload.data_sync_rate_hz);
+    appendU32(out, payload.run_selftest_on_boot);
+    return out;
+}
+
+std::optional<ImuConfigPayload> decodeImuConfigPayload(
+    const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != kImuConfigPayloadSize) {
+        return std::nullopt;
+    }
+    ImuConfigPayload payload;
+    payload.accel_range_g = readU32(bytes, 0);
+    payload.accel_odr_hz = readU32(bytes, 4);
+    payload.accel_bandwidth_code = readU32(bytes, 8);
+    payload.gyro_range_dps = readU32(bytes, 12);
+    payload.gyro_bandwidth_code = readU32(bytes, 16);
+    payload.data_sync_rate_hz = readU32(bytes, 20);
+    payload.run_selftest_on_boot = readU32(bytes, 24);
+    return payload;
 }
 
 std::vector<Frame> StreamDecoder::push(const std::uint8_t* data, std::size_t size) {

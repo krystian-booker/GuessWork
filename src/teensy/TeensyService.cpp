@@ -1,6 +1,7 @@
 #include "posest/teensy/TeensyService.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -129,6 +130,7 @@ void TeensyService::workerLoop() {
                 ++stats_.successful_connects;
             }
             sendCameraTriggerConfig(*current_transport_);
+            sendImuConfig(*current_transport_);
             runConnected(*current_transport_);
         } catch (const std::exception& e) {
             markDisconnected(e.what());
@@ -155,6 +157,10 @@ void TeensyService::runConnected(ISerialTransport& transport) {
     StreamStats previous_decoder_stats;
     auto next_time_sync = std::chrono::steady_clock::now();
     std::array<std::uint8_t, 512> buffer{};
+    const auto sync_interval =
+        config_.time_sync_interval_ms > 0u
+            ? std::chrono::milliseconds(config_.time_sync_interval_ms)
+            : kTimeSyncInterval;
 
     while (true) {
         {
@@ -167,7 +173,7 @@ void TeensyService::runConnected(ISerialTransport& transport) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_time_sync) {
             sendTimeSyncRequest(transport, now);
-            next_time_sync = now + kTimeSyncInterval;
+            next_time_sync = now + sync_interval;
         }
 
         while (flushOneOutbound(transport)) {
@@ -365,6 +371,23 @@ void TeensyService::handleFrame(const Frame& frame) {
             }
             break;
         }
+        case MessageType::ConfigAck: {
+            const auto decoded = decodeConfigAckPayload(frame.payload);
+            if (!decoded) {
+                std::lock_guard<std::mutex> g(mu_);
+                ++stats_.invalid_payloads;
+                return;
+            }
+            std::lock_guard<std::mutex> g(mu_);
+            if (decoded->kind ==
+                static_cast<std::uint32_t>(ConfigCommandKind::CameraTriggers)) {
+                stats_.last_trigger_ack = *decoded;
+            } else if (decoded->kind ==
+                       static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig)) {
+                stats_.last_imu_ack = *decoded;
+            }
+            break;
+        }
         case MessageType::TimeSyncResponse: {
             const auto decoded = decodeTimeSyncResponsePayload(frame.payload);
             if (!decoded) {
@@ -375,12 +398,19 @@ void TeensyService::handleFrame(const Frame& frame) {
             handleTimeSyncResponse(*decoded, now);
             break;
         }
-        case MessageType::TeensyHealth:
-            if (!decodeTeensyHealthPayload(frame.payload)) {
+        case MessageType::TeensyHealth: {
+            const auto decoded = decodeTeensyHealthPayload(frame.payload);
+            if (!decoded) {
                 std::lock_guard<std::mutex> g(mu_);
                 ++stats_.invalid_payloads;
+                break;
             }
+            std::lock_guard<std::mutex> g(mu_);
+            stats_.rio_to_host_offset_us = decoded->rio_offset_us;
+            stats_.rio_time_sync_established =
+                (decoded->rio_status_flags & kHealthRioUnsynchronized) == 0u;
             break;
+        }
         default:
             break;
     }
@@ -420,29 +450,44 @@ void TeensyService::handleTimeSyncResponse(
     }
 
     const std::uint64_t host_send_us = pending_time_sync_host_send_us_;
+    const std::uint64_t round_trip_us =
+        host_receive_us >= host_send_us ? host_receive_us - host_send_us : 0;
     const auto host_midpoint =
         static_cast<std::int64_t>((host_send_us / 2u) + (host_receive_us / 2u));
     const auto teensy_midpoint =
         static_cast<std::int64_t>(
             (payload.teensy_receive_time_us / 2u) +
             (payload.teensy_transmit_time_us / 2u));
-    stats_.time_sync_offset_us = host_midpoint - teensy_midpoint;
-    stats_.time_sync_round_trip_us = host_receive_us >= host_send_us
-                                         ? host_receive_us - host_send_us
-                                         : 0;
-    stats_.time_sync_established = true;
+    const std::int64_t offset_us = host_midpoint - teensy_midpoint;
+
     pending_time_sync_sequence_.reset();
+
+    TimeSyncFilter::Sample new_sample;
+    new_sample.teensy_midpoint_us = teensy_midpoint;
+    new_sample.offset_us = offset_us;
+    new_sample.round_trip_us = round_trip_us;
+
+    const bool accepted = time_sync_filter_.update(new_sample);
+    if (!accepted) {
+        ++stats_.time_sync_samples_rejected;
+        return;
+    }
+    stats_.time_sync_offset_us = time_sync_filter_.offsetUs();
+    stats_.time_sync_round_trip_us = time_sync_filter_.lastRoundTripUs();
+    stats_.time_sync_skew_ppm = time_sync_filter_.skewPpm();
+    stats_.time_sync_samples_accepted = time_sync_filter_.accepted();
+    stats_.time_sync_established = time_sync_filter_.established();
 }
 
 Timestamp TeensyService::timestampFromTeensyTime(
     std::uint64_t teensy_time_us,
     Timestamp fallback) {
     std::lock_guard<std::mutex> g(mu_);
-    if (!stats_.time_sync_established) {
+    if (!time_sync_filter_.established()) {
         return fallback;
     }
-    const auto host_time_us =
-        static_cast<std::int64_t>(teensy_time_us) + stats_.time_sync_offset_us;
+    const std::int64_t host_time_us =
+        time_sync_filter_.apply(static_cast<std::int64_t>(teensy_time_us));
     if (host_time_us < 0) {
         return fallback;
     }
@@ -469,6 +514,34 @@ void TeensyService::sendCameraTriggerConfig(ISerialTransport& transport) {
     frame.type = MessageType::ConfigCommand;
     frame.sequence = next_sequence_++;
     frame.payload = encodeCameraTriggerConfigPayload();
+    transport.write(encodeFrame(frame));
+
+    std::lock_guard<std::mutex> g(mu_);
+    ++stats_.outbound_frames_sent;
+    stats_.last_transmit_time = std::chrono::steady_clock::now();
+}
+
+std::vector<std::uint8_t> TeensyService::encodeImuConfigCommandPayload() const {
+    std::vector<std::uint8_t> payload;
+    appendU32(payload, static_cast<std::uint32_t>(ConfigCommandKind::ImuConfig));
+    ImuConfigPayload imu;
+    imu.accel_range_g = config_.imu.accel_range_g;
+    imu.accel_odr_hz = config_.imu.accel_odr_hz;
+    imu.accel_bandwidth_code = config_.imu.accel_bandwidth_code;
+    imu.gyro_range_dps = config_.imu.gyro_range_dps;
+    imu.gyro_bandwidth_code = config_.imu.gyro_bandwidth_code;
+    imu.data_sync_rate_hz = config_.imu.data_sync_rate_hz;
+    imu.run_selftest_on_boot = config_.imu.run_selftest_on_boot ? 1u : 0u;
+    auto body = encodeImuConfigPayload(imu);
+    payload.insert(payload.end(), body.begin(), body.end());
+    return payload;
+}
+
+void TeensyService::sendImuConfig(ISerialTransport& transport) {
+    Frame frame;
+    frame.type = MessageType::ConfigCommand;
+    frame.sequence = next_sequence_++;
+    frame.payload = encodeImuConfigCommandPayload();
     transport.write(encodeFrame(frame));
 
     std::lock_guard<std::mutex> g(mu_);

@@ -130,12 +130,134 @@ TEST(TeensyProtocol, CameraTriggerEventPayloadRoundTrips) {
     EXPECT_EQ(decoded->status_flags, 7u);
 }
 
+TEST(TeensyProtocol, TeensyHealthPayloadRoundTripsExtended) {
+    posest::teensy::TeensyHealthPayload payload;
+    payload.uptime_us = 1234;
+    payload.error_flags = 0xA5;
+    payload.trigger_status_flags = 0x10;
+    payload.rx_queue_depth = 7;
+    payload.tx_queue_depth = 3;
+    payload.rio_offset_us = -987654;
+    payload.rio_status_flags = posest::teensy::kHealthRioPingRejected;
+    payload.accel_saturations = 11;
+    payload.gyro_saturations = 22;
+
+    const auto bytes = posest::teensy::encodeTeensyHealthPayload(payload);
+    EXPECT_EQ(bytes.size(), 44u);
+    const auto decoded = posest::teensy::decodeTeensyHealthPayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->uptime_us, 1234u);
+    EXPECT_EQ(decoded->rio_offset_us, -987654);
+    EXPECT_EQ(decoded->rio_status_flags, posest::teensy::kHealthRioPingRejected);
+    EXPECT_EQ(decoded->accel_saturations, 11u);
+    EXPECT_EQ(decoded->gyro_saturations, 22u);
+}
+
+TEST(TeensyProtocol, TeensyHealthPayloadAcceptsLegacy24ByteForm) {
+    // Legacy firmware stamped just the original 24 bytes; the host must keep
+    // accepting that form (rio fields default to zero) so older firmware can
+    // still report basic health while it's being reflashed.
+    posest::teensy::TeensyHealthPayload payload;
+    payload.uptime_us = 99;
+    payload.error_flags = 1;
+    payload.trigger_status_flags = 2;
+    payload.rx_queue_depth = 3;
+    payload.tx_queue_depth = 4;
+    payload.rio_offset_us = 0;
+    payload.rio_status_flags = 0;
+    payload.accel_saturations = 0;
+    payload.gyro_saturations = 0;
+
+    auto bytes = posest::teensy::encodeTeensyHealthPayload(payload);
+    bytes.resize(24);
+    const auto decoded = posest::teensy::decodeTeensyHealthPayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->uptime_us, 99u);
+    EXPECT_EQ(decoded->rio_offset_us, 0);
+    EXPECT_EQ(decoded->rio_status_flags, 0u);
+}
+
 TEST(TeensyProtocol, RejectsBadPayloadSizes) {
     EXPECT_FALSE(posest::teensy::decodeImuPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeWheelOdometryPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeRobotOdometryPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeCameraTriggerEventPayload({1, 2, 3}).has_value());
     EXPECT_FALSE(posest::teensy::decodeTimeSyncResponsePayload({1, 2, 3}).has_value());
+}
+
+TEST(TeensyProtocol, ConfigAckCameraTriggersRoundTrips) {
+    posest::teensy::ConfigAckPayload payload;
+    payload.kind = static_cast<std::uint32_t>(
+        posest::teensy::ConfigCommandKind::CameraTriggers);
+    payload.status_flags = posest::teensy::kConfigAckInvalidRate;
+    payload.effective_count = 2;
+    payload.trigger_entries.push_back({2, 33333u, 1000u});
+    payload.trigger_entries.push_back({4, 8333u, 200u});
+
+    const auto bytes = posest::teensy::encodeConfigAckPayload(payload);
+    const auto decoded = posest::teensy::decodeConfigAckPayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->kind, payload.kind);
+    EXPECT_EQ(decoded->status_flags, posest::teensy::kConfigAckInvalidRate);
+    EXPECT_EQ(decoded->effective_count, 2u);
+    ASSERT_EQ(decoded->trigger_entries.size(), 2u);
+    EXPECT_EQ(decoded->trigger_entries[0].pin, 2);
+    EXPECT_EQ(decoded->trigger_entries[1].period_us, 8333u);
+    EXPECT_EQ(decoded->trigger_entries[1].pulse_us, 200u);
+    EXPECT_FALSE(decoded->imu_entry.has_value());
+}
+
+TEST(TeensyProtocol, ConfigAckImuConfigRoundTrips) {
+    posest::teensy::ConfigAckPayload payload;
+    payload.kind = static_cast<std::uint32_t>(
+        posest::teensy::ConfigCommandKind::ImuConfig);
+    payload.status_flags = 0;
+    payload.effective_count = 1;
+    posest::teensy::ImuConfigAckEntry entry;
+    entry.accel_range_g = 6;
+    entry.accel_odr_hz = 800;
+    entry.accel_bandwidth_code = 2;
+    entry.gyro_range_dps = 1000;
+    entry.gyro_bandwidth_code = 1;
+    entry.data_sync_rate_hz = 1000;
+    entry.reserved = 0;
+    payload.imu_entry = entry;
+
+    const auto bytes = posest::teensy::encodeConfigAckPayload(payload);
+    const auto decoded = posest::teensy::decodeConfigAckPayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_TRUE(decoded->imu_entry.has_value());
+    EXPECT_EQ(decoded->imu_entry->accel_range_g, 6u);
+    EXPECT_EQ(decoded->imu_entry->gyro_range_dps, 1000u);
+    EXPECT_TRUE(decoded->trigger_entries.empty());
+}
+
+TEST(TeensyProtocol, ConfigAckRejectsTruncatedPayload) {
+    EXPECT_FALSE(posest::teensy::decodeConfigAckPayload({1, 2, 3}).has_value());
+}
+
+TEST(TeensyProtocol, ImuConfigPayloadRoundTrips) {
+    posest::teensy::ImuConfigPayload payload;
+    payload.accel_range_g = 24;
+    payload.accel_odr_hz = 1600;
+    payload.accel_bandwidth_code = 1;
+    payload.gyro_range_dps = 500;
+    payload.gyro_bandwidth_code = 3;
+    payload.data_sync_rate_hz = 2000;
+    payload.run_selftest_on_boot = 0;
+
+    const auto bytes = posest::teensy::encodeImuConfigPayload(payload);
+    EXPECT_EQ(bytes.size(), 28u);
+    const auto decoded = posest::teensy::decodeImuConfigPayload(bytes);
+
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->accel_range_g, 24u);
+    EXPECT_EQ(decoded->data_sync_rate_hz, 2000u);
+    EXPECT_EQ(decoded->run_selftest_on_boot, 0u);
 }
 
 TEST(TeensyProtocol, TimeSyncPayloadRoundTrips) {
