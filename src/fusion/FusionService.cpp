@@ -163,6 +163,70 @@ struct FusionBackend {
         return makeEstimate(next_key, timestamp, status_flags);
     }
 
+    // VioMeasurement → BetweenFactor<Pose3> on the existing key chain. The
+    // key-advance pattern mirrors addChassisSpeeds: VIO and chassis share one
+    // chain so their factors compose. The placeholder VIO pipeline publishes
+    // tracking_ok=false; that branch is a no-op until a real frontend lands.
+    enum class VioOutcome { kNoTracking, kSkipped, kProcessed };
+
+    std::pair<std::optional<FusedPoseEstimate>, VioOutcome> addVio(
+        const VioMeasurement& measurement,
+        Timestamp timestamp) {
+        if (!config_.enable_vio) {
+            return {std::nullopt, VioOutcome::kSkipped};
+        }
+        if (!measurement.tracking_ok) {
+            return {std::nullopt, VioOutcome::kNoTracking};
+        }
+        if (!initialized_) {
+            // Need a chassis or AprilTag bootstrap before we can attach
+            // relative-motion factors.
+            return {std::nullopt, VioOutcome::kSkipped};
+        }
+
+        gtsam::SharedNoiseModel noise = diagonalNoise(config_.vio_default_sigmas);
+        bool covariance_pd = false;
+        gtsam::Matrix6 covariance_matrix;
+        for (int row = 0; row < 6; ++row) {
+            for (int col = 0; col < 6; ++col) {
+                covariance_matrix(row, col) =
+                    measurement.covariance[static_cast<std::size_t>(row * 6 + col)];
+            }
+        }
+        // Cheap PD check: at least one diagonal must be > 0. The full
+        // Gaussian::Covariance constructor will throw on non-PD, in which case
+        // we fall back to the configured default sigmas.
+        for (int i = 0; i < 6; ++i) {
+            if (covariance_matrix(i, i) > 0.0) {
+                covariance_pd = true;
+                break;
+            }
+        }
+        if (covariance_pd) {
+            try {
+                noise = gtsam::noiseModel::Gaussian::Covariance(covariance_matrix);
+            } catch (const std::exception&) {
+                noise = diagonalNoise(config_.vio_default_sigmas);
+            }
+        }
+
+        const gtsam::Pose3 delta = toGtsamPose(measurement.relative_motion);
+        const std::uint64_t next_index = current_index_ + 1u;
+        const gtsam::Key next_key = poseKey(next_index);
+
+        gtsam::NonlinearFactorGraph graph;
+        gtsam::Values initial_values;
+        graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+            current_key_, next_key, delta, noise));
+        initial_values.insert(next_key, current_pose_.compose(delta));
+
+        if (!update(graph, initial_values, next_key, next_index)) {
+            return {estimateFromCurrent(timestamp, kFusionStatusOptimizerError),
+                    VioOutcome::kProcessed};
+        }
+        return {makeEstimate(next_key, timestamp, 0u), VioOutcome::kProcessed};
+    }
+
     std::optional<FusedPoseEstimate> addAprilTags(
         const AprilTagObservation& observation,
         Timestamp timestamp) {
@@ -355,8 +419,9 @@ void FusionService::runLoop() {
 void FusionService::process(const Measurement& measurement) {
     if (const auto* imu = std::get_if<ImuSample>(&measurement)) {
         // IMU samples feed the shock-detection window only; they don't push
-        // the global out-of-order cursor, since the 1 kHz IMU and ~100 Hz
-        // chassis-speeds streams interleave naturally.
+        // the per-type cursor, since the 1 kHz IMU and ~100 Hz chassis-speeds
+        // streams interleave naturally and the shock detector windows them
+        // internally.
         backend_->addImu(*imu);
         std::lock_guard<std::mutex> g(mu_);
         ++stats_.measurements_processed;
@@ -368,7 +433,7 @@ void FusionService::process(const Measurement& measurement) {
     }
 
     const Timestamp measurement_time = timestampOf(measurement);
-    if (!acceptTimestamp(measurement_time)) {
+    if (!acceptTimestamp(measurement, measurement_time)) {
         return;
     }
 
@@ -377,6 +442,15 @@ void FusionService::process(const Measurement& measurement) {
         estimate = backend_->addChassisSpeeds(*chassis, measurement_time);
     } else if (const auto* tags = std::get_if<AprilTagObservation>(&measurement)) {
         estimate = backend_->addAprilTags(*tags, measurement_time);
+    } else if (const auto* vio = std::get_if<VioMeasurement>(&measurement)) {
+        auto [vio_estimate, outcome] = backend_->addVio(*vio, measurement_time);
+        estimate = std::move(vio_estimate);
+        std::lock_guard<std::mutex> g(mu_);
+        if (outcome == FusionBackend::VioOutcome::kProcessed) {
+            ++stats_.measurements_vio_processed;
+        } else if (outcome == FusionBackend::VioOutcome::kNoTracking) {
+            ++stats_.measurements_vio_skipped_no_tracking;
+        }
     }
 
     if (estimate) {
@@ -386,16 +460,26 @@ void FusionService::process(const Measurement& measurement) {
 
 bool FusionService::isSupportedMeasurement(const Measurement& measurement) const {
     return std::holds_alternative<ChassisSpeedsSample>(measurement) ||
-           std::holds_alternative<AprilTagObservation>(measurement);
+           std::holds_alternative<AprilTagObservation>(measurement) ||
+           std::holds_alternative<VioMeasurement>(measurement);
 }
 
-bool FusionService::acceptTimestamp(Timestamp timestamp) {
+bool FusionService::acceptTimestamp(
+    const Measurement& measurement, Timestamp timestamp) {
+    static_assert(std::variant_size_v<Measurement> == kMeasurementTypeCount,
+                  "FusionService per-type cursor array must match the Measurement variant size");
     std::lock_guard<std::mutex> g(mu_);
-    if (stats_.last_measurement_time && timestamp < *stats_.last_measurement_time) {
+    const std::size_t idx = measurement.index();
+    auto& cursor = per_type_cursors_[idx];
+    if (cursor && timestamp < *cursor) {
         ++stats_.stale_measurements;
         return false;
     }
-    stats_.last_measurement_time = timestamp;
+    cursor = timestamp;
+    if (!stats_.last_measurement_time ||
+        timestamp > *stats_.last_measurement_time) {
+        stats_.last_measurement_time = timestamp;
+    }
     ++stats_.measurements_processed;
     return true;
 }

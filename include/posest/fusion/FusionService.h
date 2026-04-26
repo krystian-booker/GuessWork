@@ -18,7 +18,15 @@ namespace posest::fusion {
 struct FusionStats {
     std::uint64_t measurements_processed{0};
     std::uint64_t stale_measurements{0};
+    // Most recent timestamp accepted across any measurement type. Per-type
+    // monotonicity is enforced internally with one cursor per Measurement
+    // variant alternative; this field is informational only.
     std::optional<Timestamp> last_measurement_time;
+    // VIO factor traffic. Skipped-no-tracking exists so the placeholder
+    // pipeline's tracking_ok=false samples are observable without polluting
+    // measurements_processed.
+    std::uint64_t measurements_vio_processed{0};
+    std::uint64_t measurements_vio_skipped_no_tracking{0};
 };
 
 inline constexpr std::uint32_t kFusionStatusInitializing = 1u << 0u;
@@ -53,6 +61,15 @@ struct FusionConfig {
     // Local gravity vector in the IMU's robot frame. Subtracted before the
     // shock-magnitude test. Override for tilted IMU mounts.
     Vec3 gravity_local_mps2{0.0, 0.0, 9.80665};
+
+    // VioMeasurement → BetweenFactor<Pose3> ingestion. Disabled by default so
+    // existing deployments keep their current chassis-only behaviour. When
+    // the placeholder VIO pipeline is the only publisher, the per-sample
+    // tracking_ok=false gate also short-circuits this path.
+    bool enable_vio{false};
+    // Fallback sigmas applied when a VioMeasurement arrives with a non-PD or
+    // all-zero covariance. Order matches Pose3 tangent: [rx, ry, rz, tx, ty, tz].
+    std::array<double, 6> vio_default_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config);
@@ -78,14 +95,22 @@ private:
     void runLoop();
     void process(const Measurement& measurement);
     bool isSupportedMeasurement(const Measurement& measurement) const;
-    bool acceptTimestamp(Timestamp timestamp);
+    // Per-type monotonicity gate: rejects a measurement whose timestamp is
+    // older than the previous one of *the same variant alternative*.
+    // Different types track independent cursors so a chassis sample at t=10
+    // does not silently drop an AprilTag observation at t=9.
+    bool acceptTimestamp(const Measurement& measurement, Timestamp timestamp);
     void publishEstimate(FusedPoseEstimate estimate);
+
+    static constexpr std::size_t kMeasurementTypeCount = 6;
 
     MeasurementBus& measurement_bus_;
     std::unique_ptr<FusionBackend> backend_;
     mutable std::mutex mu_;
     std::vector<std::shared_ptr<IFusionOutputSink>> sinks_;
     FusionStats stats_;
+    // One cursor per Measurement variant alternative — keyed by Measurement::index().
+    std::array<std::optional<Timestamp>, kMeasurementTypeCount> per_type_cursors_;
     std::optional<FusedPoseEstimate> latest_estimate_;
     std::thread worker_;
     std::atomic<bool> running_{false};

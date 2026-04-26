@@ -54,6 +54,33 @@ public:
 
     static CameraTriggerScheduler* activeInstance() { return active_instance_; }
 
+    // Test-only entry points. Production code never calls these. They expose
+    // private ISR methods and internal state so unit tests can drive the
+    // VIO companion path without an IntervalTimer running. Mirrors
+    // CanBridge::testHookFeedRioTimeSync.
+    void testHookSimulateVioRise(std::uint32_t event_time_us) {
+        // Mirror the bookkeeping that tickIsr does on a real rise: bump the
+        // VIO slot's trigger_sequence and stash it for the ToF join, then
+        // run the LED+ToF deadline scheduler.
+        const std::size_t i = static_cast<std::size_t>(vio_companion_.vio_slot_index);
+        ++channels_[i].trigger_sequence;
+        tof_pending_trigger_sequence_ = channels_[i].trigger_sequence;
+        onVioRiseFromIsr(event_time_us);
+    }
+    void testHookLedFallIsr() { ledFallIsr(); }
+    bool testHookLedFallPending() const { return led_fall_pending_; }
+    bool testHookTofStartPending() const { return tof_start_pending_; }
+    std::uint32_t testHookTofStartDeadline() const { return tof_start_deadline_us_; }
+    std::uint32_t testHookTofPendingTriggerSequence() const {
+        return tof_pending_trigger_sequence_;
+    }
+    static std::uint32_t testHookGcdU32(std::uint32_t a, std::uint32_t b) {
+        return gcdU32(a, b);
+    }
+    static std::uint32_t testHookPeriodFromRate(double rate_hz) {
+        return periodFromRate(rate_hz);
+    }
+
 private:
     struct Channel {
         bool enabled{false};
