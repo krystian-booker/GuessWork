@@ -85,6 +85,46 @@ add_library(posest_fusion
 )
 target_link_libraries(posest_fusion PUBLIC posest_core posest_runtime ${POSEST_GTSAM_TARGET})
 
+# --- posest_vio_core: airborne covariance gate, IVioBackend, FakeVioBackend,
+# KimeraVioConsumer. Always built so tests + Linux CI can exercise the
+# consumer against FakeVioBackend without needing a Kimera-VIO install.
+add_library(posest_vio_core
+    src/vio/AirborneCovariance.cpp
+    src/vio/FakeVioBackend.cpp
+    src/vio/KimeraVioConsumer.cpp
+)
+target_link_libraries(posest_vio_core PUBLIC
+    posest_core
+    ${POSEST_GTSAM_TARGET}
+)
+
+# --- posest_vio_kimera: real Kimera-VIO backend adapter. Defaults ON only
+# on Apple (Mac Mini target); opt-in on Linux for developers who have
+# Kimera-VIO installed locally. cmake/FindKimeraVIO.cmake provides the
+# KimeraVIO::KimeraVIO target since Kimera does not ship a portable
+# Config.cmake.
+option(POSEST_BUILD_VIO "Build Kimera-VIO backend adapter" ${APPLE})
+if(POSEST_BUILD_VIO)
+    list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+    find_package(KimeraVIO REQUIRED)
+    add_library(posest_vio_kimera
+        src/vio/KimeraBackend.cpp
+    )
+    target_link_libraries(posest_vio_kimera PUBLIC
+        posest_vio_core
+        KimeraVIO::KimeraVIO
+    )
+endif()
+
+# Install the Kimera YAML parameter files alongside the daemon binary.
+# KimeraVioConfig::param_dir resolves to <install-prefix>/share/posest/kimera
+# in production deployments.
+install(
+    DIRECTORY share/posest/kimera
+    DESTINATION share/posest
+    FILES_MATCHING PATTERN "*.yaml"
+)
+
 # --- posest_teensy: USB protocol codec + fusion output adapter
 add_library(posest_teensy
     src/teensy/Protocol.cpp
@@ -171,6 +211,9 @@ add_executable(posest_tests
     test/test_camera_producer.cpp
     test/test_fusion_service.cpp
     test/test_daemon.cpp
+    test/test_airborne_covariance.cpp
+    test/test_kimera_vio_consumer.cpp
+    test/test_tee_sink.cpp
 )
 target_link_libraries(posest_tests PRIVATE
     posest_mock
@@ -181,6 +224,7 @@ target_link_libraries(posest_tests PRIVATE
     posest_fusion
     posest_teensy
     posest_pipelines
+    posest_vio_core
     posest_daemon_lib
     GTest::gtest
     GTest::gtest_main

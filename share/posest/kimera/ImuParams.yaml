@@ -1,0 +1,42 @@
+# BMI088 IMU parameters at 1000 Hz, hardware-synchronized through the
+# Teensy 4.1 grandmaster clock.
+#
+# Noise densities below are the user-specified values for this BMI088
+# unit; they roll up the chip's continuous-time noise PSD with the
+# 1 kHz sampling rate Kimera assumes by default. The integration
+# sigma is held at 1e-8 to make pre-integration treat the IMU as a
+# near-noiseless source between samples — appropriate at 1 kHz where
+# integration error is dominated by the noise densities, not by the
+# discrete-step approximation.
+
+# Field-name convention: snake_case (matches Kimera's ImuParams YAML
+# parser). Verify against the installed Kimera version.
+
+# White noise PSDs.
+accelerometer_noise_density: 0.02
+gyroscope_noise_density: 0.005
+
+# Inter-sample integration uncertainty. 1e-8 is below the BMI088
+# digital noise floor at 1 kHz; effectively says "the discretization
+# itself adds no uncertainty, the noise densities own that budget".
+imu_integration_sigma: 1.0e-8
+
+# Random-walk parameters were not specified for this BMI088 unit
+# at the time these YAMLs were generated. Kimera's defaults are
+# adequate for short-horizon VIO but will drift on long autos —
+# replace with measured values from an Allan-variance run before
+# competition.
+# TODO(BMI088): populate accelerometer_random_walk and
+# gyroscope_random_walk from per-unit Allan calibration.
+# accelerometer_random_walk: <Allan>
+# gyroscope_random_walk: <Allan>
+
+# Sampling rate. Kimera divides noise densities by sqrt(sampling)
+# internally — match the firmware emit rate (1 kHz) exactly.
+nominal_sampling_time_s: 0.001
+
+# Body↔IMU extrinsic. The Teensy mounts the BMI088 at a fixed
+# location and orientation relative to the chassis frame; that 4×4
+# transform belongs here. Populated at runtime from RuntimeConfig
+# so we don't bake mechanical layout into the static YAML.
+# TODO(EXTRINSIC): wire IMUtoBodyT_BS from RuntimeConfig.

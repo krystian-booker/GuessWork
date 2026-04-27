@@ -1,0 +1,54 @@
+# Kimera-VIO frontend parameters tuned for a downward-facing 120 Hz
+# global-shutter camera over repetitive carpet/tile flooring on an FRC
+# swerve drive. Values are deliberately tighter than Kimera's defaults
+# because the failure mode here is not "lose tracking" — it is "lock
+# onto carpet weave aliases and report bogus motion". Strict outlier
+# rejection is preferred.
+#
+# Field-name convention: Kimera's frontend YAML parser uses snake_case
+# (see Kimera-VIO/include/kimera-vio/frontend/VisionImuFrontEndParams.h
+# and the parseYAMLParams() implementation). Verify exact spellings
+# against the installed Kimera version at integration time — Kimera has
+# renamed fields between releases and this file is the highest-risk
+# place for silent default-fallthrough.
+
+# Feature detector: 1 = GFTT/Harris (per the user's environment spec —
+# better corner repeatability on textured carpet than FAST/ORB). The
+# enum mapping is FeatureDetectorType in Kimera; double-check on the
+# installed version before flight.
+feature_detector_type: 1
+
+# Cap features per frame: 800 is well above Kimera's default and
+# necessary on a downward camera where most of the frame is uniform
+# carpet. Pair with min_distance below to spread features.
+max_features_per_frame: 800
+
+# KLT optical-flow tracker tuning. Larger window + more pyramid levels
+# absorbs the aggressive ego-motion blur from 5.12 m/s linear velocity
+# at 120 Hz (one frame ≈ 4 cm of translation worst-case).
+klt_win_size: 31
+klt_max_level: 4
+
+# Drop tracks older than this; carpet aliasing produces persistent
+# false matches across a dozen frames if you let them.
+max_feature_age: 12
+
+# GFTT quality threshold: 0.001 keeps weak corners that the strict
+# RANSAC threshold below will filter. On uniform carpet, raising this
+# starves the tracker.
+quality_level: 0.001
+
+# Minimum pixel distance between features. 15 px on a typical 640×480
+# downward camera spreads features across the visible patch and stops
+# the detector from clustering on a single high-contrast fiber.
+min_distance: 15
+
+# RANSAC inlier threshold for the 5-point monocular essential-matrix
+# solve. 1.5 px is strict — the alternative is letting carpet-weave
+# aliases survive RANSAC and corrupt the relative pose. Raise only if
+# you observe high frontend-rejection rates on a known-good run.
+ransac_threshold_mono: 1.5
+
+# Defaults for fields the user did not override; keep Kimera's
+# defaults unless we measure a problem.
+# (intentionally left at backend defaults, populated at parse time)

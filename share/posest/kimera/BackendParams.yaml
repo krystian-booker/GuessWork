@@ -1,0 +1,31 @@
+# Kimera-VIO backend parameters for collision-tolerant fusion.
+#
+# Field-name convention: the backend YAML in older Kimera releases
+# is camelCase (see VioBackEndParams::parseYAML). This is a known
+# Kimera inconsistency between frontend (snake_case) and backend
+# (camelCase) — do NOT "fix" the casing without confirming against
+# the installed Kimera version, or the parser will silently fall
+# through to defaults.
+
+# Smart projection factors keep landmark positions implicit by
+# marginalizing them out at each step — essential at 800 features
+# per frame; without this the optimizer state explodes.
+useSmartFactors: true
+
+# Huber M-estimator threshold (in standardized residual units) for
+# robust loss on pose factors. 1.0 absorbs the 15 g+ collision shock
+# without rejecting legitimate hard accelerations — the chassis
+# routinely sees 8 g on hard turns and a tighter Huber would
+# downweight those and bias the trajectory. Cauchy is too aggressive
+# here; Huber is the right knob.
+huberLossThreshold: 1.0
+
+# Linearization mode: 1 = HESSIAN. The HESSIAN form keeps the
+# Gauss-Newton normal equations explicitly, which is required for
+# our smart-factor configuration on a non-trivially constrained
+# state. JACOBIAN_Q (0) is faster but fails on rank-deficient
+# constraint sets we'd hit when ToF inflation kills VIO factors.
+linearizationMode: 1
+
+# Defaults for unspecified fields — Kimera's auto-init, smoother
+# horizon, dog-leg toggling, etc. — are accepted at parse time.
