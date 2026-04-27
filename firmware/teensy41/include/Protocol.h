@@ -7,9 +7,10 @@
 namespace posest::firmware {
 
 constexpr std::uint16_t kFrameMagic = 0x4757;
-// v3: FusedPose payload extended to carry full Pose3 + velocity + 6×6
-// covariance. Mirrors include/posest/teensy/Protocol.h.
-constexpr std::uint8_t kProtocolVersion = 3;
+// v4: FusedPose payload prefixed with host_send_time_us (376 B);
+// TeensyHealthPayload extended with firmware-measured fused-pose latency
+// (76 B). Mirrors include/posest/teensy/Protocol.h.
+constexpr std::uint8_t kProtocolVersion = 4;
 
 // Per-sample status flags shared with include/posest/teensy/Protocol.h. See
 // scripts/check_protocol_constants.py for the host-vs-firmware drift check.
@@ -124,6 +125,13 @@ struct TeensyHealthPayload {
     std::uint32_t tof_overruns{0};
     std::uint32_t tof_i2c_failures{0};
     std::uint32_t tof_status_flags{0};
+    // F-6 (v4): rolling fused-pose latency window measured from USB-decode to
+    // CAN-FD-TX. Reset every health emit. samples == 0 ↔ no FusedPose has
+    // crossed the firmware in the most recent window.
+    std::uint32_t fused_pose_decode_to_tx_min_us{0};
+    std::uint32_t fused_pose_decode_to_tx_avg_us{0};
+    std::uint32_t fused_pose_decode_to_tx_max_us{0};
+    std::uint32_t fused_pose_latency_samples{0};
 };
 
 struct CameraTriggerEventPayload {
@@ -167,6 +175,10 @@ struct TimeSyncResponsePayload {
 // CAN-side packing (CanBridge::writeFusedPoseFrame) compresses this into a
 // 64-byte FD frame; see firmware/teensy41/include/CanSchema.h.
 struct FusedPose3Payload {
+    // F-6 (v4): host steady_clock micros at the moment the host encoded this
+    // frame. The firmware compares it (via the host↔Teensy time-sync offset)
+    // against micros() at CAN-FD-TX to surface decode-to-TX latency.
+    std::uint64_t host_send_time_us{0};
     double x_m{0.0};
     double y_m{0.0};
     double z_m{0.0};

@@ -140,9 +140,13 @@ TEST(TeensyProtocol, TeensyHealthPayloadRoundTripsExtended) {
     payload.tof_overruns = 4;
     payload.tof_i2c_failures = 1;
     payload.tof_status_flags = 0xCAFE;
+    payload.fused_pose_decode_to_tx_min_us = 50;
+    payload.fused_pose_decode_to_tx_avg_us = 75;
+    payload.fused_pose_decode_to_tx_max_us = 120;
+    payload.fused_pose_latency_samples = 17;
 
     const auto bytes = posest::teensy::encodeTeensyHealthPayload(payload);
-    EXPECT_EQ(bytes.size(), 60u);
+    EXPECT_EQ(bytes.size(), 76u);
     const auto decoded = posest::teensy::decodeTeensyHealthPayload(bytes);
 
     ASSERT_TRUE(decoded.has_value());
@@ -155,6 +159,10 @@ TEST(TeensyProtocol, TeensyHealthPayloadRoundTripsExtended) {
     EXPECT_EQ(decoded->tof_overruns, 4u);
     EXPECT_EQ(decoded->tof_i2c_failures, 1u);
     EXPECT_EQ(decoded->tof_status_flags, 0xCAFEu);
+    EXPECT_EQ(decoded->fused_pose_decode_to_tx_min_us, 50u);
+    EXPECT_EQ(decoded->fused_pose_decode_to_tx_avg_us, 75u);
+    EXPECT_EQ(decoded->fused_pose_decode_to_tx_max_us, 120u);
+    EXPECT_EQ(decoded->fused_pose_latency_samples, 17u);
 }
 
 TEST(TeensyProtocol, RejectsBadPayloadSizes) {
@@ -333,20 +341,22 @@ std::uint32_t readU32LE(const std::vector<std::uint8_t>& bytes, std::size_t offs
 
 }  // namespace
 
-TEST(TeensyProtocol, FusedPosePayloadV3LayoutAndSize) {
-    // v3 layout:
-    //   0    8   x_m (double)
-    //   8    8   y_m (double)
-    //  16    8   z_m (double, 0.0 until Phase C widens FusedPoseEstimate)
-    //  24    8   roll_rad (double)
-    //  32    8   pitch_rad (double)
-    //  40    8   yaw_rad (double)
-    //  48    8   vx_mps (double)
-    //  56    8   vy_mps (double)
-    //  64    8   vz_mps (double)
-    //  72    4   has_velocity (uint32)
-    //  76    4   status_flags (uint32)
-    //  80  288   covariance (36 doubles, gtsam::Pose3 tangent row-major)
+TEST(TeensyProtocol, FusedPosePayloadV4LayoutAndSize) {
+    // v4 layout (376 B): host_send_time prefixes the v3 body and shifts
+    // every other offset by +8.
+    //   0    8   host_send_time_us (uint64)
+    //   8    8   x_m (double)
+    //  16    8   y_m (double)
+    //  24    8   z_m (double, 0.0 until Phase C widens FusedPoseEstimate)
+    //  32    8   roll_rad (double)
+    //  40    8   pitch_rad (double)
+    //  48    8   yaw_rad (double)
+    //  56    8   vx_mps (double)
+    //  64    8   vy_mps (double)
+    //  72    8   vz_mps (double)
+    //  80    4   has_velocity (uint32)
+    //  84    4   status_flags (uint32)
+    //  88  288   covariance (36 doubles, gtsam::Pose3 tangent row-major)
     posest::FusedPoseEstimate estimate;
     estimate.field_to_robot = {1.25, -2.75, 0.5};
     estimate.velocity = posest::Vec3{3.0, -1.0, 0.1};
@@ -355,40 +365,44 @@ TEST(TeensyProtocol, FusedPosePayloadV3LayoutAndSize) {
         estimate.covariance[i] = 0.001 * static_cast<double>(i + 1);
     }
 
-    const auto bytes = posest::teensy::TeensyService::encodeFusedPosePayload(estimate);
-    ASSERT_EQ(bytes.size(), 368u);
+    const auto bytes = posest::teensy::TeensyService::encodeFusedPosePayload(
+        estimate, /*host_send_time_us=*/0xDEADBEEFCAFEBABEull);
+    ASSERT_EQ(bytes.size(), 376u);
 
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 0), 1.25);
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 8), -2.75);
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 16), 0.0);   // z (Pose2d-derived)
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 24), 0.0);   // roll
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 32), 0.0);   // pitch
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 40), 0.5);   // yaw
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 48), 3.0);
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 56), -1.0);
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 64), 0.1);
-    EXPECT_EQ(readU32LE(bytes, 72), 1u);              // has_velocity
-    EXPECT_EQ(readU32LE(bytes, 76), 0xABCDu);         // status_flags
+    // host_send_time_us little-endian at offset 0.
+    EXPECT_EQ(bytes[0], 0xBEu);
+    EXPECT_EQ(bytes[7], 0xDEu);
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 8), 1.25);
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 16), -2.75);
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 24), 0.0);   // z (Pose2d-derived)
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 32), 0.0);   // roll
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 40), 0.0);   // pitch
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 48), 0.5);   // yaw
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 56), 3.0);
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 64), -1.0);
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 72), 0.1);
+    EXPECT_EQ(readU32LE(bytes, 80), 1u);              // has_velocity
+    EXPECT_EQ(readU32LE(bytes, 84), 0xABCDu);         // status_flags
     for (std::size_t i = 0; i < 36; ++i) {
-        EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 80 + i * 8),
+        EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 88 + i * 8),
                          0.001 * static_cast<double>(i + 1));
     }
 }
 
-TEST(TeensyProtocol, FusedPosePayloadV3OmitsVelocityWhenAbsent) {
+TEST(TeensyProtocol, FusedPosePayloadV4OmitsVelocityWhenAbsent) {
     posest::FusedPoseEstimate estimate;
     estimate.field_to_robot = {0.0, 0.0, 0.0};
     estimate.velocity.reset();  // explicit "no velocity"
     estimate.status_flags = 0;
 
     const auto bytes = posest::teensy::TeensyService::encodeFusedPosePayload(estimate);
-    ASSERT_EQ(bytes.size(), 368u);
-    EXPECT_EQ(readU32LE(bytes, 72), 0u);  // has_velocity = false
+    ASSERT_EQ(bytes.size(), 376u);
+    EXPECT_EQ(readU32LE(bytes, 80), 0u);  // has_velocity = false
     // Velocity fields are zero-padded when absent (firmware never reads them
     // in this case — the RIO ignores them based on has_velocity).
-    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 48), 0.0);
     EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 56), 0.0);
     EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 64), 0.0);
+    EXPECT_DOUBLE_EQ(readDoubleLE(bytes, 72), 0.0);
 }
 
 TEST(TeensyProtocol, ConfigAckEncodesVioEntry) {

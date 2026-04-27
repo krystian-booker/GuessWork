@@ -613,7 +613,10 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             "persisted_bias_gx, persisted_bias_gy, persisted_bias_gz, "
             "bias_calibration_seconds, bias_calibration_chassis_threshold, "
             "max_keyframe_dt_seconds, max_imu_gap_seconds, "
-            "marginalize_keyframe_window, slip_disagreement_mps "
+            "marginalize_keyframe_window, slip_disagreement_mps, "
+            "enable_floor_constraint, "
+            "floor_constraint_sigma_z, floor_constraint_sigma_roll, "
+            "floor_constraint_sigma_pitch, max_chassis_speed_mps "
             "FROM fusion_config WHERE id = 1");
         if (stmt.stepRow()) {
             for (int i = 0; i < 6; ++i) {
@@ -667,6 +670,13 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             config.fusion.marginalize_keyframe_window =
                 checkedUint32(stmt.columnInt64(50), "marginalize_keyframe_window");
             config.fusion.slip_disagreement_mps = stmt.columnDouble(51);
+            config.fusion.enable_floor_constraint = stmt.columnInt64(52) != 0;
+            config.fusion.floor_constraint_sigmas = {
+                stmt.columnDouble(53),
+                stmt.columnDouble(54),
+                stmt.columnDouble(55),
+            };
+            config.fusion.max_chassis_speed_mps = stmt.columnDouble(56);
         }
     }
 
@@ -1001,7 +1011,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     }
 
     {
-        // 52 columns total (excluding id). The VALUES placeholder block is
+        // 57 columns total (excluding id). The VALUES placeholder block is
         // grouped six-per-line below to keep the count visually verifiable.
         Statement insert(
             db_,
@@ -1025,7 +1035,10 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "persisted_bias_gx, persisted_bias_gy, persisted_bias_gz, "
             "bias_calibration_seconds, bias_calibration_chassis_threshold, "
             "max_keyframe_dt_seconds, max_imu_gap_seconds, "
-            "marginalize_keyframe_window, slip_disagreement_mps) "
+            "marginalize_keyframe_window, slip_disagreement_mps, "
+            "enable_floor_constraint, "
+            "floor_constraint_sigma_z, floor_constraint_sigma_roll, "
+            "floor_constraint_sigma_pitch, max_chassis_speed_mps) "
             "VALUES (1, "
             "?, ?, ?, ?, ?, ?, "  // chassis_sigmas
             "?, ?, ?, ?, ?, ?, "  // origin_prior_sigmas
@@ -1039,7 +1052,10 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "?, ?, ?, ?, ?, ?, "  // persisted_bias
             "?, ?, "              // bias_calibration_seconds + threshold
             "?, ?, "              // max_keyframe_dt + max_imu_gap
-            "?, ?)");             // marginalize_window + slip_disagreement
+            "?, ?, "              // marginalize_window + slip_disagreement
+            "?, "                 // enable_floor_constraint
+            "?, ?, ?, "           // floor_constraint_sigmas
+            "?)");                // max_chassis_speed_mps
         int idx = 1;
         for (int i = 0; i < 6; ++i) {
             insert.bindDouble(idx++,
@@ -1086,6 +1102,11 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindInt64(idx++,
             static_cast<sqlite3_int64>(config.fusion.marginalize_keyframe_window));
         insert.bindDouble(idx++, config.fusion.slip_disagreement_mps);
+        insert.bindInt(idx++, config.fusion.enable_floor_constraint ? 1 : 0);
+        for (std::size_t i = 0; i < 3; ++i) {
+            insert.bindDouble(idx++, config.fusion.floor_constraint_sigmas[i]);
+        }
+        insert.bindDouble(idx++, config.fusion.max_chassis_speed_mps);
         insert.stepDone();
     }
 

@@ -424,10 +424,38 @@ COMMIT;
 )sql";
 }
 
+const char* migration10Sql() {
+    // F-2 floor-constraint prior on every new pose key, plus F-3 max chassis
+    // speed gate. Both default-on so an unmigrated DB picks up the platform
+    // invariants immediately. Sigmas are [σ_z, σ_roll, σ_pitch] in meters /
+    // radians; max_chassis_speed_mps is 5.2 m/s × 1.25 margin.
+    return R"sql(
+BEGIN;
+
+ALTER TABLE fusion_config
+    ADD COLUMN enable_floor_constraint INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE fusion_config
+    ADD COLUMN floor_constraint_sigma_z REAL NOT NULL DEFAULT 0.01;
+
+ALTER TABLE fusion_config
+    ADD COLUMN floor_constraint_sigma_roll REAL NOT NULL DEFAULT 0.0087;
+
+ALTER TABLE fusion_config
+    ADD COLUMN floor_constraint_sigma_pitch REAL NOT NULL DEFAULT 0.0087;
+
+ALTER TABLE fusion_config
+    ADD COLUMN max_chassis_speed_mps REAL NOT NULL DEFAULT 6.5;
+
+PRAGMA user_version = 10;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 9;
+    return 10;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -474,6 +502,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 8) {
         exec(db, migration9Sql());
+        migrated_version = 9;
+    }
+    if (migrated_version == 9) {
+        exec(db, migration10Sql());
     }
 }
 

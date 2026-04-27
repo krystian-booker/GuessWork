@@ -527,6 +527,15 @@ std::string healthToJson(const DaemonHealth& health) {
              {"time_sync_skew_ppm", health.teensy.time_sync_skew_ppm},
              {"rio_time_sync_established", health.teensy.rio_time_sync_established},
              {"rio_to_teensy_offset_us", health.teensy.rio_to_teensy_offset_us},
+             // F-6 firmware-side fused-pose latency window.
+             {"fused_pose_decode_to_tx_min_us",
+              health.teensy.fused_pose_decode_to_tx_min_us},
+             {"fused_pose_decode_to_tx_avg_us",
+              health.teensy.fused_pose_decode_to_tx_avg_us},
+             {"fused_pose_decode_to_tx_max_us",
+              health.teensy.fused_pose_decode_to_tx_max_us},
+             {"fused_pose_latency_samples",
+              health.teensy.fused_pose_latency_samples},
          }},
         {"last_error", health.last_error},
         {"shutdown_signal", health.shutdown_signal},
@@ -557,6 +566,24 @@ std::string healthToJson(const DaemonHealth& health) {
         {"last_update_wall_clock_us", health.fusion.last_update_wall_clock_us},
         {"graph_update_us", histogramJson(health.fusion.graph_update_us)},
         {"publish_us", histogramJson(health.fusion.publish_us)},
+        // Phase C counters — surfaced unconditionally; non-zero only when
+        // enable_imu_preintegration is on and the state machine has reached
+        // kRunning (or kCalibratingBias for bias_calibrations_completed).
+        {"keyframes_committed", health.fusion.keyframes_committed},
+        {"imu_factors_committed", health.fusion.imu_factors_committed},
+        {"imu_out_of_order", health.fusion.imu_out_of_order},
+        {"imu_resets", health.fusion.imu_resets},
+        {"bias_calibrations_completed", health.fusion.bias_calibrations_completed},
+        // F-3 / F-1 counters.
+        {"chassis_speed_gated", health.fusion.chassis_speed_gated},
+        {"config_reloads_applied", health.fusion.config_reloads_applied},
+        {"config_reloads_structural_skipped",
+         health.fusion.config_reloads_structural_skipped},
+        // F-4 counters. Only ever non-zero when Phase C is on and the state
+        // machine has reached kRunning; safe to emit unconditionally.
+        {"slip_disagreement_events", health.fusion.slip_disagreement_events},
+        {"slip_disagreement_inflations",
+         health.fusion.slip_disagreement_inflations},
     };
 
     return out.dump();
@@ -852,7 +879,17 @@ void DaemonController::loadAndBuild() {
             teensy::makePosixSerialTransport, trigger_cache_,
             config_.vio, tof_cache_);
         fusion_->addOutputSink(teensy_);
-        web_ = std::make_unique<WebService>(*config_store_);
+        // F-1: hand new fusion config to the running service whenever the web
+        // layer saves a RuntimeConfig. The callback runs on the web thread but
+        // only stages a pending swap under FusionService::mu_ — the worker
+        // applies it at the top of its next process() iteration.
+        web_ = std::make_unique<WebService>(
+            *config_store_,
+            [fusion = fusion_.get()](const RuntimeConfig& cfg) {
+                if (fusion) {
+                    fusion->applyConfig(fusion::buildFusionConfig(cfg));
+                }
+            });
         graph_ = std::make_unique<RuntimeGraph>(
             config_, camera_factory_, pipeline_factory_, *measurement_bus_);
         graph_->build();
@@ -929,6 +966,19 @@ void DaemonController::stop(int shutdown_signal) {
         teensy_->stop();
     }
     if (fusion_) {
+        // F-7: persist a freshly-calibrated IMU bias back to SQLite before
+        // stopping the worker. Returns nullopt if the boot stationary window
+        // never produced a fresh mean (so we don't clobber a previously-good
+        // seed with identity). Save failures must not block shutdown — the
+        // next boot recalibrates anyway.
+        if (auto bias = fusion_->currentBiasIfTrusted(); bias && config_store_) {
+            try {
+                config_.fusion.persisted_bias = *bias;
+                config_store_->saveRuntimeConfig(config_);
+            } catch (const std::exception&) {
+                // Swallow: shutdown must always make forward progress.
+            }
+        }
         fusion_->stop();
     }
     started_ = false;

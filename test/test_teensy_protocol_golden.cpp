@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "posest/teensy/Protocol.h"
+#include "posest/teensy/TeensyService.h"
 
 // Lock in the on-the-wire *size* of every payload that crosses USB. This is a
 // drift detector: the firmware's Protocol.h is a hand-mirrored copy of this
@@ -24,7 +25,7 @@ void expectEncodedSize(const Payload& payload, Encoder&& encoder) {
 
 TEST(TeensyProtocolGolden, FrameHeaderConstants) {
     EXPECT_EQ(posest::teensy::kFrameMagic, 0x4757u);
-    EXPECT_EQ(posest::teensy::kProtocolVersion, 3u);
+    EXPECT_EQ(posest::teensy::kProtocolVersion, 4u);
 }
 
 TEST(TeensyProtocolGolden, MessageTypeNumericValues) {
@@ -67,7 +68,7 @@ TEST(TeensyProtocolGolden, PayloadEncodedSizes) {
                           posest::teensy::encodeImuPayload);
     expectEncodedSize<44>(posest::teensy::ChassisSpeedsPayload{},
                           posest::teensy::encodeChassisSpeedsPayload);
-    expectEncodedSize<60>(posest::teensy::TeensyHealthPayload{},
+    expectEncodedSize<76>(posest::teensy::TeensyHealthPayload{},
                           posest::teensy::encodeTeensyHealthPayload);
     expectEncodedSize<20>(posest::teensy::CameraTriggerEventPayload{},
                           posest::teensy::encodeCameraTriggerEventPayload);
@@ -81,6 +82,12 @@ TEST(TeensyProtocolGolden, PayloadEncodedSizes) {
                           posest::teensy::encodeToFSamplePayload);
     expectEncodedSize<36>(posest::teensy::VioCompanionConfigPayload{},
                           posest::teensy::encodeVioCompanionConfigPayload);
+    // v4: lock the FusedPose USB payload size at 376 B (8 B host_send_time +
+    // 9 doubles + has_velocity + status + 36 covariance doubles).
+    posest::FusedPoseEstimate dummy_estimate;
+    EXPECT_EQ(posest::teensy::TeensyService::encodeFusedPosePayload(
+                  dummy_estimate, /*host_send_time_us=*/0u).size(),
+              376u);
 }
 
 TEST(TeensyProtocolGolden, ImuPayloadEncodedBytesAreStable) {

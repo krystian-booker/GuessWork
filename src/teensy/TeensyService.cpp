@@ -39,6 +39,13 @@ void appendI64(std::vector<std::uint8_t>& out, std::int64_t value) {
     }
 }
 
+void appendU64(std::vector<std::uint8_t>& out, std::uint64_t value) {
+    for (int shift = 0; shift <= 56; shift += 8) {
+        out.push_back(static_cast<std::uint8_t>(
+            (value >> static_cast<unsigned>(shift)) & 0xFFu));
+    }
+}
+
 }  // namespace
 
 TeensyService::TeensyService(
@@ -98,10 +105,14 @@ void TeensyService::stop() {
 }
 
 void TeensyService::publish(FusedPoseEstimate estimate) {
+    // F-6: stamp the encode moment in steady_clock micros so the firmware can
+    // diff host_send_time_us against its time-synced view at CAN-TX.
+    const std::uint64_t host_send_time_us = steadyMicros(
+        std::chrono::steady_clock::now());
     Frame frame;
     frame.type = MessageType::FusedPose;
     frame.sequence = next_sequence_++;
-    frame.payload = encodeFusedPosePayload(estimate);
+    frame.payload = encodeFusedPosePayload(estimate, host_send_time_us);
     enqueueFrame(std::move(frame));
 }
 
@@ -472,6 +483,14 @@ void TeensyService::handleFrame(const Frame& frame) {
             stats_.rio_to_teensy_offset_us = decoded->rio_offset_us;
             stats_.rio_time_sync_established =
                 (decoded->rio_status_flags & kHealthRioUnsynchronized) == 0u;
+            stats_.fused_pose_decode_to_tx_min_us =
+                decoded->fused_pose_decode_to_tx_min_us;
+            stats_.fused_pose_decode_to_tx_avg_us =
+                decoded->fused_pose_decode_to_tx_avg_us;
+            stats_.fused_pose_decode_to_tx_max_us =
+                decoded->fused_pose_decode_to_tx_max_us;
+            stats_.fused_pose_latency_samples =
+                decoded->fused_pose_latency_samples;
             break;
         }
         default:
@@ -667,15 +686,22 @@ std::uint64_t TeensyService::steadyMicros(Timestamp timestamp) {
 
 std::vector<std::uint8_t> TeensyService::encodeFusedPosePayload(
     const FusedPoseEstimate& estimate) {
-    // v3 wire layout. The fields below must stay 1:1 with
-    // firmware/teensy41/src/Protocol.cpp::decodeFusedPosePayload (368 bytes).
-    // FusedPoseEstimate carries a Pose2d today; Phase C will widen the graph
-    // to track full Pose3 + Vector3 velocity, at which point this encoder
-    // pulls those directly from the estimate. For the in-between window
-    // (Phase D shipped, Phase C in flight) we project the Pose2d into 3-DOF
-    // pose with zero z/roll/pitch and zero velocity.
+    return encodeFusedPosePayload(estimate, /*host_send_time_us=*/0u);
+}
+
+std::vector<std::uint8_t> TeensyService::encodeFusedPosePayload(
+    const FusedPoseEstimate& estimate,
+    std::uint64_t host_send_time_us) {
+    // v4 wire layout. The fields below must stay 1:1 with
+    // firmware/teensy41/src/Protocol.cpp::decodeFusedPosePayload (376 bytes):
+    // host_send_time_us (8) + Pose3 (48) + velocity (24) + has_velocity (4) +
+    // status (4) + covariance (288) = 376. The leading host_send_time_us is
+    // F-6's end-to-end latency probe — the firmware compares it against
+    // micros() at CAN-FD-TX (with the host↔Teensy time-sync offset applied)
+    // to surface decode-to-TX latency in TeensyHealthPayload.
     std::vector<std::uint8_t> payload;
-    payload.reserve(368);
+    payload.reserve(376);
+    appendU64(payload, host_send_time_us);
     // Pose3
     appendDouble(payload, estimate.field_to_robot.x_m);
     appendDouble(payload, estimate.field_to_robot.y_m);
@@ -683,7 +709,7 @@ std::vector<std::uint8_t> TeensyService::encodeFusedPosePayload(
     appendDouble(payload, 0.0);  // roll
     appendDouble(payload, 0.0);  // pitch
     appendDouble(payload, estimate.field_to_robot.theta_rad);  // yaw
-    // Velocity (NaN-coded: has_velocity=0 means RIO ignores)
+    // Velocity (has_velocity=0 means RIO ignores the bytes)
     const bool has_velocity = estimate.velocity.has_value();
     appendDouble(payload, has_velocity ? estimate.velocity->x : 0.0);
     appendDouble(payload, has_velocity ? estimate.velocity->y : 0.0);

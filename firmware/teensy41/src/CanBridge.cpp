@@ -170,10 +170,32 @@ void CanBridge::checkRioStaleness(std::uint64_t now_us) {
     }
 }
 
-void CanBridge::setLatestFusedPose(const FusedPosePayload& pose) {
+void CanBridge::setLatestFusedPose(const FusedPosePayload& pose,
+                                   std::uint64_t decode_time_us) {
     latest_pose_ = pose;
     has_latest_pose_ = true;
+    latest_pose_decode_time_us_ = decode_time_us;
     ++received_fused_poses_;
+}
+
+CanBridge::FusedPoseLatencyWindow CanBridge::fusedPoseLatencyWindow() const {
+    FusedPoseLatencyWindow out;
+    out.samples = latency_samples_;
+    if (latency_samples_ == 0u) {
+        return out;
+    }
+    out.min_us = latency_min_us_;
+    out.max_us = latency_max_us_;
+    out.avg_us = static_cast<std::uint32_t>(
+        latency_sum_us_ / static_cast<std::uint64_t>(latency_samples_));
+    return out;
+}
+
+void CanBridge::resetFusedPoseLatencyWindow() {
+    latency_min_us_ = 0;
+    latency_max_us_ = 0;
+    latency_sum_us_ = 0;
+    latency_samples_ = 0;
 }
 
 void CanBridge::handleRxFrame(
@@ -323,6 +345,28 @@ void CanBridge::maybeSendFusedPose(std::uint64_t now_us) {
 bool CanBridge::transmitTeensyPose(
     const FusedPosePayload& pose,
     std::uint64_t now_us) {
+    // F-6: record decode-to-CAN-TX latency (firmware-only window). The
+    // measurement is only meaningful if a decode_time_us has been set by
+    // the most recent setLatestFusedPose; first-pose-after-boot has it.
+    auto record_latency = [&]() {
+        if (latest_pose_decode_time_us_ == 0u ||
+            now_us < latest_pose_decode_time_us_) {
+            return;
+        }
+        const std::uint64_t delta = now_us - latest_pose_decode_time_us_;
+        const std::uint32_t delta32 =
+            (delta > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<std::uint32_t>(delta);
+        if (latency_samples_ == 0u) {
+            latency_min_us_ = delta32;
+            latency_max_us_ = delta32;
+        } else {
+            if (delta32 < latency_min_us_) latency_min_us_ = delta32;
+            if (delta32 > latency_max_us_) latency_max_us_ = delta32;
+        }
+        latency_sum_us_ += delta32;
+        ++latency_samples_;
+    };
+
 #if POSEST_HAS_FLEXCAN_T4
     CANFD_message_t msg{};
     msg.id = config_.teensy_pose_can_id;
@@ -335,10 +379,12 @@ bool CanBridge::transmitTeensyPose(
         return false;
     }
     ++tx_frames_;
+    record_latency();
     return true;
 #else
     (void)pose;
     (void)now_us;
+    (void)record_latency;
     return false;
 #endif
 }

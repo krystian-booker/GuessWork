@@ -205,6 +205,19 @@ struct FusionConfig {
     std::uint32_t marginalize_keyframe_window{500};
     // Threshold for the chassis-vs-IMU velocity disagreement slip detector.
     double slip_disagreement_mps{1.0};
+
+    // F-2: soft floor-constraint prior pinning z / roll / pitch toward zero
+    // on every new pose key. Encodes the "robot is always grounded" platform
+    // assumption directly in the graph so vision priors and (Phase C) IMU
+    // factors cannot drift the unobserved-by-chassis DOFs. Order is
+    // [σ_z (m), σ_roll (rad), σ_pitch (rad)].
+    bool enable_floor_constraint{true};
+    std::array<double, 3> floor_constraint_sigmas{0.01, 0.0087, 0.0087};
+
+    // F-3: hard upper bound on chassis speed before the sample is dropped
+    // and kFusionStatusDegradedInput is OR'd into the next estimate. Default
+    // is the platform's 5.2 m/s spec with a 25 % margin.
+    double max_chassis_speed_mps{6.5};
 };
 
 struct RuntimeConfig {

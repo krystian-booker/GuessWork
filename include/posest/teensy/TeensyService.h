@@ -63,6 +63,13 @@ struct TeensyStats {
     // Composing this with TimeSyncFilter::apply yields rio_time_us -> host
     // steady_clock for ChassisSpeeds samples.
     std::int64_t rio_to_teensy_offset_us{0};
+    // F-6: firmware-measured fused-pose latency window (USB-decode → CAN-TX),
+    // refreshed every TeensyHealth emit. samples == 0 ↔ no FusedPose has
+    // crossed the firmware in the most recent window.
+    std::uint32_t fused_pose_decode_to_tx_min_us{0};
+    std::uint32_t fused_pose_decode_to_tx_avg_us{0};
+    std::uint32_t fused_pose_decode_to_tx_max_us{0};
+    std::uint32_t fused_pose_latency_samples{0};
     std::optional<ConfigAckPayload> last_trigger_ack;
     std::optional<ConfigAckPayload> last_imu_ack;
     std::optional<ConfigAckPayload> last_vio_ack;
@@ -93,9 +100,16 @@ public:
     std::optional<Frame> takeLastOutboundFrame() const;
     TeensyStats stats() const;
 
-    // v3 FusedPose USB payload encoder. Public for golden-layout testing; the
-    // service is the only production caller and uses it from publish().
+    // v4 FusedPose USB payload encoder. Public for golden-layout testing; the
+    // service is the only production caller and uses the timestamped overload
+    // from publish() so the firmware can measure end-to-end latency. The
+    // single-argument overload defers to the timestamped form with
+    // host_send_time_us=0 — useful when a deterministic byte layout is wanted
+    // (e.g. round-trip tests).
     static std::vector<std::uint8_t> encodeFusedPosePayload(const FusedPoseEstimate& estimate);
+    static std::vector<std::uint8_t> encodeFusedPosePayload(
+        const FusedPoseEstimate& estimate,
+        std::uint64_t host_send_time_us);
 
 private:
     void workerLoop();

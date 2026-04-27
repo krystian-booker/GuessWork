@@ -80,6 +80,27 @@ gtsam::Key poseKey(std::uint64_t index) {
     return gtsam::Symbol('x', index).key();
 }
 
+// F-2: builds the floor-constraint PriorFactor. The prior anchors the pose
+// at Pose3::identity() with very loose sigmas on x/y/yaw and the configured
+// tight sigmas on z/roll/pitch — softly pinning the unobserved-by-chassis
+// DOFs without constraining planar motion. Tangent order is
+// [rx, ry, rz, tx, ty, tz]; the loose components use 1e6 (≈ unconstrained)
+// rather than infinity because GTSAM rejects infinities in Diagonal::Sigmas.
+gtsam::PriorFactor<gtsam::Pose3> floorConstraintFactor(
+    gtsam::Key key,
+    const std::array<double, 3>& sigmas) {
+    constexpr double kLoose = 1e6;
+    gtsam::Vector loose(6);
+    loose(0) = sigmas[1];  // roll
+    loose(1) = sigmas[2];  // pitch
+    loose(2) = kLoose;     // yaw — unconstrained
+    loose(3) = kLoose;     // x   — unconstrained
+    loose(4) = kLoose;     // y   — unconstrained
+    loose(5) = sigmas[0];  // z
+    return gtsam::PriorFactor<gtsam::Pose3>(
+        key, gtsam::Pose3{}, gtsam::noiseModel::Diagonal::Sigmas(loose));
+}
+
 // Velocity variable key, used only when IMU preintegration is enabled.
 // 'v' deliberately distinct from 'x' so the existing pose-only graph never
 // collides with a velocity key after the feature flag flips on mid-build.
@@ -131,6 +152,11 @@ struct PendingKeyframe {
 };
 
 struct FusionBackend {
+    // F-4: how many consecutive over-threshold keyframes trigger an
+    // inflation. Two cancels single-sample false positives without adding
+    // a configurable until we have on-robot data to tune against.
+    static constexpr int kSlipDisagreementHysteresis = 2;
+
     explicit FusionBackend(FusionConfig config)
         : config_(std::move(config)),
           chassis_noise_(diagonalNoise(config_.chassis_sigmas)),
@@ -223,6 +249,7 @@ struct FusionBackend {
                 calibrator_.gyro_sum.z / n);
             current_bias_ = gtsam::imuBias::ConstantBias(accel_bias, gyro_bias);
             bias_unverified_ = false;
+            bias_calibrated_ = true;
         } else {
             bias_unverified_ = true;
         }
@@ -368,23 +395,83 @@ struct FusionBackend {
             current_pose_.compose(pending_.chassis_twist_accum);
         initial_values.insert(next_pose, next_pose_init);
 
-        // Chassis BetweenFactor (Huber-wrapped). Rebuild noise on every step
-        // so a non-trivial dt accumulation widens process noise proportionally.
-        if (pending_.chassis_dt_accum > 0.0) {
-            graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                current_key_, next_pose,
-                pending_.chassis_twist_accum, chassis_robust_noise_));
-        }
-
-        // IMU factor + initial velocity guess. Use a forward-Euler velocity
-        // estimate from the chassis twist as the initial guess; ImuFactor
-        // refines it.
+        // IMU prediction must run before the chassis BetweenFactor is built
+        // because F-4's slip-disagreement check compares the chassis-mean
+        // body velocity against the IMU-predicted body velocity, and a
+        // disagreement may inflate the chassis noise for this commit.
         gtsam::Vector3 next_velocity_init = current_velocity_;
+        bool have_imu_prediction = false;
+        gtsam::Vector3 imu_predicted_velocity_nav = gtsam::Vector3::Zero();
         if (pending_.has_imu && active_pim_) {
             const gtsam::NavState predicted = active_pim_->predict(
                 gtsam::NavState(current_pose_, current_velocity_),
                 current_bias_);
             next_velocity_init = predicted.velocity();
+            imu_predicted_velocity_nav = predicted.velocity();
+            have_imu_prediction = true;
+        }
+
+        // F-4: chassis-vs-IMU velocity disagreement detector. Only meaningful
+        // in Phase C (state_ == kRunning is already checked above) when the
+        // pending keyframe carries both an integrated chassis window of
+        // sufficient length AND a fresh IMU prediction. RIO-flagged slip
+        // takes precedence (already inflates via pending_slip_reported_),
+        // so skip when that bit is set to avoid double-counting.
+        bool slip_detected_inflate = false;
+        const double min_dt_for_check =
+            0.5 * config_.max_keyframe_dt_seconds;
+        const bool rio_already_inflated =
+            (status_flags & kFusionStatusSlipReported) != 0u;
+        if (have_imu_prediction &&
+            pending_.chassis_dt_accum >= min_dt_for_check &&
+            !rio_already_inflated) {
+            const gtsam::Point3 chassis_translation =
+                pending_.chassis_twist_accum.translation();
+            const gtsam::Vector3 chassis_velocity_body(
+                chassis_translation.x() / pending_.chassis_dt_accum,
+                chassis_translation.y() / pending_.chassis_dt_accum,
+                chassis_translation.z() / pending_.chassis_dt_accum);
+            const gtsam::Vector3 imu_velocity_body =
+                current_pose_.rotation().unrotate(imu_predicted_velocity_nav);
+            const double disagreement =
+                (chassis_velocity_body - imu_velocity_body).norm();
+            if (disagreement > config_.slip_disagreement_mps) {
+                ++slip_disagreement_events_;
+                ++slip_disagreement_streak_;
+                if (slip_disagreement_streak_ >= kSlipDisagreementHysteresis) {
+                    slip_detected_inflate = true;
+                    slip_disagreement_streak_ = 0;
+                }
+            } else {
+                slip_disagreement_streak_ = 0;
+            }
+        }
+
+        // Chassis BetweenFactor (Huber-wrapped). Rebuild noise on every step
+        // so a non-trivial dt accumulation widens process noise proportionally.
+        // F-4 inflation reuses the same shock_inflation_factor multiplier so
+        // both slip paths feel the same to downstream consumers.
+        gtsam::SharedNoiseModel step_noise = chassis_robust_noise_;
+        if (slip_detected_inflate) {
+            std::array<double, 6> sigmas = config_.chassis_sigmas;
+            for (auto& sigma : sigmas) {
+                sigma *= config_.shock_inflation_factor;
+            }
+            step_noise = robustHuberNoise(diagonalNoise(sigmas), config_.huber_k);
+            status_flags |= kFusionStatusSlipDetected | kFusionStatusDegradedInput;
+            ++slip_disagreement_inflations_;
+        }
+        if (pending_.chassis_dt_accum > 0.0) {
+            graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                current_key_, next_pose,
+                pending_.chassis_twist_accum, step_noise));
+        }
+        if (config_.enable_floor_constraint) {
+            graph.add(floorConstraintFactor(next_pose, config_.floor_constraint_sigmas));
+        }
+
+        // IMU factor — bound to the velocity keys from the prediction above.
+        if (have_imu_prediction) {
             graph.add(gtsam::ImuFactor(
                 current_key_, velocityKey(current_index_),
                 next_pose, next_vel,
@@ -465,6 +552,24 @@ struct FusionBackend {
     void incImuOutOfOrder() { ++imu_out_of_order_; }
     void incBiasCalibrationsCompleted() { ++bias_calibrations_completed_; }
     bool biasUnverified() const { return bias_unverified_; }
+    // F-4 counters surfaced through FusionService::stats().
+    std::uint64_t slipDisagreementEvents() const { return slip_disagreement_events_; }
+    std::uint64_t slipDisagreementInflations() const {
+        return slip_disagreement_inflations_;
+    }
+
+    // F-7: bias snapshot for shutdown persistence. Returns nullopt until the
+    // boot stationary calibration window has produced a fresh mean — the
+    // persisted seed itself is *not* re-emitted, so a daemon shutdown without
+    // ever seeing a quiet window will not overwrite a previously-good bias.
+    std::optional<std::array<double, 6>> currentBiasIfTrusted() const {
+        if (!bias_calibrated_) {
+            return std::nullopt;
+        }
+        const auto a = current_bias_.accelerometer();
+        const auto g = current_bias_.gyroscope();
+        return std::array<double, 6>{a(0), a(1), a(2), g(0), g(1), g(2)};
+    }
 
     // Extra status bits to OR into makeEstimate output when the IMU/init
     // state machine wants the consumer to see them.
@@ -513,6 +618,10 @@ struct FusionBackend {
             const gtsam::Key origin_key = poseKey(0);
             graph.add(gtsam::PriorFactor<gtsam::Pose3>(
                 origin_key, origin, origin_prior_noise_));
+            if (config_.enable_floor_constraint) {
+                graph.add(floorConstraintFactor(
+                    origin_key, config_.floor_constraint_sigmas));
+            }
             initial_values.insert(origin_key, origin);
             if (!update(graph, initial_values, origin_key, 0)) {
                 return std::nullopt;
@@ -560,6 +669,9 @@ struct FusionBackend {
         gtsam::Values initial_values;
         graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
             current_key_, next_key, delta, step_noise));
+        if (config_.enable_floor_constraint) {
+            graph.add(floorConstraintFactor(next_key, config_.floor_constraint_sigmas));
+        }
         initial_values.insert(next_key, current_pose_.compose(delta));
 
         if (!update(graph, initial_values, next_key, next_index)) {
@@ -624,6 +736,9 @@ struct FusionBackend {
         gtsam::Values initial_values;
         graph.add(gtsam::BetweenFactor<gtsam::Pose3>(
             current_key_, next_key, delta, noise));
+        if (config_.enable_floor_constraint) {
+            graph.add(floorConstraintFactor(next_key, config_.floor_constraint_sigmas));
+        }
         initial_values.insert(next_key, current_pose_.compose(delta));
 
         if (!update(graph, initial_values, next_key, next_index)) {
@@ -638,6 +753,82 @@ struct FusionBackend {
     // mutex (the same worker thread that calls update() is the only writer).
     std::size_t factorCount() const { return isam_.getFactorsUnsafe().size(); }
     std::size_t variableCount() const { return estimate_.size(); }
+
+    // F-1: live config reload entry point on the backend. Returns true if
+    // any structural field differed from the running config (signalling the
+    // caller that the requested change required a restart and was ignored).
+    // Live-reloadable fields are swapped in place; cached noise models that
+    // depend on swapped sigmas are rebuilt before this returns.
+    bool applyConfig(FusionConfig new_cfg) {
+        const FusionConfig& old_cfg = config_;
+        const bool structural_change =
+            old_cfg.enable_imu_preintegration != new_cfg.enable_imu_preintegration ||
+            old_cfg.enable_vio != new_cfg.enable_vio ||
+            old_cfg.enable_floor_constraint != new_cfg.enable_floor_constraint ||
+            old_cfg.accel_noise_sigma != new_cfg.accel_noise_sigma ||
+            old_cfg.gyro_noise_sigma != new_cfg.gyro_noise_sigma ||
+            old_cfg.accel_bias_rw_sigma != new_cfg.accel_bias_rw_sigma ||
+            old_cfg.gyro_bias_rw_sigma != new_cfg.gyro_bias_rw_sigma ||
+            old_cfg.integration_cov_sigma != new_cfg.integration_cov_sigma ||
+            old_cfg.bias_calibration_seconds != new_cfg.bias_calibration_seconds ||
+            old_cfg.bias_calibration_chassis_threshold !=
+                new_cfg.bias_calibration_chassis_threshold ||
+            old_cfg.persisted_bias != new_cfg.persisted_bias ||
+            old_cfg.imu_extrinsic_body_to_imu.translation_m.x !=
+                new_cfg.imu_extrinsic_body_to_imu.translation_m.x ||
+            old_cfg.imu_extrinsic_body_to_imu.translation_m.y !=
+                new_cfg.imu_extrinsic_body_to_imu.translation_m.y ||
+            old_cfg.imu_extrinsic_body_to_imu.translation_m.z !=
+                new_cfg.imu_extrinsic_body_to_imu.translation_m.z ||
+            old_cfg.imu_extrinsic_body_to_imu.rotation_rpy_rad.x !=
+                new_cfg.imu_extrinsic_body_to_imu.rotation_rpy_rad.x ||
+            old_cfg.imu_extrinsic_body_to_imu.rotation_rpy_rad.y !=
+                new_cfg.imu_extrinsic_body_to_imu.rotation_rpy_rad.y ||
+            old_cfg.imu_extrinsic_body_to_imu.rotation_rpy_rad.z !=
+                new_cfg.imu_extrinsic_body_to_imu.rotation_rpy_rad.z;
+
+        // Preserve structural fields by copying their old values onto the
+        // incoming config before swap, so we never silently apply them.
+        if (structural_change) {
+            new_cfg.enable_imu_preintegration = old_cfg.enable_imu_preintegration;
+            new_cfg.enable_vio = old_cfg.enable_vio;
+            new_cfg.enable_floor_constraint = old_cfg.enable_floor_constraint;
+            new_cfg.accel_noise_sigma = old_cfg.accel_noise_sigma;
+            new_cfg.gyro_noise_sigma = old_cfg.gyro_noise_sigma;
+            new_cfg.accel_bias_rw_sigma = old_cfg.accel_bias_rw_sigma;
+            new_cfg.gyro_bias_rw_sigma = old_cfg.gyro_bias_rw_sigma;
+            new_cfg.integration_cov_sigma = old_cfg.integration_cov_sigma;
+            new_cfg.bias_calibration_seconds = old_cfg.bias_calibration_seconds;
+            new_cfg.bias_calibration_chassis_threshold =
+                old_cfg.bias_calibration_chassis_threshold;
+            new_cfg.persisted_bias = old_cfg.persisted_bias;
+            new_cfg.imu_extrinsic_body_to_imu = old_cfg.imu_extrinsic_body_to_imu;
+        }
+        config_ = std::move(new_cfg);
+        // Rebuild cached noise models. Floor noise is built per-call-site,
+        // so nothing to rebuild for it; VIO default noise is built ad-hoc.
+        chassis_noise_ = diagonalNoise(config_.chassis_sigmas);
+        chassis_robust_noise_ = robustHuberNoise(chassis_noise_, config_.huber_k);
+        origin_prior_noise_ = diagonalNoise(config_.origin_prior_sigmas);
+        return structural_change;
+    }
+
+    // F-3: configured planar-speed gate. The chassis dispatch in
+    // FusionService::process consults this before integrating; an
+    // out-of-bounds sample is dropped and surfaced as kFusionStatusDegradedInput.
+    bool chassisSpeedExceedsLimit(const ChassisSpeedsSample& sample) const {
+        const double speed_sq =
+            sample.vx_mps * sample.vx_mps + sample.vy_mps * sample.vy_mps;
+        const double limit = config_.max_chassis_speed_mps;
+        return speed_sq > limit * limit;
+    }
+    // For F-3 emission of a "degraded but no graph change" estimate after
+    // dropping a sample. Returns nullopt before bootstrap (matches the rest
+    // of the estimateFromCurrent contract).
+    std::optional<FusedPoseEstimate> emitDegraded(
+        Timestamp timestamp, std::uint32_t status_flags) {
+        return estimateFromCurrent(timestamp, status_flags);
+    }
 
     std::optional<FusedPoseEstimate> addAprilTags(
         const AprilTagObservation& observation,
@@ -673,6 +864,9 @@ struct FusionBackend {
             key = poseKey(0);
             index = 0;
             initial_values.insert(key, field_to_robot);
+            if (config_.enable_floor_constraint) {
+                graph.add(floorConstraintFactor(key, config_.floor_constraint_sigmas));
+            }
         }
         graph.add(gtsam::PriorFactor<gtsam::Pose3>(key, field_to_robot, vision_noise));
 
@@ -858,6 +1052,11 @@ private:
     PendingKeyframe pending_;
     std::deque<gtsam::Key> live_keys_;
     bool bias_unverified_{false};
+    // True once a boot stationary calibration window has produced a fresh
+    // bias. Stays false if the seed was never overwritten — the shutdown
+    // bias-persistence path uses this to avoid clobbering a previously-good
+    // persisted seed with the in-memory placeholder.
+    bool bias_calibrated_{false};
     bool chassis_gap_seen_{false};
     bool pending_slip_reported_{false};
     std::uint64_t keyframes_committed_{0};
@@ -865,6 +1064,12 @@ private:
     std::uint64_t imu_out_of_order_{0};
     std::uint64_t imu_resets_{0};
     std::uint64_t bias_calibrations_completed_{0};
+    // F-4 hysteresis state: counts consecutive keyframes that crossed the
+    // slip_disagreement_mps threshold. Reset on the first keyframe that
+    // agrees, or when state_ leaves kRunning. Inflation fires at >= 2.
+    int slip_disagreement_streak_{0};
+    std::uint64_t slip_disagreement_events_{0};
+    std::uint64_t slip_disagreement_inflations_{0};
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config) {
@@ -895,6 +1100,9 @@ FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config) {
     out.max_imu_gap_seconds = src.max_imu_gap_seconds;
     out.marginalize_keyframe_window = src.marginalize_keyframe_window;
     out.slip_disagreement_mps = src.slip_disagreement_mps;
+    out.enable_floor_constraint = src.enable_floor_constraint;
+    out.floor_constraint_sigmas = src.floor_constraint_sigmas;
+    out.max_chassis_speed_mps = src.max_chassis_speed_mps;
     return out;
 }
 
@@ -946,6 +1154,22 @@ std::optional<FusedPoseEstimate> FusionService::latestEstimate() const {
     return latest_estimate_;
 }
 
+void FusionService::applyConfig(FusionConfig new_config) {
+    std::lock_guard<std::mutex> g(mu_);
+    pending_config_ = std::move(new_config);
+}
+
+std::optional<std::array<double, 6>> FusionService::currentBiasIfTrusted() const {
+    // Backend writes to bias state from the worker only; reading from another
+    // thread without serialization is technically a race on `bias_calibrated_`
+    // and the gtsam::imuBias members. The shutdown path that uses this is
+    // called *after* stop() joins the worker, so in practice the read is
+    // safely sequenced — but other callers (e.g. tests, future telemetry)
+    // benefit from the explicit lock.
+    std::lock_guard<std::mutex> g(mu_);
+    return backend_->currentBiasIfTrusted();
+}
+
 void FusionService::runLoop() {
     while (running_.load(std::memory_order_acquire)) {
         auto measurement = measurement_bus_.take();
@@ -957,6 +1181,29 @@ void FusionService::runLoop() {
 }
 
 void FusionService::process(const Measurement& measurement) {
+    // F-1: live config reload swap point. If the web thread has staged a new
+    // config since the last iteration, hand it to the backend before doing
+    // anything else this tick. Done before bus_pop_time is captured so the
+    // tiny lock cost doesn't pollute the graph_update_us histogram.
+    {
+        std::optional<FusionConfig> swap;
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            if (pending_config_) {
+                swap = std::move(pending_config_);
+                pending_config_.reset();
+            }
+        }
+        if (swap) {
+            const bool structural = backend_->applyConfig(std::move(*swap));
+            std::lock_guard<std::mutex> g(mu_);
+            ++stats_.config_reloads_applied;
+            if (structural) {
+                ++stats_.config_reloads_structural_skipped;
+            }
+        }
+    }
+
     // Stage 0: capture the moment the worker takes a measurement off the
     // bus. graph_update_us measures stage-0 → ISAM2.update() return.
     const auto bus_pop_time = std::chrono::steady_clock::now();
@@ -1000,28 +1247,44 @@ void FusionService::process(const Measurement& measurement) {
 
     std::optional<FusedPoseEstimate> estimate;
     if (const auto* chassis = std::get_if<ChassisSpeedsSample>(&measurement)) {
-        // Phase C dispatch:
-        //   kCalibratingBias / kAwaitingFieldFix → use the legacy chassis
-        //     BetweenFactor path (no IMU factor) so the graph still moves
-        //     during pre-vision dead-reckoning.
-        //   kRunning → accumulate into the pending keyframe and commit when
-        //     the keyframe interval elapses, attaching an ImuFactor.
-        if (backend_->imuPreintegrationActive()) {
-            backend_->noteChassisDuringCalibration(*chassis);
-        }
-        if (backend_->imuPreintegrationActive() &&
-            backend_->state() == InitState::kRunning) {
-            backend_->accumulatePendingChassis(*chassis, measurement_time);
-            if (backend_->keyframeIntervalElapsed(measurement_time)) {
-                estimate = backend_->commitKeyframe(measurement_time);
-                if (estimate) {
-                    std::lock_guard<std::mutex> g(mu_);
-                    ++stats_.keyframes_committed;
-                    stats_.imu_factors_committed = backend_->imuFactorsCommitted();
-                }
-            }
+        // F-3: drop chassis samples whose planar speed exceeds the configured
+        // ceiling. Done before any backend dispatch so a glitchy CAN frame
+        // never reaches the calibration window, the keyframe accumulator, or
+        // the BetweenFactor path. The per-type cursor was already advanced by
+        // acceptTimestamp, so subsequent good samples integrate normally.
+        if (backend_->chassisSpeedExceedsLimit(*chassis)) {
+            std::lock_guard<std::mutex> g(mu_);
+            ++stats_.chassis_speed_gated;
+            estimate = backend_->emitDegraded(
+                measurement_time, kFusionStatusDegradedInput);
         } else {
-            estimate = backend_->addChassisSpeeds(*chassis, measurement_time);
+            // Phase C dispatch:
+            //   kCalibratingBias / kAwaitingFieldFix → use the legacy chassis
+            //     BetweenFactor path (no IMU factor) so the graph still moves
+            //     during pre-vision dead-reckoning.
+            //   kRunning → accumulate into the pending keyframe and commit when
+            //     the keyframe interval elapses, attaching an ImuFactor.
+            if (backend_->imuPreintegrationActive()) {
+                backend_->noteChassisDuringCalibration(*chassis);
+            }
+            if (backend_->imuPreintegrationActive() &&
+                backend_->state() == InitState::kRunning) {
+                backend_->accumulatePendingChassis(*chassis, measurement_time);
+                if (backend_->keyframeIntervalElapsed(measurement_time)) {
+                    estimate = backend_->commitKeyframe(measurement_time);
+                    if (estimate) {
+                        std::lock_guard<std::mutex> g(mu_);
+                        ++stats_.keyframes_committed;
+                        stats_.imu_factors_committed = backend_->imuFactorsCommitted();
+                        stats_.slip_disagreement_events =
+                            backend_->slipDisagreementEvents();
+                        stats_.slip_disagreement_inflations =
+                            backend_->slipDisagreementInflations();
+                    }
+                }
+            } else {
+                estimate = backend_->addChassisSpeeds(*chassis, measurement_time);
+            }
         }
     } else if (const auto* tags = std::get_if<AprilTagObservation>(&measurement)) {
         estimate = backend_->addAprilTags(*tags, measurement_time);
@@ -1038,6 +1301,10 @@ void FusionService::process(const Measurement& measurement) {
                 std::lock_guard<std::mutex> g(mu_);
                 ++stats_.keyframes_committed;
                 stats_.imu_factors_committed = backend_->imuFactorsCommitted();
+                stats_.slip_disagreement_events =
+                    backend_->slipDisagreementEvents();
+                stats_.slip_disagreement_inflations =
+                    backend_->slipDisagreementInflations();
             }
         }
     } else if (const auto* vio = std::get_if<VioMeasurement>(&measurement)) {

@@ -101,7 +101,7 @@ bool encodeTeensyHealthPayload(
     std::uint8_t* out,
     std::size_t capacity,
     std::uint16_t& out_size) {
-    if (!out || !ensure(capacity, 60u)) {
+    if (!out || !ensure(capacity, 76u)) {
         return false;
     }
     std::size_t offset = 0;
@@ -118,6 +118,10 @@ bool encodeTeensyHealthPayload(
     appendU32(out, offset, payload.tof_overruns);
     appendU32(out, offset, payload.tof_i2c_failures);
     appendU32(out, offset, payload.tof_status_flags);
+    appendU32(out, offset, payload.fused_pose_decode_to_tx_min_us);
+    appendU32(out, offset, payload.fused_pose_decode_to_tx_avg_us);
+    appendU32(out, offset, payload.fused_pose_decode_to_tx_max_us);
+    appendU32(out, offset, payload.fused_pose_latency_samples);
     out_size = static_cast<std::uint16_t>(offset);
     return true;
 }
@@ -186,13 +190,14 @@ bool decodeTimeSyncRequestPayload(const Frame& frame, TimeSyncRequestPayload& pa
 }
 
 bool decodeFusedPosePayload(const Frame& frame, FusedPosePayload& payload) {
-    // v3 wire layout: 9 doubles (pose + velocity) + 4 B has_velocity +
-    // 4 B status_flags + 36 doubles (covariance) = 368 bytes.
-    constexpr std::uint16_t kExpectedSize = 368u;
+    // v4 wire layout: 8 B host_send_time_us + 9 doubles (pose + velocity) +
+    // 4 B has_velocity + 4 B status_flags + 36 doubles (covariance) = 376 B.
+    constexpr std::uint16_t kExpectedSize = 376u;
     if (frame.payload_size != kExpectedSize) {
         return false;
     }
     std::size_t off = 0;
+    payload.host_send_time_us = readU64(frame.payload, off); off += 8;
     payload.x_m = readDouble(frame.payload, off); off += 8;
     payload.y_m = readDouble(frame.payload, off); off += 8;
     payload.z_m = readDouble(frame.payload, off); off += 8;

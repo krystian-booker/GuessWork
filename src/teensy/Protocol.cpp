@@ -209,7 +209,7 @@ std::optional<ChassisSpeedsPayload> decodeChassisSpeedsPayload(
 
 std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& payload) {
     std::vector<std::uint8_t> out;
-    out.reserve(60);
+    out.reserve(76);
     appendU64(out, payload.uptime_us);
     appendU32(out, payload.error_flags);
     appendU32(out, payload.trigger_status_flags);
@@ -223,12 +223,17 @@ std::vector<std::uint8_t> encodeTeensyHealthPayload(const TeensyHealthPayload& p
     appendU32(out, payload.tof_overruns);
     appendU32(out, payload.tof_i2c_failures);
     appendU32(out, payload.tof_status_flags);
+    // F-6 (v4) latency block at offset 60.
+    appendU32(out, payload.fused_pose_decode_to_tx_min_us);
+    appendU32(out, payload.fused_pose_decode_to_tx_avg_us);
+    appendU32(out, payload.fused_pose_decode_to_tx_max_us);
+    appendU32(out, payload.fused_pose_latency_samples);
     return out;
 }
 
 std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     const std::vector<std::uint8_t>& bytes) {
-    if (bytes.size() != 60u) {
+    if (bytes.size() != 76u) {
         return std::nullopt;
     }
     TeensyHealthPayload payload;
@@ -245,6 +250,10 @@ std::optional<TeensyHealthPayload> decodeTeensyHealthPayload(
     payload.tof_overruns = readU32(bytes, 48);
     payload.tof_i2c_failures = readU32(bytes, 52);
     payload.tof_status_flags = readU32(bytes, 56);
+    payload.fused_pose_decode_to_tx_min_us = readU32(bytes, 60);
+    payload.fused_pose_decode_to_tx_avg_us = readU32(bytes, 64);
+    payload.fused_pose_decode_to_tx_max_us = readU32(bytes, 68);
+    payload.fused_pose_latency_samples = readU32(bytes, 72);
     return payload;
 }
 

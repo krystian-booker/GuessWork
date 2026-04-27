@@ -39,6 +39,30 @@ struct FusionStats {
     std::uint64_t keyframes_committed{0};
     std::uint64_t bias_calibrations_completed{0};
 
+    // F-3: chassis samples dropped because their planar speed exceeded
+    // FusionConfig::max_chassis_speed_mps. Counted once per drop; the
+    // dropped sample's timestamp still advances the per-type cursor so a
+    // burst of garbage doesn't strand subsequent good samples behind it.
+    std::uint64_t chassis_speed_gated{0};
+
+    // F-1: live config reload counters. *_applied counts every successful
+    // applyConfig call (the worker observed and swapped a pending config);
+    // *_structural_skipped is incremented per call when the new config
+    // changed any field that requires a graph rebuild (and was therefore
+    // ignored on the live path — the affected fields keep their old values
+    // until the daemon restarts).
+    std::uint64_t config_reloads_applied{0};
+    std::uint64_t config_reloads_structural_skipped{0};
+
+    // F-4: chassis-vs-IMU velocity disagreement detector. Phase-C-only.
+    // *_events counts every keyframe whose chassis-mean body velocity
+    // disagreed with the IMU-predicted body velocity by more than
+    // FusionConfig::slip_disagreement_mps; *_inflations counts the keyframes
+    // that fired the inflation path (after the 2-step hysteresis) and OR'd
+    // kFusionStatusSlipDetected into the published estimate.
+    std::uint64_t slip_disagreement_events{0};
+    std::uint64_t slip_disagreement_inflations{0};
+
     // Phase E: per-stage latency observability.
     //
     // graph_update_us measures bus-pop → ISAM2.update() return for graph-
@@ -150,6 +174,17 @@ struct FusionConfig {
     double max_imu_gap_seconds{0.100};
     std::uint32_t marginalize_keyframe_window{500};
     double slip_disagreement_mps{1.0};
+
+    // F-2: soft floor-constraint prior on every new pose key, pinning
+    // z / roll / pitch toward zero so the always-grounded platform invariant
+    // is encoded in the graph. Sigmas are [σ_z (m), σ_roll (rad), σ_pitch (rad)].
+    bool enable_floor_constraint{true};
+    std::array<double, 3> floor_constraint_sigmas{0.01, 0.0087, 0.0087};
+
+    // F-3: drop chassis samples whose planar speed exceeds this bound, and
+    // surface the drop as kFusionStatusDegradedInput. Sized for the platform's
+    // 5.2 m/s ceiling with margin.
+    double max_chassis_speed_mps{6.5};
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config);
@@ -170,6 +205,25 @@ public:
 
     FusionStats stats() const;
     std::optional<FusedPoseEstimate> latestEstimate() const;
+
+    // F-7: snapshot of the current IMU bias as [ax, ay, az, gx, gy, gz].
+    // Returns nullopt when the bias has not yet been set by a successful
+    // boot stationary calibration — i.e. it is still the persisted seed (or
+    // identity for a fresh DB). The daemon consults this on clean shutdown
+    // before writing back to RuntimeConfig.fusion.persisted_bias.
+    std::optional<std::array<double, 6>> currentBiasIfTrusted() const;
+
+    // F-1: live reload of fusion config. Called by the daemon's "config
+    // saved" callback after WebService writes a new RuntimeConfig to SQLite.
+    // The caller passes the freshly-built fusion::FusionConfig; the worker
+    // picks it up at the top of the next process() iteration. Live-
+    // reloadable fields (sigmas, thresholds, max_chassis_speed_mps, etc.)
+    // are swapped under the worker mutex; structural fields
+    // (enable_imu_preintegration, enable_vio, IMU extrinsic, IMU noise
+    // sigmas, persisted_bias, bias_calibration_seconds, enable_floor_constraint)
+    // are silently ignored on the live path — config_reloads_structural_skipped
+    // counts those so callers can see the restart-required state.
+    void applyConfig(FusionConfig new_config);
 
 private:
     void runLoop();
@@ -206,6 +260,9 @@ private:
     // One cursor per Measurement variant alternative — keyed by Measurement::index().
     std::array<std::optional<Timestamp>, kMeasurementTypeCount> per_type_cursors_;
     std::optional<FusedPoseEstimate> latest_estimate_;
+    // F-1: pending-config hand-off. Web thread writes under mu_; worker
+    // pops at the top of every process() iteration via consumePendingConfig.
+    std::optional<FusionConfig> pending_config_;
     std::thread worker_;
     std::atomic<bool> running_{false};
 };

@@ -10,10 +10,11 @@
 namespace posest::teensy {
 
 constexpr std::uint16_t kFrameMagic = 0x4757;  // "GW"
-// v3: FusedPose payload extended from 28 B (Pose2d + status) to a full Pose3
-// + velocity + 6×6 covariance + status (368 B). Single-vehicle deployment so
-// the version bump is breaking, not negotiated.
-constexpr std::uint8_t kProtocolVersion = 3;
+// v4: FusedPose payload prefixed with host_send_time_us so the firmware can
+// measure host-to-CAN-TX latency end-to-end (376 B). TeensyHealthPayload
+// extended with fused_pose_decode_to_tx_{min,avg,max}_us + samples (76 B).
+// Single-vehicle deployment so the version bump is breaking, not negotiated.
+constexpr std::uint8_t kProtocolVersion = 4;
 constexpr std::uint32_t kStatusUnsynchronizedTime = 1u << 0u;
 constexpr std::uint32_t kStatusUnsynchronizedRioTime = 1u << 1u;
 constexpr std::uint32_t kStatusRobotSlipping = 1u << 2u;
@@ -103,6 +104,14 @@ struct TeensyHealthPayload {
     std::uint32_t tof_overruns{0};
     std::uint32_t tof_i2c_failures{0};
     std::uint32_t tof_status_flags{0};
+    // F-6 (v4): rolling fused-pose latency window measured on the firmware
+    // from USB-decode to CAN-FD-TX. Reset every health emit, so the values
+    // are deltas not running totals. samples == 0 ↔ no FusedPose has crossed
+    // the firmware in this window.
+    std::uint32_t fused_pose_decode_to_tx_min_us{0};
+    std::uint32_t fused_pose_decode_to_tx_avg_us{0};
+    std::uint32_t fused_pose_decode_to_tx_max_us{0};
+    std::uint32_t fused_pose_latency_samples{0};
 };
 
 struct CameraTriggerEventPayload {

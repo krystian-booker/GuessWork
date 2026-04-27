@@ -1067,6 +1067,9 @@ TEST(SqliteConfigStore, FusionConfigRoundTripsAndReopens) {
     config.fusion.max_imu_gap_seconds = 0.150;
     config.fusion.marginalize_keyframe_window = 750;
     config.fusion.slip_disagreement_mps = 1.5;
+    config.fusion.enable_floor_constraint = false;
+    config.fusion.floor_constraint_sigmas = {0.02, 0.015, 0.012};
+    config.fusion.max_chassis_speed_mps = 5.5;
 
     {
         posest::config::SqliteConfigStore store(path);
@@ -1113,6 +1116,11 @@ TEST(SqliteConfigStore, FusionConfigRoundTripsAndReopens) {
     EXPECT_DOUBLE_EQ(loaded.fusion.max_imu_gap_seconds, 0.150);
     EXPECT_EQ(loaded.fusion.marginalize_keyframe_window, 750u);
     EXPECT_DOUBLE_EQ(loaded.fusion.slip_disagreement_mps, 1.5);
+    EXPECT_FALSE(loaded.fusion.enable_floor_constraint);
+    EXPECT_DOUBLE_EQ(loaded.fusion.floor_constraint_sigmas[0], 0.02);
+    EXPECT_DOUBLE_EQ(loaded.fusion.floor_constraint_sigmas[1], 0.015);
+    EXPECT_DOUBLE_EQ(loaded.fusion.floor_constraint_sigmas[2], 0.012);
+    EXPECT_DOUBLE_EQ(loaded.fusion.max_chassis_speed_mps, 5.5);
 
     std::filesystem::remove(path);
 }
@@ -1133,6 +1141,12 @@ TEST(SqliteConfigStore, FusionConfigDefaultsForFreshDatabase) {
     EXPECT_DOUBLE_EQ(loaded.fusion.gravity_local_mps2.z, 9.80665);
     EXPECT_DOUBLE_EQ(loaded.fusion.max_keyframe_dt_seconds, 0.020);
     EXPECT_EQ(loaded.fusion.marginalize_keyframe_window, 500u);
+    // Migration 10 defaults: floor constraint on, gate at 6.5 m/s.
+    EXPECT_TRUE(loaded.fusion.enable_floor_constraint);
+    EXPECT_DOUBLE_EQ(loaded.fusion.floor_constraint_sigmas[0], 0.01);
+    EXPECT_DOUBLE_EQ(loaded.fusion.floor_constraint_sigmas[1], 0.0087);
+    EXPECT_DOUBLE_EQ(loaded.fusion.floor_constraint_sigmas[2], 0.0087);
+    EXPECT_DOUBLE_EQ(loaded.fusion.max_chassis_speed_mps, 6.5);
     std::filesystem::remove(path);
 }
 
@@ -1171,5 +1185,25 @@ TEST(ConfigValidator, RejectsFusionImuGapNotGreaterThanKeyframeDt) {
     auto config = makeValidConfig();
     config.fusion.max_keyframe_dt_seconds = 0.020;
     config.fusion.max_imu_gap_seconds = 0.020;  // must be strictly greater
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsFloorConstraintNonPositiveWhenEnabled) {
+    auto config = makeValidConfig();
+    config.fusion.enable_floor_constraint = true;
+    config.fusion.floor_constraint_sigmas[0] = 0.0;  // sigma_z must be > 0
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
+}
+
+TEST(ConfigValidator, AllowsFloorConstraintZeroSigmaWhenDisabled) {
+    auto config = makeValidConfig();
+    config.fusion.enable_floor_constraint = false;
+    config.fusion.floor_constraint_sigmas = {0.0, 0.0, 0.0};
+    EXPECT_NO_THROW(posest::config::validateRuntimeConfig(config));
+}
+
+TEST(ConfigValidator, RejectsMaxChassisSpeedBelowOne) {
+    auto config = makeValidConfig();
+    config.fusion.max_chassis_speed_mps = 0.5;  // below the 1.0 floor
     EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
 }

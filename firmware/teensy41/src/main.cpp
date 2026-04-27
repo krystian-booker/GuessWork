@@ -99,6 +99,14 @@ void sendHealth(std::uint64_t now_us) {
     health.tof_overruns = g_tof.overruns();
     health.tof_i2c_failures = g_tof.i2cFailures();
     health.tof_status_flags = g_tof.errorFlags();
+    // F-6: snapshot the rolling fused-pose latency window and reset it for
+    // the next health interval.
+    const auto latency = g_can.fusedPoseLatencyWindow();
+    health.fused_pose_decode_to_tx_min_us = latency.min_us;
+    health.fused_pose_decode_to_tx_avg_us = latency.avg_us;
+    health.fused_pose_decode_to_tx_max_us = latency.max_us;
+    health.fused_pose_latency_samples = latency.samples;
+    g_can.resetFusedPoseLatencyWindow();
 
     std::uint16_t payload_size = 0;
     if (!encodeTeensyHealthPayload(
@@ -329,7 +337,9 @@ void handleFrame(const Frame& frame, std::uint64_t receive_time_us) {
                 g_error_flags |= kErrorInvalidPayload;
                 return;
             }
-            g_can.setLatestFusedPose(pose);
+            // F-6: stamp the decode moment so CanBridge can diff against
+            // CAN-TX micros and surface decode-to-TX latency in TeensyHealth.
+            g_can.setLatestFusedPose(pose, micros());
             break;
         }
         case MessageType::CanTx:

@@ -51,7 +51,12 @@ public:
     void poll(std::uint64_t now_us);
 
     // Called by the host-protocol dispatch when a FusedPose USB frame arrives.
-    void setLatestFusedPose(const FusedPosePayload& pose);
+    // F-6: decode_time_us is the local micros() captured by main.cpp right
+    // after a successful decode; CanBridge subtracts it from the next CAN-TX
+    // micros() to maintain a rolling latency window over the most recent
+    // health interval.
+    void setLatestFusedPose(const FusedPosePayload& pose,
+                            std::uint64_t decode_time_us);
 
     // Set whenever the host protocol receives a CanTx command we cannot
     // currently honor. Kept as a stat counter only.
@@ -66,6 +71,20 @@ public:
     bool hasLatestPose() const { return has_latest_pose_; }
     const FusedPosePayload& latestPose() const { return latest_pose_; }
     std::uint32_t errorFlags() const { return error_flags_; }
+
+    // F-6: snapshot of the most recent fused-pose latency window
+    // (decode-to-CAN-TX micros). The TeensyHealth emit path calls these
+    // accessors and then resetFusedPoseLatencyWindow() so the next health
+    // tick sees a fresh rolling window. Output stays at zero (and samples=0)
+    // until the first TX completes.
+    struct FusedPoseLatencyWindow {
+        std::uint32_t min_us{0};
+        std::uint32_t avg_us{0};
+        std::uint32_t max_us{0};
+        std::uint32_t samples{0};
+    };
+    FusedPoseLatencyWindow fusedPoseLatencyWindow() const;
+    void resetFusedPoseLatencyWindow();
     std::uint32_t txQueueDepth() const { return tx_queue_depth_; }
     std::uint32_t receivedFusedPoses() const { return received_fused_poses_; }
     std::uint32_t unsupportedCanTxFrames() const { return unsupported_can_tx_frames_; }
@@ -102,6 +121,14 @@ private:
     bool initialized_{false};
     FusedPosePayload latest_pose_{};
     bool has_latest_pose_{false};
+    // F-6 latency tracking. decode_time_us is captured at USB-decode and
+    // diffed against CAN-TX micros at transmission to produce one sample.
+    // The rolling window is reset on each health emit by main.cpp.
+    std::uint64_t latest_pose_decode_time_us_{0};
+    std::uint32_t latency_min_us_{0};
+    std::uint32_t latency_max_us_{0};
+    std::uint64_t latency_sum_us_{0};
+    std::uint32_t latency_samples_{0};
     std::uint32_t error_flags_{0};
     std::uint32_t status_flags_{0};
     std::uint32_t received_fused_poses_{0};

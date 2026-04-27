@@ -381,6 +381,25 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
     require(config.fusion.slip_disagreement_mps > 0.0 &&
                 isFinite(config.fusion.slip_disagreement_mps),
             "fusion slip_disagreement_mps must be finite and > 0");
+    // F-2: only validate floor sigmas when the constraint is enabled. With
+    // the constraint off the column values are unused, so accept anything
+    // finite; with it on the values build a Diagonal::Sigmas noise model and
+    // must be strictly positive.
+    for (std::size_t i = 0; i < config.fusion.floor_constraint_sigmas.size(); ++i) {
+        require(isFinite(config.fusion.floor_constraint_sigmas[i]),
+                "fusion floor_constraint_sigmas[" + std::to_string(i) +
+                    "] must be finite");
+        if (config.fusion.enable_floor_constraint) {
+            require(config.fusion.floor_constraint_sigmas[i] > 0.0,
+                    "fusion floor_constraint_sigmas[" + std::to_string(i) +
+                        "] must be > 0 when enable_floor_constraint is true");
+        }
+    }
+    // F-3: floor at 1 m/s prevents an accidental kill-switch (and the
+    // platform cannot meaningfully operate below it).
+    require(config.fusion.max_chassis_speed_mps >= 1.0 &&
+                isFinite(config.fusion.max_chassis_speed_mps),
+            "fusion max_chassis_speed_mps must be finite and >= 1.0");
 }
 
 }  // namespace posest::config
