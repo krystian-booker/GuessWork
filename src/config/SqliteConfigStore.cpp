@@ -623,7 +623,8 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             "ir_led_pulse_width_us, tof_enabled, tof_i2c_address, "
             "tof_timing_budget_ms, tof_intermeasurement_period_ms, "
             "tof_offset_after_flash_us, tof_divisor, tof_mounting_offset_mm, "
-            "tof_expected_min_mm, tof_expected_max_mm "
+            "tof_expected_min_mm, tof_expected_max_mm, "
+            "tof_grounded_distance_m "
             "FROM vio_config WHERE id = 1");
         if (stmt.stepRow()) {
             config.vio.enabled = stmt.columnInt64(0) != 0;
@@ -652,6 +653,7 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
                 static_cast<double>(stmt.columnInt64(12)) * 1e-3;
             config.vio.tof_expected_max_m =
                 static_cast<double>(stmt.columnInt64(13)) * 1e-3;
+            config.vio.tof_grounded_distance_m = stmt.columnDouble(14);
         }
     }
 
@@ -679,7 +681,8 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             "marginalize_keyframe_window, slip_disagreement_mps, "
             "enable_floor_constraint, "
             "floor_constraint_sigma_z, floor_constraint_sigma_roll, "
-            "floor_constraint_sigma_pitch, max_chassis_speed_mps "
+            "floor_constraint_sigma_pitch, max_chassis_speed_mps, "
+            "enable_tof_z_prior, tof_z_prior_sigma_m, tof_z_prior_max_age_s "
             "FROM fusion_config WHERE id = 1");
         if (stmt.stepRow()) {
             for (int i = 0; i < 6; ++i) {
@@ -740,6 +743,9 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
                 stmt.columnDouble(55),
             };
             config.fusion.max_chassis_speed_mps = stmt.columnDouble(56);
+            config.fusion.enable_tof_z_prior = stmt.columnInt64(57) != 0;
+            config.fusion.tof_z_prior_sigma_m = stmt.columnDouble(58);
+            config.fusion.tof_z_prior_max_age_s = stmt.columnDouble(59);
         }
     }
 
@@ -1128,8 +1134,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "ir_led_pulse_width_us, tof_enabled, tof_i2c_address, "
             "tof_timing_budget_ms, tof_intermeasurement_period_ms, "
             "tof_offset_after_flash_us, tof_divisor, tof_mounting_offset_mm, "
-            "tof_expected_min_mm, tof_expected_max_mm) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "tof_expected_min_mm, tof_expected_max_mm, "
+            "tof_grounded_distance_m) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindInt(1, config.vio.enabled ? 1 : 0);
         if (config.vio.vio_camera_id.empty()) {
             insert.bindNull(2);
@@ -1158,12 +1165,13 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             static_cast<sqlite3_int64>(std::llround(config.vio.tof_expected_min_m * 1000.0)));
         insert.bindInt64(14,
             static_cast<sqlite3_int64>(std::llround(config.vio.tof_expected_max_m * 1000.0)));
+        insert.bindDouble(15, config.vio.tof_grounded_distance_m);
         insert.stepDone();
     }
 
     {
-        // 57 columns total (excluding id). The VALUES placeholder block is
-        // grouped six-per-line below to keep the count visually verifiable.
+        // 60 columns total (excluding id). The VALUES placeholder block is
+        // grouped below to keep the count visually verifiable.
         Statement insert(
             db_,
             "INSERT INTO fusion_config "
@@ -1189,7 +1197,8 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "marginalize_keyframe_window, slip_disagreement_mps, "
             "enable_floor_constraint, "
             "floor_constraint_sigma_z, floor_constraint_sigma_roll, "
-            "floor_constraint_sigma_pitch, max_chassis_speed_mps) "
+            "floor_constraint_sigma_pitch, max_chassis_speed_mps, "
+            "enable_tof_z_prior, tof_z_prior_sigma_m, tof_z_prior_max_age_s) "
             "VALUES (1, "
             "?, ?, ?, ?, ?, ?, "  // chassis_sigmas
             "?, ?, ?, ?, ?, ?, "  // origin_prior_sigmas
@@ -1206,7 +1215,8 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "?, ?, "              // marginalize_window + slip_disagreement
             "?, "                 // enable_floor_constraint
             "?, ?, ?, "           // floor_constraint_sigmas
-            "?)");                // max_chassis_speed_mps
+            "?, "                 // max_chassis_speed_mps
+            "?, ?, ?)");          // tof z-prior fields
         int idx = 1;
         for (int i = 0; i < 6; ++i) {
             insert.bindDouble(idx++,
@@ -1258,6 +1268,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             insert.bindDouble(idx++, config.fusion.floor_constraint_sigmas[i]);
         }
         insert.bindDouble(idx++, config.fusion.max_chassis_speed_mps);
+        insert.bindInt(idx++, config.fusion.enable_tof_z_prior ? 1 : 0);
+        insert.bindDouble(idx++, config.fusion.tof_z_prior_sigma_m);
+        insert.bindDouble(idx++, config.fusion.tof_z_prior_max_age_s);
         insert.stepDone();
     }
 

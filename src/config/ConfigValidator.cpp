@@ -386,6 +386,9 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
                 isFinite(config.vio.tof_expected_max_m) &&
                 config.vio.tof_expected_min_m < config.vio.tof_expected_max_m,
             "VIO ToF expected range must be finite and min < max");
+    require(isFinite(config.vio.tof_grounded_distance_m) &&
+                config.vio.tof_grounded_distance_m >= 0.0,
+            "VIO ToF grounded distance must be finite and >= 0");
     if (config.vio.enabled) {
         require(!config.vio.vio_camera_id.empty(),
                 "VIO is enabled but vio_camera_id is empty");
@@ -565,6 +568,33 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
     require(config.fusion.max_chassis_speed_mps >= 1.0 &&
                 isFinite(config.fusion.max_chassis_speed_mps),
             "fusion max_chassis_speed_mps must be finite and >= 1.0");
+
+    // F-5: ToF z-prior. Sigma and max-age are only enforced strictly when
+    // the prior is enabled — with the flag off the columns are unused, so
+    // accept any finite value (mirrors the floor-constraint pattern at
+    // lines 477-486).
+    require(isFinite(config.fusion.tof_z_prior_sigma_m),
+            "fusion tof_z_prior_sigma_m must be finite");
+    require(isFinite(config.fusion.tof_z_prior_max_age_s),
+            "fusion tof_z_prior_max_age_s must be finite");
+    if (config.fusion.enable_tof_z_prior) {
+        require(config.fusion.tof_z_prior_sigma_m > 0.0,
+                "fusion tof_z_prior_sigma_m must be > 0 when "
+                "enable_tof_z_prior is true");
+        require(config.fusion.tof_z_prior_max_age_s > 0.0 &&
+                    config.fusion.tof_z_prior_max_age_s <= 1.0,
+                "fusion tof_z_prior_max_age_s must be in (0, 1] seconds "
+                "when enable_tof_z_prior is true");
+        if (config.vio.enabled) {
+            require(config.vio.tof_grounded_distance_m >=
+                            config.vio.tof_expected_min_m &&
+                        config.vio.tof_grounded_distance_m <=
+                            config.vio.tof_expected_max_m,
+                    "VIO ToF grounded distance must lie within "
+                    "[tof_expected_min_m, tof_expected_max_m] when both "
+                    "VIO and the ToF z-prior are enabled");
+        }
+    }
 }
 
 }  // namespace posest::config

@@ -101,6 +101,26 @@ gtsam::PriorFactor<gtsam::Pose3> floorConstraintFactor(
         key, gtsam::Pose3{}, gtsam::noiseModel::Diagonal::Sigmas(loose));
 }
 
+// F-5: ToF unary z-prior. Anchor pose has identity rotation and the
+// requested z translation; sigmas use the kLoose trick on every other
+// tangent dimension so the factor only constrains z. Stacks with
+// floorConstraintFactor — gtsam combines the two by precision.
+gtsam::PriorFactor<gtsam::Pose3> tofZPriorFactor(
+    gtsam::Key key, double z_anchor_m, double sigma_m) {
+    constexpr double kLoose = 1e6;
+    gtsam::Vector sigmas(6);
+    sigmas(0) = kLoose;  // roll
+    sigmas(1) = kLoose;  // pitch
+    sigmas(2) = kLoose;  // yaw
+    sigmas(3) = kLoose;  // x
+    sigmas(4) = kLoose;  // y
+    sigmas(5) = sigma_m; // z
+    return gtsam::PriorFactor<gtsam::Pose3>(
+        key,
+        gtsam::Pose3(gtsam::Rot3{}, gtsam::Point3(0.0, 0.0, z_anchor_m)),
+        gtsam::noiseModel::Diagonal::Sigmas(sigmas));
+}
+
 // Velocity variable key, used only when IMU preintegration is enabled.
 // 'v' deliberately distinct from 'x' so the existing pose-only graph never
 // collides with a velocity key after the feature flag flips on mid-build.
@@ -195,6 +215,67 @@ struct FusionBackend {
         entry.accel_minus_g = std::sqrt(dx * dx + dy * dy + dz * dz);
         imu_window_.push_back(entry);
         pruneImuWindow(sample.timestamp);
+    }
+
+    // F-5: cache the most recent ToF sample. The factor decision is
+    // deferred until a pose key is committed (see
+    // addTofZPriorIfActive). Single-threaded by contract — the
+    // FusionService worker is the only writer; no mutex needed.
+    void addTof(const ToFSample& sample) {
+        latest_tof_ = sample;
+    }
+
+    // F-5: append a unary z-prior to `graph` for `key` when the cached
+    // ToF sample passes every gate. Counters split by gate so an
+    // operator can see which knob is misconfigured. The "out of band"
+    // bucket is also where the airborne case lands — a lifted-off ToF
+    // reading falls outside the configured expected range.
+    void addTofZPriorIfActive(
+        gtsam::NonlinearFactorGraph& graph,
+        gtsam::Key key,
+        Timestamp key_time) {
+        if (!config_.enable_tof_z_prior) {
+            return;
+        }
+        if (!latest_tof_) {
+            ++tof_z_priors_skipped_no_sample_;
+            return;
+        }
+        const auto age =
+            std::chrono::duration<double>(key_time - latest_tof_->timestamp).count();
+        if (age < 0.0 || age > config_.tof_z_prior_max_age_s) {
+            ++tof_z_priors_skipped_stale_;
+            return;
+        }
+        if (latest_tof_->range_status != 0) {
+            ++tof_z_priors_skipped_invalid_range_;
+            return;
+        }
+        if (latest_tof_->distance_m < config_.tof_expected_min_m ||
+            latest_tof_->distance_m > config_.tof_expected_max_m) {
+            ++tof_z_priors_skipped_out_of_band_;
+            return;
+        }
+        const double z_anchor =
+            latest_tof_->distance_m - config_.tof_grounded_distance_m;
+        graph.add(tofZPriorFactor(
+            key, z_anchor, config_.tof_z_prior_sigma_m));
+        ++tof_z_priors_added_;
+    }
+
+    // F-5 counter accessors (matches the keyframesCommitted/etc. style).
+    std::uint64_t tofZPriorsAdded() const { return tof_z_priors_added_; }
+    std::uint64_t tofZPriorsSkippedNoSample() const {
+        return tof_z_priors_skipped_no_sample_;
+    }
+    std::uint64_t tofZPriorsSkippedStale() const {
+        return tof_z_priors_skipped_stale_;
+    }
+    std::uint64_t tofZPriorsSkippedInvalidRange() const {
+        return tof_z_priors_skipped_invalid_range_;
+    }
+    std::uint64_t tofZPriorsSkippedOutOfBand() const {
+        return tof_z_priors_skipped_out_of_band_;
     }
 
     // Phase C: routed from FusionService::process when
@@ -469,6 +550,7 @@ struct FusionBackend {
         if (config_.enable_floor_constraint) {
             graph.add(floorConstraintFactor(next_pose, config_.floor_constraint_sigmas));
         }
+        addTofZPriorIfActive(graph, next_pose, timestamp);
 
         // IMU factor — bound to the velocity keys from the prediction above.
         if (have_imu_prediction) {
@@ -622,6 +704,7 @@ struct FusionBackend {
                 graph.add(floorConstraintFactor(
                     origin_key, config_.floor_constraint_sigmas));
             }
+            addTofZPriorIfActive(graph, origin_key, timestamp);
             initial_values.insert(origin_key, origin);
             if (!update(graph, initial_values, origin_key, 0)) {
                 return std::nullopt;
@@ -672,6 +755,7 @@ struct FusionBackend {
         if (config_.enable_floor_constraint) {
             graph.add(floorConstraintFactor(next_key, config_.floor_constraint_sigmas));
         }
+        addTofZPriorIfActive(graph, next_key, timestamp);
         initial_values.insert(next_key, current_pose_.compose(delta));
 
         if (!update(graph, initial_values, next_key, next_index)) {
@@ -739,6 +823,7 @@ struct FusionBackend {
         if (config_.enable_floor_constraint) {
             graph.add(floorConstraintFactor(next_key, config_.floor_constraint_sigmas));
         }
+        addTofZPriorIfActive(graph, next_key, timestamp);
         initial_values.insert(next_key, current_pose_.compose(delta));
 
         if (!update(graph, initial_values, next_key, next_index)) {
@@ -867,6 +952,7 @@ struct FusionBackend {
             if (config_.enable_floor_constraint) {
                 graph.add(floorConstraintFactor(key, config_.floor_constraint_sigmas));
             }
+            addTofZPriorIfActive(graph, key, timestamp);
         }
         graph.add(gtsam::PriorFactor<gtsam::Pose3>(key, field_to_robot, vision_noise));
 
@@ -1039,6 +1125,16 @@ private:
     std::optional<Timestamp> last_chassis_time_;
     std::deque<ImuShockSample> imu_window_;
 
+    // F-5: latest ToF sample, updated by addTof and consulted by
+    // addTofZPriorIfActive at every pose-key insertion site. Single-
+    // threaded by contract (only the worker writes/reads).
+    std::optional<ToFSample> latest_tof_;
+    std::uint64_t tof_z_priors_added_{0};
+    std::uint64_t tof_z_priors_skipped_no_sample_{0};
+    std::uint64_t tof_z_priors_skipped_stale_{0};
+    std::uint64_t tof_z_priors_skipped_invalid_range_{0};
+    std::uint64_t tof_z_priors_skipped_out_of_band_{0};
+
     // Phase C state. All inert when config_.enable_imu_preintegration is
     // false; kept as members so the (hot) chassis path can read them
     // without conditional branching on the flag.
@@ -1103,6 +1199,17 @@ FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config) {
     out.enable_floor_constraint = src.enable_floor_constraint;
     out.floor_constraint_sigmas = src.floor_constraint_sigmas;
     out.max_chassis_speed_mps = src.max_chassis_speed_mps;
+    // F-5: ToF z-prior. The grounded distance and the expected-range
+    // band live on RuntimeConfig::vio (where the rest of the ToF
+    // hardware fields are); fold them into FusionConfig here so the
+    // fusion backend has everything it needs without reaching back
+    // across the runtime/fusion namespace boundary.
+    out.enable_tof_z_prior = src.enable_tof_z_prior;
+    out.tof_z_prior_sigma_m = src.tof_z_prior_sigma_m;
+    out.tof_z_prior_max_age_s = src.tof_z_prior_max_age_s;
+    out.tof_grounded_distance_m = runtime_config.vio.tof_grounded_distance_m;
+    out.tof_expected_min_m = runtime_config.vio.tof_expected_min_m;
+    out.tof_expected_max_m = runtime_config.vio.tof_expected_max_m;
     return out;
 }
 
@@ -1146,6 +1253,17 @@ FusionStats FusionService::stats() const {
     s.graph_factor_count = graph_factor_count_;
     s.graph_variable_count = graph_variable_count_;
     s.last_update_wall_clock_us = last_update_wall_clock_us_;
+    // F-5: ToF z-prior counters live on the backend (incremented inside
+    // addTofZPriorIfActive). Pull at read time rather than mirroring on
+    // every increment — the helper fires from five sites and a single
+    // accessor pull keeps the hot paths free of locks.
+    s.tof_z_priors_added = backend_->tofZPriorsAdded();
+    s.tof_z_priors_skipped_no_sample = backend_->tofZPriorsSkippedNoSample();
+    s.tof_z_priors_skipped_stale = backend_->tofZPriorsSkippedStale();
+    s.tof_z_priors_skipped_invalid_range =
+        backend_->tofZPriorsSkippedInvalidRange();
+    s.tof_z_priors_skipped_out_of_band =
+        backend_->tofZPriorsSkippedOutOfBand();
     return s;
 }
 
@@ -1316,6 +1434,11 @@ void FusionService::process(const Measurement& measurement) {
         } else if (outcome == FusionBackend::VioOutcome::kNoTracking) {
             ++stats_.measurements_vio_skipped_no_tracking;
         }
+    } else if (const auto* tof = std::get_if<ToFSample>(&measurement)) {
+        // F-5: cache only — no estimate emitted. The unary z-prior is
+        // attached to the next pose key by addTofZPriorIfActive at the
+        // existing pose-key insertion sites.
+        backend_->addTof(*tof);
     }
 
     // Stage 1: graph mutation finished. Record bus-pop → here regardless of
@@ -1344,7 +1467,8 @@ void FusionService::process(const Measurement& measurement) {
 bool FusionService::isSupportedMeasurement(const Measurement& measurement) const {
     return std::holds_alternative<ChassisSpeedsSample>(measurement) ||
            std::holds_alternative<AprilTagObservation>(measurement) ||
-           std::holds_alternative<VioMeasurement>(measurement);
+           std::holds_alternative<VioMeasurement>(measurement) ||
+           std::holds_alternative<ToFSample>(measurement);
 }
 
 bool FusionService::acceptTimestamp(

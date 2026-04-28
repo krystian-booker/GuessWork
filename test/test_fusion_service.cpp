@@ -205,16 +205,14 @@ TEST(FusionService, IgnoresUnsupportedMeasurements) {
     posest::fusion::FusionService fusion(bus);
     fusion.start();
 
-    // CameraTriggerEvent and ToFSample are not consumed by FusionService;
-    // they should be dropped without affecting any counters.
+    // CameraTriggerEvent is not consumed by FusionService; it should be
+    // dropped without affecting any counters. ToFSample IS consumed
+    // since F-5 — the unary z-prior path caches it for the next pose
+    // key — but it never emits a FusedPoseEstimate on its own.
     posest::CameraTriggerEvent trigger;
     trigger.timestamp = std::chrono::steady_clock::now();
     trigger.pin = 2;
     ASSERT_TRUE(bus.publish(trigger));
-
-    posest::ToFSample tof;
-    tof.timestamp = std::chrono::steady_clock::now();
-    ASSERT_TRUE(bus.publish(tof));
 
     std::this_thread::sleep_for(20ms);
     fusion.stop();
@@ -963,4 +961,183 @@ TEST(FusionServiceImu, RejectsOutOfOrderImuSamples) {
     // Either path counts the rejection — service-level stale_measurements
     // OR backend-level imu_out_of_order. At least one must fire.
     EXPECT_GE(stats.stale_measurements + stats.imu_out_of_order, 1u);
+}
+
+namespace {
+
+posest::fusion::FusionConfig makeTofZPriorEnabledConfig() {
+    posest::fusion::FusionConfig cfg;
+    cfg.enable_tof_z_prior = true;
+    cfg.tof_z_prior_sigma_m = 0.02;
+    cfg.tof_z_prior_max_age_s = 0.05;
+    cfg.tof_grounded_distance_m = 0.10;
+    cfg.tof_expected_min_m = 0.05;
+    cfg.tof_expected_max_m = 4.0;
+    return cfg;
+}
+
+posest::ToFSample makeTof(
+    posest::Timestamp timestamp,
+    double distance_m,
+    std::uint32_t range_status = 0u) {
+    posest::ToFSample sample;
+    sample.timestamp = timestamp;
+    sample.teensy_time_us = 0;
+    sample.trigger_sequence = 0;
+    sample.raw_distance_m = distance_m;
+    sample.distance_m = distance_m;
+    sample.signal_rate_kcps = 0.0;
+    sample.ambient_rate_kcps = 0.0;
+    sample.ranging_duration_us = 0;
+    sample.range_status = range_status;
+    sample.status_flags = 0;
+    return sample;
+}
+
+}  // namespace
+
+// F-5: a fresh ToF sample arriving before a chassis-driven pose key
+// causes the prior to be added on the next key.
+TEST(FusionService, TofZPriorAddedWhenSampleFreshAndInBand) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus, makeTofZPriorEnabledConfig());
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    // ToF first so the cache is primed before the chassis bootstrap key.
+    ASSERT_TRUE(bus.publish(makeTof(t0, 0.15)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 5ms)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 25ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_GE(stats.tof_z_priors_added, 2u);
+    EXPECT_EQ(stats.tof_z_priors_skipped_no_sample, 0u);
+    EXPECT_EQ(stats.tof_z_priors_skipped_stale, 0u);
+    EXPECT_EQ(stats.tof_z_priors_skipped_invalid_range, 0u);
+    EXPECT_EQ(stats.tof_z_priors_skipped_out_of_band, 0u);
+}
+
+// F-5: chassis arriving before any ToF bumps the no-sample skip
+// counter without affecting the optimizer.
+TEST(FusionService, TofZPriorSkippedWhenNoSampleSeen) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus, makeTofZPriorEnabledConfig());
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeChassis(t0)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 20ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_EQ(stats.tof_z_priors_added, 0u);
+    EXPECT_GE(stats.tof_z_priors_skipped_no_sample, 2u);
+}
+
+// F-5: ToF older than max_age is rejected at factor-add time.
+TEST(FusionService, TofZPriorSkippedWhenStale) {
+    posest::MeasurementBus bus(8);
+    auto cfg = makeTofZPriorEnabledConfig();
+    cfg.tof_z_prior_max_age_s = 0.05;
+    posest::fusion::FusionService fusion(bus, cfg);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeTof(t0, 0.15)));
+    // Chassis 200 ms later — ToF age (200 ms) > max_age (50 ms).
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 200ms)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 220ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_EQ(stats.tof_z_priors_added, 0u);
+    EXPECT_GE(stats.tof_z_priors_skipped_stale, 2u);
+}
+
+// F-5: range_status != 0 (VL53L4CD's "out of range" / similar) skips
+// the prior. Tests the validity-gate ordering by also keeping the
+// sample fresh and in-band.
+TEST(FusionService, TofZPriorSkippedWhenRangeStatusNonZero) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus, makeTofZPriorEnabledConfig());
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeTof(t0, 0.15, /*range_status=*/4u)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 5ms)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 25ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_EQ(stats.tof_z_priors_added, 0u);
+    EXPECT_GE(stats.tof_z_priors_skipped_invalid_range, 2u);
+}
+
+// F-5: a distance outside [tof_expected_min_m, tof_expected_max_m] is
+// the airborne-handling path — a lifted-off ToF reads way over the
+// max, which falls into this bucket.
+TEST(FusionService, TofZPriorSkippedWhenOutOfBandAirborne) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionService fusion(bus, makeTofZPriorEnabledConfig());
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    // Distance 5 m > tof_expected_max_m 4 m — chip clamp / airborne.
+    ASSERT_TRUE(bus.publish(makeTof(t0, 5.0)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 5ms)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 25ms, 1.0)));
+
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    const auto stats = fusion.stats();
+    EXPECT_EQ(stats.tof_z_priors_added, 0u);
+    EXPECT_GE(stats.tof_z_priors_skipped_out_of_band, 2u);
+}
+
+// F-5: live-edit toggle. Disable, drive a key, enable, drive another
+// key; the second should pick up the prior.
+TEST(FusionService, TofZPriorLiveEditableViaApplyConfig) {
+    posest::MeasurementBus bus(8);
+    posest::fusion::FusionConfig cfg;
+    cfg.enable_tof_z_prior = false;  // start disabled
+    cfg.tof_z_prior_sigma_m = 0.02;
+    cfg.tof_z_prior_max_age_s = 0.05;
+    cfg.tof_grounded_distance_m = 0.10;
+    cfg.tof_expected_min_m = 0.05;
+    cfg.tof_expected_max_m = 4.0;
+    posest::fusion::FusionService fusion(bus, cfg);
+    fusion.start();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeTof(t0, 0.15)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 5ms)));
+    ASSERT_TRUE(bus.publish(makeChassis(t0 + 25ms, 1.0)));
+    std::this_thread::sleep_for(50ms);
+
+    auto stats = fusion.stats();
+    EXPECT_EQ(stats.tof_z_priors_added, 0u);
+
+    // Enable live, then publish a fresh ToF + chassis.
+    cfg.enable_tof_z_prior = true;
+    fusion.applyConfig(cfg);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(bus.publish(makeTof(t1, 0.15)));
+    ASSERT_TRUE(bus.publish(makeChassis(t1 + 5ms, 1.0)));
+    std::this_thread::sleep_for(100ms);
+    fusion.stop();
+
+    stats = fusion.stats();
+    EXPECT_GE(stats.tof_z_priors_added, 1u);
+    EXPECT_GE(stats.config_reloads_applied, 1u);
 }

@@ -1558,6 +1558,94 @@ TEST(ConfigValidator, RejectsKimeraVioImuBufferCapacityBelowMinimum) {
                  std::invalid_argument);
 }
 
+// Migration 15 adds the F-5 ToF z-prior fields with safe defaults.
+// A fresh DB must round-trip those defaults.
+TEST(SqliteConfigStore, TofZPriorDefaultsForFreshDatabase) {
+    const auto path = tempDbPath("tof_z_prior_defaults");
+    std::filesystem::remove(path);
+    {
+        posest::config::SqliteConfigStore store(path);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+    EXPECT_FALSE(loaded.fusion.enable_tof_z_prior);
+    EXPECT_DOUBLE_EQ(loaded.fusion.tof_z_prior_sigma_m, 0.02);
+    EXPECT_DOUBLE_EQ(loaded.fusion.tof_z_prior_max_age_s, 0.05);
+    EXPECT_DOUBLE_EQ(loaded.vio.tof_grounded_distance_m, 0.10);
+
+    std::filesystem::remove(path);
+}
+
+TEST(SqliteConfigStore, TofZPriorRoundTripsAndReopens) {
+    const auto path = tempDbPath("tof_z_prior_roundtrip");
+    std::filesystem::remove(path);
+
+    auto config = makeValidConfig();
+    config.fusion.enable_tof_z_prior = true;
+    config.fusion.tof_z_prior_sigma_m = 0.015;
+    config.fusion.tof_z_prior_max_age_s = 0.08;
+    config.vio.tof_grounded_distance_m = 0.12;
+
+    {
+        posest::config::SqliteConfigStore store(path);
+        store.saveRuntimeConfig(config);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+    EXPECT_TRUE(loaded.fusion.enable_tof_z_prior);
+    EXPECT_DOUBLE_EQ(loaded.fusion.tof_z_prior_sigma_m, 0.015);
+    EXPECT_DOUBLE_EQ(loaded.fusion.tof_z_prior_max_age_s, 0.08);
+    EXPECT_DOUBLE_EQ(loaded.vio.tof_grounded_distance_m, 0.12);
+
+    std::filesystem::remove(path);
+}
+
+TEST(ConfigValidator, RejectsTofZPriorSigmaZeroWhenEnabled) {
+    auto config = makeValidConfig();
+    config.fusion.enable_tof_z_prior = true;
+    config.fusion.tof_z_prior_sigma_m = 0.0;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, AllowsTofZPriorSigmaZeroWhenDisabled) {
+    auto config = makeValidConfig();
+    config.fusion.enable_tof_z_prior = false;
+    config.fusion.tof_z_prior_sigma_m = 0.0;  // unused on this path
+    EXPECT_NO_THROW(posest::config::validateRuntimeConfig(config));
+}
+
+TEST(ConfigValidator, RejectsTofZPriorMaxAgeOutOfRangeWhenEnabled) {
+    auto config = makeValidConfig();
+    config.fusion.enable_tof_z_prior = true;
+    config.fusion.tof_z_prior_max_age_s = 5.0;  // exceeds 1 s ceiling
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsGroundedDistanceOutsideExpectedRangeWhenBothEnabled) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = "cam0";
+    config.vio.tof_expected_min_m = 0.05;
+    config.vio.tof_expected_max_m = 1.0;
+    config.fusion.enable_tof_z_prior = true;
+    config.vio.tof_grounded_distance_m = 1.5;  // > expected_max
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, AllowsGroundedDistanceOutsideRangeWhenZPriorDisabled) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = "cam0";
+    config.fusion.enable_tof_z_prior = false;
+    config.vio.tof_grounded_distance_m = 1.5;  // unused gate
+    EXPECT_NO_THROW(posest::config::validateRuntimeConfig(config));
+}
+
 // VIO enabled requires both an active intrinsic calibration and an
 // active camera-IMU calibration for vio_camera_id. KimeraParamWriter
 // would throw at daemon start otherwise; catching the missing row at

@@ -63,6 +63,17 @@ struct FusionStats {
     std::uint64_t slip_disagreement_events{0};
     std::uint64_t slip_disagreement_inflations{0};
 
+    // F-5: ToF unary z-prior counters. _added counts every pose key that
+    // received the prior; the four _skipped_* variants split by the gate
+    // that rejected the addition so an operator can see which knob is
+    // misconfigured (no sample yet, last sample stale, range_status non-
+    // zero, or distance outside the expected band).
+    std::uint64_t tof_z_priors_added{0};
+    std::uint64_t tof_z_priors_skipped_no_sample{0};
+    std::uint64_t tof_z_priors_skipped_stale{0};
+    std::uint64_t tof_z_priors_skipped_invalid_range{0};
+    std::uint64_t tof_z_priors_skipped_out_of_band{0};
+
     // Phase E: per-stage latency observability.
     //
     // graph_update_us measures bus-pop → ISAM2.update() return for graph-
@@ -185,6 +196,24 @@ struct FusionConfig {
     // surface the drop as kFusionStatusDegradedInput. Sized for the platform's
     // 5.2 m/s ceiling with margin.
     double max_chassis_speed_mps{6.5};
+
+    // F-4: ToF-driven unary z-prior on every new pose key. Stacks with the
+    // F-2 floor constraint. Validity is checked at factor-add time using
+    // the cached ToFSample's range_status, freshness, and the configured
+    // expected-range band on RuntimeConfig::vio. tof_grounded_distance_m
+    // is the calibration baseline used to convert distance to body-z; it
+    // mirrors VioConfig::tof_grounded_distance_m so the live-edit path can
+    // hand both into the backend.
+    bool enable_tof_z_prior{false};
+    double tof_z_prior_sigma_m{0.02};
+    double tof_z_prior_max_age_s{0.05};
+    double tof_grounded_distance_m{0.10};
+    // ToF sanity band — copied from VioConfig at buildFusionConfig() time.
+    // A reading outside [min, max] (or with range_status != 0) skips the
+    // prior. Defaults match VioConfig's defaults so a fresh FusionConfig
+    // is internally consistent.
+    double tof_expected_min_m{0.05};
+    double tof_expected_max_m{4.0};
 };
 
 FusionConfig buildFusionConfig(const runtime::RuntimeConfig& runtime_config);

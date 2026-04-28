@@ -546,6 +546,30 @@ COMMIT;
 )sql";
 }
 
+const char* migration15Sql() {
+    // F-5: ToF unary z-prior fields (fusion_config) plus the grounded-
+    // distance calibration baseline (vio_config). Defaults match the
+    // C++ struct defaults so an unmigrated DB picks up the same values
+    // as a fresh build. The prior is gated off until the operator
+    // measures `tof_grounded_distance_m` for this specific mount.
+    return R"sql(
+BEGIN;
+
+ALTER TABLE fusion_config
+    ADD COLUMN enable_tof_z_prior INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fusion_config
+    ADD COLUMN tof_z_prior_sigma_m REAL NOT NULL DEFAULT 0.02;
+ALTER TABLE fusion_config
+    ADD COLUMN tof_z_prior_max_age_s REAL NOT NULL DEFAULT 0.05;
+
+ALTER TABLE vio_config
+    ADD COLUMN tof_grounded_distance_m REAL NOT NULL DEFAULT 0.10;
+
+PRAGMA user_version = 15;
+COMMIT;
+)sql";
+}
+
 const char* migration14Sql() {
     // Single-row Kimera-VIO algorithm tunables. Kept separate from
     // vio_config (which holds hardware-layer ToF/IR-LED settings) so the
@@ -582,7 +606,7 @@ COMMIT;
 }  // namespace
 
 int currentSchemaVersion() {
-    return 14;
+    return 15;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -649,6 +673,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 13) {
         exec(db, migration14Sql());
+        migrated_version = 14;
+    }
+    if (migrated_version == 14) {
+        exec(db, migration15Sql());
     }
 }
 

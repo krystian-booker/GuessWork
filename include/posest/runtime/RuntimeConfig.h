@@ -194,6 +194,12 @@ struct VioConfig {
     double tof_mounting_offset_m{0.0};
     double tof_expected_min_m{0.05};
     double tof_expected_max_m{4.0};
+    // Calibration baseline: distance the ToF reads when the robot is on its
+    // grounded reference. Used by the fusion ToF z-prior to convert raw
+    // distance into body-z (z_body = distance_m - tof_grounded_distance_m).
+    // Default 0.10 m matches the camera mount height in the brief; replace
+    // with a measured value before enabling the prior.
+    double tof_grounded_distance_m{0.10};
 };
 
 // GTSAM fusion-graph tunables. Persisted as a singleton row; all fields have
@@ -269,6 +275,19 @@ struct FusionConfig {
     // [σ_z (m), σ_roll (rad), σ_pitch (rad)].
     bool enable_floor_constraint{true};
     std::array<double, 3> floor_constraint_sigmas{0.01, 0.0087, 0.0087};
+
+    // F-4: ToF-driven unary z-prior on every new pose key. Stacks with the
+    // F-2 floor constraint — F-2 encodes the static "robot is grounded"
+    // platform invariant; this prior encodes the sensor's per-sample
+    // observation. Anchor is `vio.tof_grounded_distance_m` so a baseline
+    // reading lands at z=0. Disabled by default until the grounded-distance
+    // calibration is performed.
+    bool enable_tof_z_prior{false};
+    double tof_z_prior_sigma_m{0.02};
+    // Drop the prior if the cached ToF sample is older than this when a
+    // pose key is committed. 50 ms accommodates one frame at 20 Hz with
+    // headroom; tighter values lose more priors to scheduler jitter.
+    double tof_z_prior_max_age_s{0.05};
 
     // F-3: hard upper bound on chassis speed before the sample is dropped
     // and kFusionStatusDegradedInput is OR'd into the next estimate. Default
