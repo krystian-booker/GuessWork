@@ -1,13 +1,33 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 #include "posest/MeasurementTypes.h"
 #include "posest/runtime/RuntimeConfig.h"
 
 namespace posest::config {
+
+// W2 quality metrics extracted from Kalibr's results-cam-<bag>.txt.
+// Keyed by Kalibr camera label ("cam0", "cam1", ...) — the caller maps
+// those labels to GuessWork camera ids via the topic→id table built
+// from CLI flags.
+struct KalibrCameraQualityMetrics {
+    double reprojection_rms_px{0.0};
+    std::int32_t observation_count{0};
+};
+
+// Same shape, extracted from Kalibr's results-imucam-<bag>.txt. Gyro
+// and accel errors are per-IMU and broadcast to every camera in the
+// returned map.
+struct KalibrCameraImuQualityMetrics {
+    double reprojection_rms_px{0.0};
+    double gyro_rms_radps{0.0};
+    double accel_rms_mps2{0.0};
+};
 
 runtime::CameraCalibrationConfig parseKalibrCameraCalibration(
     const std::filesystem::path& path,
@@ -37,5 +57,20 @@ Pose3d parsePoseCsv(const std::string& value);
 runtime::CalibrationTargetConfig parseKalibrTargetYaml(
     const std::filesystem::path& path,
     std::string id);
+
+// Parse Kalibr's results-cam-<bag>.txt (camera-only calibration).
+// Returns an empty map if no camera sections were found; throws only
+// when the file cannot be opened. The reprojection RMS is computed as
+// hypot(std_x, std_y) from the per-camera "reprojection error: [a, b]
+// +- [c, d]" line.
+std::unordered_map<std::string, KalibrCameraQualityMetrics>
+parseKalibrCameraResults(const std::filesystem::path& path);
+
+// Parse Kalibr's results-imucam-<bag>.txt (camera-IMU calibration).
+// The reprojection-error block is per-camera; the gyroscope/accelerometer
+// error blocks are global to the run and broadcast to every camera in
+// the result map. Missing sections leave their fields at 0.0.
+std::unordered_map<std::string, KalibrCameraImuQualityMetrics>
+parseKalibrCameraImuResults(const std::filesystem::path& path);
 
 }  // namespace posest::config

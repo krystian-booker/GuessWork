@@ -100,6 +100,56 @@ std::filesystem::path findKalibrCamchain(const std::filesystem::path& output_dir
     throw std::runtime_error("Kalibr output did not contain a camchain YAML file");
 }
 
+// W2 helpers. Kalibr's results files have stable filename prefixes
+// (results-cam, results-imucam) but variable suffixes that include the
+// bag basename. Search the directory rather than reconstructing the
+// expected filename so the operator can rename their bag.
+std::filesystem::path findKalibrResultsCam(const std::filesystem::path& output_dir) {
+    for (const auto& entry : std::filesystem::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) continue;
+        const auto filename = entry.path().filename().string();
+        if (filename.rfind("results-cam", 0) == 0 &&
+            entry.path().extension() == ".txt") {
+            return entry.path();
+        }
+    }
+    throw std::runtime_error(
+        "Kalibr output did not contain a results-cam .txt file: " +
+        output_dir.string());
+}
+
+std::filesystem::path findKalibrResultsImuCam(
+    const std::filesystem::path& output_dir) {
+    for (const auto& entry : std::filesystem::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) continue;
+        const auto filename = entry.path().filename().string();
+        if (filename.rfind("results-imucam", 0) == 0 &&
+            entry.path().extension() == ".txt") {
+            return entry.path();
+        }
+    }
+    throw std::runtime_error(
+        "Kalibr output did not contain a results-imucam .txt file: " +
+        output_dir.string());
+}
+
+// PDF report is best-effort — Kalibr emits one in normal operation but a
+// failed run may not. An empty path is acceptable to the caller.
+std::filesystem::path findKalibrReportCam(
+    const std::filesystem::path& output_dir,
+    const std::string& prefix) {
+    if (!std::filesystem::is_directory(output_dir)) return {};
+    for (const auto& entry : std::filesystem::directory_iterator(output_dir)) {
+        if (!entry.is_regular_file()) continue;
+        const auto filename = entry.path().filename().string();
+        if (filename.rfind(prefix, 0) == 0 &&
+            entry.path().extension() == ".pdf") {
+            return entry.path();
+        }
+    }
+    return {};
+}
+
 void replaceCalibration(
     RuntimeConfig& config,
     CameraCalibrationConfig calibration,
@@ -428,6 +478,15 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
                 requireValue(i, argc, argv, arg);
         } else if (arg == "--notes") {
             options.import_calibration_target.notes = requireValue(i, argc, argv, arg);
+        } else if (arg == "--force") {
+            // Shared between calibrate-camera and calibrate-camera-imu so
+            // the orchestrator (W6) can hand both struct fields the flag.
+            options.calibrate_camera.force = true;
+            options.calibrate_camera_imu.force = true;
+        } else if (arg == "--max-reprojection-rms-px") {
+            const double value = std::stod(requireValue(i, argc, argv, arg));
+            options.calibrate_camera.max_reprojection_rms_px = value;
+            options.calibrate_camera_imu.max_reprojection_rms_px = value;
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
@@ -485,6 +544,47 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
     return options;
 }
 
+void throwIfUnacceptableCalibration(
+    const CameraCalibrationConfig& calibration,
+    const CalibrationToolConfig& tool,
+    bool force) {
+    if (force) return;
+    if (!(calibration.reprojection_rms_px > 0.0)) {
+        throw std::runtime_error(
+            "Kalibr did not produce a usable reprojection RMS for camera '" +
+            calibration.camera_id + "' — pass --force to persist anyway");
+    }
+    if (calibration.reprojection_rms_px > tool.max_reprojection_rms_px) {
+        throw std::runtime_error(
+            "Kalibr reprojection RMS for camera '" + calibration.camera_id +
+            "' (" + std::to_string(calibration.reprojection_rms_px) +
+            " px) exceeds gate " +
+            std::to_string(tool.max_reprojection_rms_px) +
+            " px — pass --force or rerun");
+    }
+}
+
+void throwIfUnacceptableCameraImu(
+    const CameraImuCalibrationConfig& calibration,
+    const CalibrationToolConfig& tool,
+    bool force) {
+    if (force) return;
+    if (!(calibration.reprojection_rms_px > 0.0)) {
+        throw std::runtime_error(
+            "Kalibr did not produce a usable reprojection RMS for camera-IMU '" +
+            calibration.camera_id + "' — pass --force to persist anyway");
+    }
+    if (calibration.reprojection_rms_px > tool.max_camera_imu_rms_px) {
+        throw std::runtime_error(
+            "Kalibr camera-IMU reprojection RMS for camera '" +
+            calibration.camera_id + "' (" +
+            std::to_string(calibration.reprojection_rms_px) +
+            " px) exceeds gate " +
+            std::to_string(tool.max_camera_imu_rms_px) +
+            " px — pass --force or rerun");
+    }
+}
+
 std::string daemonUsage(const char* argv0) {
     std::ostringstream out;
     const char* exe = argv0 ? argv0 : "posest_daemon";
@@ -494,7 +594,8 @@ std::string daemonUsage(const char* argv0) {
         << " calibrate-camera --config PATH --camera-id ID --bag BAG "
            "(--target TARGET | --target-id ID) "
            "--topic TOPIC --output-dir DIR --version VERSION "
-           "--camera-to-robot x,y,z,roll,pitch,yaw --docker-image IMAGE\n"
+           "--camera-to-robot x,y,z,roll,pitch,yaw --docker-image IMAGE "
+           "[--max-reprojection-rms-px X] [--force]\n"
         << "       " << exe
         << " import-field-layout --config PATH --field-id ID --name NAME --file PATH "
            "[--activate]\n"
@@ -506,7 +607,8 @@ std::string daemonUsage(const char* argv0) {
            "[--docker-image IMAGE]\n"
         << "       " << exe
         << " calibrate-camera-imu --config PATH --dataset DIR --target TARGET.yaml "
-           "--imu IMU.yaml --version VERSION [--docker-image IMAGE]\n"
+           "--imu IMU.yaml --version VERSION [--docker-image IMAGE] "
+           "[--max-reprojection-rms-px X] [--force]\n"
         << "       " << exe
         << " import-calibration-target --config PATH --target-id ID "
            "(--from-yaml PATH | --type TYPE --rows N --cols N "
@@ -761,6 +863,28 @@ void runConfigCommand(
             true,
             nowIsoUtc(),
             options.calibrate_camera.topic);
+
+        // W2: pull quality metrics from results-cam.txt and gate persistence
+        // before the calibration row is written. Kalibr labels the single
+        // camera "cam0" regardless of the GuessWork-side camera_id.
+        const auto results_path =
+            findKalibrResultsCam(options.calibrate_camera.output_dir);
+        const auto metrics = config::parseKalibrCameraResults(results_path);
+        if (const auto it = metrics.find("cam0"); it != metrics.end()) {
+            calibration.reprojection_rms_px = it->second.reprojection_rms_px;
+            calibration.observation_count = it->second.observation_count;
+        }
+        calibration.report_path = findKalibrReportCam(
+            options.calibrate_camera.output_dir, "report-cam").string();
+
+        CalibrationToolConfig effective_tool = config.calibration_tools;
+        if (options.calibrate_camera.max_reprojection_rms_px) {
+            effective_tool.max_reprojection_rms_px =
+                *options.calibrate_camera.max_reprojection_rms_px;
+        }
+        throwIfUnacceptableCalibration(
+            calibration, effective_tool, options.calibrate_camera.force);
+
         CameraExtrinsicsConfig extrinsics;
         extrinsics.camera_id = options.calibrate_camera.camera_id;
         extrinsics.version = options.calibrate_camera.version;
@@ -901,16 +1025,55 @@ void runConfigCommand(
     }
 
     const auto result_path = findKalibrImuCamchain(options.calibrate_camera_imu.dataset_dir);
+
+    // W2: pull quality metrics from results-imucam.txt before persisting any
+    // row. Gyro/accel errors are global to the run and broadcast across all
+    // camera entries by parseKalibrCameraImuResults.
+    const auto imucam_results_path =
+        findKalibrResultsImuCam(options.calibrate_camera_imu.dataset_dir);
+    const auto imucam_metrics =
+        config::parseKalibrCameraImuResults(imucam_results_path);
+    const auto report_path = findKalibrReportCam(
+        options.calibrate_camera_imu.dataset_dir, "report-imucam").string();
+
+    CalibrationToolConfig effective_tool = config.calibration_tools;
+    if (options.calibrate_camera_imu.max_reprojection_rms_px) {
+        effective_tool.max_camera_imu_rms_px =
+            *options.calibrate_camera_imu.max_reprojection_rms_px;
+    }
+
+    // First pass: parse + gate every camera's calibration. We gate before
+    // mutating `config` so a single-camera failure leaves the saved config
+    // untouched (mirrors replaceCameraImuCalibration's all-or-nothing intent).
+    std::vector<CameraImuCalibrationConfig> validated;
+    validated.reserve(camera_ids.size());
     for (const auto& camera_id : camera_ids) {
-        replaceCameraImuCalibration(
-            config,
-            config::parseKalibrCameraImuCalibration(
-                result_path,
-                camera_id,
-                options.calibrate_camera_imu.version,
-                true,
-                nowIsoUtc(),
-                "/posest/" + camera_id + "/image_raw"));
+        auto calibration = config::parseKalibrCameraImuCalibration(
+            result_path,
+            camera_id,
+            options.calibrate_camera_imu.version,
+            true,
+            nowIsoUtc(),
+            "/posest/" + camera_id + "/image_raw");
+        // Kalibr labels each camera "cam0", "cam1", … in the same order they
+        // appear in the input camchain.yaml. exportActiveCamchain emits the
+        // labels in `camera_ids` order, so the index lines up.
+        const std::string kalibr_label =
+            "cam" + std::to_string(validated.size());
+        if (const auto it = imucam_metrics.find(kalibr_label);
+            it != imucam_metrics.end()) {
+            calibration.reprojection_rms_px = it->second.reprojection_rms_px;
+            calibration.gyro_rms_radps = it->second.gyro_rms_radps;
+            calibration.accel_rms_mps2 = it->second.accel_rms_mps2;
+        }
+        calibration.report_path = report_path;
+        throwIfUnacceptableCameraImu(
+            calibration, effective_tool, options.calibrate_camera_imu.force);
+        validated.push_back(std::move(calibration));
+    }
+
+    for (auto& calibration : validated) {
+        replaceCameraImuCalibration(config, std::move(calibration));
     }
     config_store.saveRuntimeConfig(config);
 }

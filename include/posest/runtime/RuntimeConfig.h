@@ -26,6 +26,16 @@ struct CameraCalibrationConfig {
     double cx{0.0};
     double cy{0.0};
     std::vector<double> distortion_coefficients;
+    // W2 quality metrics. Parsed from Kalibr's results-cam.txt at ingestion
+    // time and gated by CalibrationToolConfig::max_reprojection_rms_px.
+    // 0.0 means unrated (legacy row, or operator persisted with --force
+    // despite a missing metric).
+    double reprojection_rms_px{0.0};
+    std::int32_t observation_count{0};
+    // Placeholder for a future spatial-coverage metric. W2 always writes 0.0.
+    double coverage_score{0.0};
+    // Absolute path to Kalibr's report-cam.pdf when discovered, else empty.
+    std::string report_path;
 };
 
 struct CameraExtrinsicsConfig {
@@ -43,6 +53,12 @@ struct CameraImuCalibrationConfig {
     Pose3d camera_to_imu;
     Pose3d imu_to_camera;
     double time_shift_s{0.0};
+    // W2 quality metrics from Kalibr's results-imucam.txt. Only
+    // reprojection_rms_px gates persistence; gyro/accel are reporting-only.
+    double reprojection_rms_px{0.0};
+    double gyro_rms_radps{0.0};
+    double accel_rms_mps2{0.0};
+    std::string report_path;
 };
 
 struct KalibrDatasetConfig {
@@ -55,6 +71,13 @@ struct KalibrDatasetConfig {
 
 struct CalibrationToolConfig {
     std::string docker_image{"kalibr:latest"};
+    // W2 acceptance gate: a Kalibr camera result with reprojection RMS
+    // strictly above this value is rejected unless --force is passed.
+    // Default 1.0 px matches OpenVINS guidance for pinhole-radtan lenses.
+    double max_reprojection_rms_px{1.0};
+    // Camera-IMU calibrations have additional noise from IMU integration;
+    // default is intentionally a bit looser than the camera-only gate.
+    double max_camera_imu_rms_px{1.5};
 };
 
 // Calibration target description (e.g. AprilGrid, checkerboard, circle grid).

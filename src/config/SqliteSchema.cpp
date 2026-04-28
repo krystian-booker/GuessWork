@@ -481,10 +481,46 @@ COMMIT;
 )sql";
 }
 
+const char* migration12Sql() {
+    // Quality metrics from Kalibr's results files plus the gate thresholds
+    // that govern persistence. Defaults of 0.0 are intentional — an
+    // unmigrated row predates the gate and must not be confused with
+    // "0 px reprojection error".
+    return R"sql(
+BEGIN;
+
+ALTER TABLE calibrations
+    ADD COLUMN reprojection_rms_px REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE calibrations
+    ADD COLUMN observation_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE calibrations
+    ADD COLUMN coverage_score REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE calibrations
+    ADD COLUMN report_path TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE camera_imu_calibrations
+    ADD COLUMN reprojection_rms_px REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE camera_imu_calibrations
+    ADD COLUMN gyro_rms_radps REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE camera_imu_calibrations
+    ADD COLUMN accel_rms_mps2 REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE camera_imu_calibrations
+    ADD COLUMN report_path TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE calibration_tool_config
+    ADD COLUMN max_reprojection_rms_px REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE calibration_tool_config
+    ADD COLUMN max_camera_imu_rms_px REAL NOT NULL DEFAULT 1.5;
+
+PRAGMA user_version = 12;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 11;
+    return 12;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -539,6 +575,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 10) {
         exec(db, migration11Sql());
+        migrated_version = 11;
+    }
+    if (migrated_version == 11) {
+        exec(db, migration12Sql());
     }
 }
 

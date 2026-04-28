@@ -207,6 +207,7 @@ add_executable(posest_tests
     test/test_teensy_protocol_golden.cpp
     test/test_teensy_service.cpp
     test/test_time_sync_filter.cpp
+    test/test_calibration_parsers.cpp
     test/test_calibration_recorder.cpp
     test/test_calibration_target_writer.cpp
     test/test_config_schema.cpp
@@ -230,6 +231,10 @@ target_link_libraries(posest_tests PRIVATE
     posest_daemon_lib
     GTest::gtest
     GTest::gtest_main
+)
+
+target_compile_definitions(posest_tests PRIVATE
+    POSEST_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test/fixtures"
 )
 
 if(TARGET posest_v4l2)

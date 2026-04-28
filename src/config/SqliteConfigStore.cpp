@@ -305,7 +305,9 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             db_,
             "SELECT camera_id, version, active, source_file_path, created_at, image_width, "
             "image_height, camera_model, distortion_model, fx, fy, cx, cy, "
-            "distortion_coefficients_json FROM calibrations "
+            "distortion_coefficients_json, "
+            "reprojection_rms_px, observation_count, coverage_score, report_path "
+            "FROM calibrations "
             "ORDER BY camera_id, version");
         while (stmt.stepRow()) {
             runtime::CameraCalibrationConfig calibration;
@@ -324,6 +326,11 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             calibration.cy = stmt.columnDouble(12);
             calibration.distortion_coefficients =
                 parseDoubleArrayJson(stmt.columnText(13), "distortion_coefficients_json");
+            calibration.reprojection_rms_px = stmt.columnDouble(14);
+            calibration.observation_count =
+                static_cast<std::int32_t>(stmt.columnInt(15));
+            calibration.coverage_score = stmt.columnDouble(16);
+            calibration.report_path = stmt.columnText(17);
             config.calibrations.push_back(std::move(calibration));
         }
     }
@@ -358,7 +365,8 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             "cam_imu_tx_m, cam_imu_ty_m, cam_imu_tz_m, "
             "cam_imu_roll_rad, cam_imu_pitch_rad, cam_imu_yaw_rad, "
             "imu_cam_tx_m, imu_cam_ty_m, imu_cam_tz_m, "
-            "imu_cam_roll_rad, imu_cam_pitch_rad, imu_cam_yaw_rad, time_shift_s "
+            "imu_cam_roll_rad, imu_cam_pitch_rad, imu_cam_yaw_rad, time_shift_s, "
+            "reprojection_rms_px, gyro_rms_radps, accel_rms_mps2, report_path "
             "FROM camera_imu_calibrations ORDER BY camera_id, version");
         while (stmt.stepRow()) {
             runtime::CameraImuCalibrationConfig calibration;
@@ -388,6 +396,10 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
                 stmt.columnDouble(16),
             };
             calibration.time_shift_s = stmt.columnDouble(17);
+            calibration.reprojection_rms_px = stmt.columnDouble(18);
+            calibration.gyro_rms_radps = stmt.columnDouble(19);
+            calibration.accel_rms_mps2 = stmt.columnDouble(20);
+            calibration.report_path = stmt.columnText(21);
             config.camera_imu_calibrations.push_back(calibration);
         }
     }
@@ -411,9 +423,12 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
     {
         Statement stmt(
             db_,
-            "SELECT docker_image FROM calibration_tool_config WHERE id = 1");
+            "SELECT docker_image, max_reprojection_rms_px, max_camera_imu_rms_px "
+            "FROM calibration_tool_config WHERE id = 1");
         if (stmt.stepRow()) {
             config.calibration_tools.docker_image = stmt.columnText(0);
+            config.calibration_tools.max_reprojection_rms_px = stmt.columnDouble(1);
+            config.calibration_tools.max_camera_imu_rms_px = stmt.columnDouble(2);
         }
     }
 
@@ -791,8 +806,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "INSERT INTO calibrations "
             "(camera_id, version, active, source_file_path, created_at, image_width, "
             "image_height, camera_model, distortion_model, fx, fy, cx, cy, "
-            "distortion_coefficients_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "distortion_coefficients_json, "
+            "reprojection_rms_px, observation_count, coverage_score, report_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, calibration.camera_id);
         insert.bindText(2, calibration.version);
         insert.bindInt(3, calibration.active ? 1 : 0);
@@ -807,6 +823,10 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindDouble(12, calibration.cx);
         insert.bindDouble(13, calibration.cy);
         insert.bindText(14, doubleArrayToJson(calibration.distortion_coefficients));
+        insert.bindDouble(15, calibration.reprojection_rms_px);
+        insert.bindInt(16, calibration.observation_count);
+        insert.bindDouble(17, calibration.coverage_score);
+        insert.bindText(18, calibration.report_path);
         insert.stepDone();
     }
 
@@ -835,8 +855,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "cam_imu_tx_m, cam_imu_ty_m, cam_imu_tz_m, "
             "cam_imu_roll_rad, cam_imu_pitch_rad, cam_imu_yaw_rad, "
             "imu_cam_tx_m, imu_cam_ty_m, imu_cam_tz_m, "
-            "imu_cam_roll_rad, imu_cam_pitch_rad, imu_cam_yaw_rad, time_shift_s) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "imu_cam_roll_rad, imu_cam_pitch_rad, imu_cam_yaw_rad, time_shift_s, "
+            "reprojection_rms_px, gyro_rms_radps, accel_rms_mps2, report_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, calibration.camera_id);
         insert.bindText(2, calibration.version);
         insert.bindInt(3, calibration.active ? 1 : 0);
@@ -855,6 +876,10 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindDouble(16, calibration.imu_to_camera.rotation_rpy_rad.y);
         insert.bindDouble(17, calibration.imu_to_camera.rotation_rpy_rad.z);
         insert.bindDouble(18, calibration.time_shift_s);
+        insert.bindDouble(19, calibration.reprojection_rms_px);
+        insert.bindDouble(20, calibration.gyro_rms_radps);
+        insert.bindDouble(21, calibration.accel_rms_mps2);
+        insert.bindText(22, calibration.report_path);
         insert.stepDone();
     }
 
@@ -874,8 +899,12 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     {
         Statement insert(
             db_,
-            "INSERT INTO calibration_tool_config (id, docker_image) VALUES (1, ?)");
+            "INSERT INTO calibration_tool_config "
+            "(id, docker_image, max_reprojection_rms_px, max_camera_imu_rms_px) "
+            "VALUES (1, ?, ?, ?)");
         insert.bindText(1, config.calibration_tools.docker_image);
+        insert.bindDouble(2, config.calibration_tools.max_reprojection_rms_px);
+        insert.bindDouble(3, config.calibration_tools.max_camera_imu_rms_px);
         insert.stepDone();
     }
 

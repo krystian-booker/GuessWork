@@ -60,6 +60,12 @@ struct CalibrateCameraOptions {
     Pose3d camera_to_robot;
     bool has_camera_to_robot{false};
     std::string docker_image;
+    // W2: bypass the post-Kalibr quality gate. Persists the calibration row
+    // even when the reprojection RMS exceeds the threshold or could not
+    // be parsed.
+    bool force{false};
+    // W2: per-run override of CalibrationToolConfig::max_reprojection_rms_px.
+    std::optional<double> max_reprojection_rms_px;
 };
 
 struct ImportCalibrationTargetOptions {
@@ -103,6 +109,10 @@ struct CalibrateCameraImuOptions {
     std::filesystem::path imu_path;
     std::string version;
     std::string docker_image;
+    // W2: bypass the post-Kalibr quality gate.
+    bool force{false};
+    // W2: per-run override of CalibrationToolConfig::max_camera_imu_rms_px.
+    std::optional<double> max_reprojection_rms_px;
 };
 
 struct DaemonOptions {
@@ -140,6 +150,18 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]);
 std::string daemonUsage(const char* argv0);
 const char* daemonStateName(DaemonState state);
 std::string healthToJson(const DaemonHealth& health);
+// W2 acceptance gate. Throws std::runtime_error when the parsed Kalibr
+// metrics fall short of the threshold and force == false; a missing /
+// non-positive RMS is treated as a failure (fail-safe). Exposed in the
+// header so unit tests can drive it directly.
+void throwIfUnacceptableCalibration(
+    const CameraCalibrationConfig& calibration,
+    const CalibrationToolConfig& tool,
+    bool force);
+void throwIfUnacceptableCameraImu(
+    const CameraImuCalibrationConfig& calibration,
+    const CalibrationToolConfig& tool,
+    bool force);
 std::string buildKalibrDockerCommand(const CalibrateCameraOptions& options);
 std::string buildMakeKalibrBagDockerCommand(
     const MakeKalibrBagOptions& options,

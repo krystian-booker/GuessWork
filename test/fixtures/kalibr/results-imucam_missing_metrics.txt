@@ -1,0 +1,5 @@
+Camera-IMU calibration
+
+Reprojection error (cam0):
+        mean: 0.32 [px]
+        std:  0.41 [px]

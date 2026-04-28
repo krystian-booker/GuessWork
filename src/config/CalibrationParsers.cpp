@@ -1,10 +1,13 @@
 #include "posest/config/CalibrationParsers.h"
 
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <utility>
 
@@ -14,6 +17,75 @@
 namespace posest::config {
 
 namespace {
+
+std::string trimLeft(const std::string& line) {
+    std::size_t i = 0;
+    while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) {
+        ++i;
+    }
+    return line.substr(i);
+}
+
+// Try to read "cam<N>" off the start of a (left-trimmed) line. Returns the
+// label ("cam0", "cam12", ...) when matched, otherwise an empty string.
+// Anything may follow — Kalibr writes "cam0:", "cam0 (/topic):", etc.
+std::string detectCamLabel(const std::string& trimmed) {
+    if (trimmed.size() < 4) return {};
+    if (trimmed.compare(0, 3, "cam") != 0) return {};
+    std::size_t i = 3;
+    while (i < trimmed.size() &&
+           std::isdigit(static_cast<unsigned char>(trimmed[i]))) {
+        ++i;
+    }
+    if (i == 3) return {};  // "cam" with no digits — not a label.
+    if (i < trimmed.size()) {
+        const char next = trimmed[i];
+        if (next != ':' && next != ' ' && next != '\t' && next != '(') {
+            return {};
+        }
+    }
+    return trimmed.substr(0, i);
+}
+
+// Pull the second "[a, b]" pair out of a line shaped
+//     reprojection error: [-0.0, 0.0] +- [0.18, 0.19]
+// Returns {a, b} on success, std::nullopt otherwise.
+std::optional<std::pair<double, double>> extractStdPair(const std::string& line) {
+    const auto plus_minus = line.find("+-");
+    if (plus_minus == std::string::npos) return std::nullopt;
+    const auto open = line.find('[', plus_minus);
+    if (open == std::string::npos) return std::nullopt;
+    const auto comma = line.find(',', open);
+    if (comma == std::string::npos) return std::nullopt;
+    const auto close = line.find(']', comma);
+    if (close == std::string::npos) return std::nullopt;
+    try {
+        const double a = std::stod(line.substr(open + 1, comma - open - 1));
+        const double b = std::stod(line.substr(comma + 1, close - comma - 1));
+        return std::make_pair(a, b);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// Pull the first floating-point literal out of a "std:" / "mean:" line.
+std::optional<double> extractFirstDouble(const std::string& line) {
+    std::size_t i = 0;
+    while (i < line.size()) {
+        const char ch = line[i];
+        if (std::isdigit(static_cast<unsigned char>(ch)) || ch == '-' || ch == '+') {
+            try {
+                std::size_t consumed = 0;
+                const double value = std::stod(line.substr(i), &consumed);
+                if (consumed > 0) return value;
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        }
+        ++i;
+    }
+    return std::nullopt;
+}
 
 double yamlDouble(const YAML::Node& node, const char* field) {
     if (!node) {
@@ -347,6 +419,122 @@ runtime::CalibrationTargetConfig parseKalibrTargetYaml(
             "unsupported Kalibr target_type: " + out.type);
     }
 
+    return out;
+}
+
+std::unordered_map<std::string, KalibrCameraQualityMetrics>
+parseKalibrCameraResults(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("failed to open Kalibr results-cam file: " +
+                                 path.string());
+    }
+
+    std::unordered_map<std::string, KalibrCameraQualityMetrics> out;
+    std::string current_cam;
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::string trimmed = trimLeft(line);
+        if (trimmed.empty()) {
+            continue;
+        }
+        const std::string label = detectCamLabel(trimmed);
+        if (!label.empty()) {
+            current_cam = label;
+            // Touch the entry so that callers can distinguish "section
+            // existed but had no metric" from "section was never seen".
+            out.try_emplace(current_cam);
+            continue;
+        }
+        if (current_cam.empty()) continue;
+        if (trimmed.find("reprojection error") != std::string::npos) {
+            if (const auto pair = extractStdPair(trimmed); pair) {
+                out[current_cam].reprojection_rms_px =
+                    std::hypot(pair->first, pair->second);
+            }
+        }
+    }
+    return out;
+}
+
+std::unordered_map<std::string, KalibrCameraImuQualityMetrics>
+parseKalibrCameraImuResults(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("failed to open Kalibr results-imucam file: " +
+                                 path.string());
+    }
+
+    std::unordered_map<std::string, KalibrCameraImuQualityMetrics> out;
+    enum class Section { None, CameraReproj, Gyro, Accel };
+    Section section = Section::None;
+    std::string current_cam;
+    double gyro_std = 0.0;
+    double accel_std = 0.0;
+    bool saw_gyro = false;
+    bool saw_accel = false;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::string trimmed = trimLeft(line);
+        if (trimmed.empty()) {
+            continue;
+        }
+
+        // Section headers reset state. Order matters: check the most
+        // specific (camera-keyed) header first.
+        if (trimmed.find("Reprojection error") != std::string::npos &&
+            trimmed.find("(cam") != std::string::npos) {
+            const auto open = trimmed.find('(');
+            const auto close = trimmed.find(')', open);
+            if (open != std::string::npos && close != std::string::npos &&
+                close > open + 1) {
+                current_cam = trimmed.substr(open + 1, close - open - 1);
+                out.try_emplace(current_cam);
+                section = Section::CameraReproj;
+            }
+            continue;
+        }
+        if (trimmed.find("Gyroscope error") != std::string::npos) {
+            section = Section::Gyro;
+            continue;
+        }
+        if (trimmed.find("Accelerometer error") != std::string::npos) {
+            section = Section::Accel;
+            continue;
+        }
+
+        if (trimmed.find("std") == std::string::npos) continue;
+        const auto value = extractFirstDouble(trimmed);
+        if (!value) continue;
+
+        switch (section) {
+            case Section::CameraReproj:
+                if (!current_cam.empty()) {
+                    out[current_cam].reprojection_rms_px = *value;
+                }
+                break;
+            case Section::Gyro:
+                gyro_std = *value;
+                saw_gyro = true;
+                break;
+            case Section::Accel:
+                accel_std = *value;
+                saw_accel = true;
+                break;
+            case Section::None:
+                break;
+        }
+    }
+
+    // Broadcast the IMU error to every discovered camera.
+    if (saw_gyro || saw_accel) {
+        for (auto& [cam, metrics] : out) {
+            (void)cam;
+            if (saw_gyro) metrics.gyro_rms_radps = gyro_std;
+            if (saw_accel) metrics.accel_rms_mps2 = accel_std;
+        }
+    }
     return out;
 }
 

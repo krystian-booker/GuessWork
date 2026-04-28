@@ -243,6 +243,122 @@ TEST(DaemonOptions, RejectsImportCalibrationTargetMissingFields) {
         std::invalid_argument);
 }
 
+TEST(DaemonOptions, ParsesForceAndMaxReprojectionRmsFlags) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera",
+        "--camera-id",
+        "cam0",
+        "--bag",
+        "/data/calib.bag",
+        "--target",
+        "/data/target.yaml",
+        "--topic",
+        "/cam/image_raw",
+        "--output-dir",
+        "/tmp/kalibr",
+        "--version",
+        "v1",
+        "--camera-to-robot",
+        "0,0,0,0,0,0",
+        "--max-reprojection-rms-px",
+        "0.75",
+        "--force",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_TRUE(options.calibrate_camera.force);
+    ASSERT_TRUE(options.calibrate_camera.max_reprojection_rms_px.has_value());
+    EXPECT_DOUBLE_EQ(*options.calibrate_camera.max_reprojection_rms_px, 0.75);
+    // The flag is shared across both calibrate-* subcommands so the W6
+    // orchestrator can hand it through unchanged.
+    EXPECT_TRUE(options.calibrate_camera_imu.force);
+    ASSERT_TRUE(options.calibrate_camera_imu.max_reprojection_rms_px.has_value());
+    EXPECT_DOUBLE_EQ(*options.calibrate_camera_imu.max_reprojection_rms_px, 0.75);
+}
+
+namespace {
+
+posest::runtime::CameraCalibrationConfig makeRatedCalibration(double rms) {
+    posest::runtime::CameraCalibrationConfig calibration;
+    calibration.camera_id = "cam0";
+    calibration.version = "v1";
+    calibration.reprojection_rms_px = rms;
+    return calibration;
+}
+
+posest::runtime::CalibrationToolConfig makeToolConfig(double max_rms,
+                                                      double max_imu_rms) {
+    posest::runtime::CalibrationToolConfig tool;
+    tool.docker_image = "kalibr:test";
+    tool.max_reprojection_rms_px = max_rms;
+    tool.max_camera_imu_rms_px = max_imu_rms;
+    return tool;
+}
+
+posest::runtime::CameraImuCalibrationConfig makeRatedCameraImu(double rms) {
+    posest::runtime::CameraImuCalibrationConfig calibration;
+    calibration.camera_id = "cam0";
+    calibration.version = "imu-v1";
+    calibration.reprojection_rms_px = rms;
+    return calibration;
+}
+
+}  // namespace
+
+TEST(QualityGate, AcceptsCalibrationBelowThreshold) {
+    const auto cal = makeRatedCalibration(0.5);
+    const auto tool = makeToolConfig(1.0, 1.5);
+    EXPECT_NO_THROW(
+        posest::runtime::throwIfUnacceptableCalibration(cal, tool, false));
+}
+
+TEST(QualityGate, RejectsCalibrationAboveThreshold) {
+    const auto cal = makeRatedCalibration(2.0);
+    const auto tool = makeToolConfig(1.0, 1.5);
+    EXPECT_THROW(
+        posest::runtime::throwIfUnacceptableCalibration(cal, tool, false),
+        std::runtime_error);
+}
+
+TEST(QualityGate, RejectsZeroRmsWhenNotForced) {
+    const auto cal = makeRatedCalibration(0.0);
+    const auto tool = makeToolConfig(1.0, 1.5);
+    EXPECT_THROW(
+        posest::runtime::throwIfUnacceptableCalibration(cal, tool, false),
+        std::runtime_error);
+}
+
+TEST(QualityGate, AcceptsZeroRmsWhenForced) {
+    const auto cal = makeRatedCalibration(0.0);
+    const auto tool = makeToolConfig(1.0, 1.5);
+    EXPECT_NO_THROW(
+        posest::runtime::throwIfUnacceptableCalibration(cal, tool, true));
+}
+
+TEST(QualityGate, AcceptsAboveThresholdWhenForced) {
+    const auto cal = makeRatedCalibration(3.0);
+    const auto tool = makeToolConfig(1.0, 1.5);
+    EXPECT_NO_THROW(
+        posest::runtime::throwIfUnacceptableCalibration(cal, tool, true));
+}
+
+TEST(QualityGate, CameraImuRespectsItsOwnThreshold) {
+    const auto tool = makeToolConfig(1.0, 1.5);
+    EXPECT_NO_THROW(posest::runtime::throwIfUnacceptableCameraImu(
+        makeRatedCameraImu(1.4), tool, false));
+    EXPECT_THROW(
+        posest::runtime::throwIfUnacceptableCameraImu(
+            makeRatedCameraImu(1.6), tool, false),
+        std::runtime_error);
+    // Same value would pass the camera-only gate (1.6 > 1.0 → above) but
+    // fails the IMU-cam gate at 1.5.
+    EXPECT_THROW(
+        posest::runtime::throwIfUnacceptableCalibration(
+            makeRatedCalibration(1.6), tool, false),
+        std::runtime_error);
+}
+
 TEST(DaemonOptions, CalibrateCameraAcceptsTargetIdInsteadOfTargetPath) {
     const char* args[] = {
         "posest_daemon",

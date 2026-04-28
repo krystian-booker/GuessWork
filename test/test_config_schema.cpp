@@ -124,22 +124,30 @@ posest::runtime::RuntimeConfig makeValidConfig() {
     calibration.cx = 640.0;
     calibration.cy = 360.0;
     calibration.distortion_coefficients = {0.1, -0.01, 0.001, -0.001};
+    calibration.reprojection_rms_px = 0.42;
+    calibration.observation_count = 217;
+    calibration.coverage_score = 0.0;
+    calibration.report_path = "/tmp/kalibr/report-cam.pdf";
     config.calibrations.push_back(calibration);
     config.camera_extrinsics.push_back({
         "cam0",
         "v1",
         {{0.2, 0.0, 0.5}, {0.0, 0.1, 0.2}},
     });
-    config.camera_imu_calibrations.push_back({
-        "cam0",
-        "imu-v1",
-        true,
-        "calib/camchain-imucam.yaml",
-        "2026-04-24T00:01:00Z",
-        {{0.01, 0.02, 0.03}, {0.1, 0.2, 0.3}},
-        {{-0.01, -0.02, -0.03}, {-0.1, -0.2, -0.3}},
-        0.004,
-    });
+    posest::runtime::CameraImuCalibrationConfig camera_imu;
+    camera_imu.camera_id = "cam0";
+    camera_imu.version = "imu-v1";
+    camera_imu.active = true;
+    camera_imu.source_file_path = "calib/camchain-imucam.yaml";
+    camera_imu.created_at = "2026-04-24T00:01:00Z";
+    camera_imu.camera_to_imu = {{0.01, 0.02, 0.03}, {0.1, 0.2, 0.3}};
+    camera_imu.imu_to_camera = {{-0.01, -0.02, -0.03}, {-0.1, -0.2, -0.3}};
+    camera_imu.time_shift_s = 0.004;
+    camera_imu.reprojection_rms_px = 0.55;
+    camera_imu.gyro_rms_radps = 0.0021;
+    camera_imu.accel_rms_mps2 = 0.07;
+    camera_imu.report_path = "/tmp/kalibr/report-imucam.pdf";
+    config.camera_imu_calibrations.push_back(camera_imu);
     config.kalibr_datasets.push_back({
         "/tmp/dataset",
         "/tmp/dataset",
@@ -148,6 +156,8 @@ posest::runtime::RuntimeConfig makeValidConfig() {
         {"cam0"},
     });
     config.calibration_tools.docker_image = "kalibr:test";
+    config.calibration_tools.max_reprojection_rms_px = 0.8;
+    config.calibration_tools.max_camera_imu_rms_px = 1.2;
     posest::runtime::CalibrationTargetConfig aprilgrid;
     aprilgrid.id = "apgrid_lab";
     aprilgrid.type = "aprilgrid";
@@ -268,6 +278,8 @@ TEST(SqliteConfigStore, EmptyDatabaseLoadsDefaultRuntimeConfig) {
     EXPECT_TRUE(config.camera_imu_calibrations.empty());
     EXPECT_TRUE(config.kalibr_datasets.empty());
     EXPECT_EQ(config.calibration_tools.docker_image, "kalibr:latest");
+    EXPECT_DOUBLE_EQ(config.calibration_tools.max_reprojection_rms_px, 1.0);
+    EXPECT_DOUBLE_EQ(config.calibration_tools.max_camera_imu_rms_px, 1.5);
     EXPECT_TRUE(config.field_layouts.empty());
     EXPECT_TRUE(config.active_field_layout_id.empty());
     // Migration 11 seeds the default AprilGrid 6x6 row.
@@ -323,6 +335,11 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
     EXPECT_EQ(loaded.calibrations[0].image_width, 1280);
     EXPECT_DOUBLE_EQ(loaded.calibrations[0].fx, 800.0);
     ASSERT_EQ(loaded.calibrations[0].distortion_coefficients.size(), 4u);
+    EXPECT_DOUBLE_EQ(loaded.calibrations[0].reprojection_rms_px, 0.42);
+    EXPECT_EQ(loaded.calibrations[0].observation_count, 217);
+    EXPECT_DOUBLE_EQ(loaded.calibrations[0].coverage_score, 0.0);
+    EXPECT_EQ(loaded.calibrations[0].report_path,
+              "/tmp/kalibr/report-cam.pdf");
     ASSERT_EQ(loaded.camera_extrinsics.size(), 1u);
     EXPECT_EQ(loaded.camera_extrinsics[0].camera_id, "cam0");
     EXPECT_DOUBLE_EQ(loaded.camera_extrinsics[0].camera_to_robot.translation_m.x, 0.2);
@@ -330,9 +347,16 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
     EXPECT_TRUE(loaded.camera_imu_calibrations[0].active);
     EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].camera_to_imu.translation_m.y, 0.02);
     EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].time_shift_s, 0.004);
+    EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].reprojection_rms_px, 0.55);
+    EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].gyro_rms_radps, 0.0021);
+    EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].accel_rms_mps2, 0.07);
+    EXPECT_EQ(loaded.camera_imu_calibrations[0].report_path,
+              "/tmp/kalibr/report-imucam.pdf");
     ASSERT_EQ(loaded.kalibr_datasets.size(), 1u);
     EXPECT_EQ(loaded.kalibr_datasets[0].camera_ids[0], "cam0");
     EXPECT_EQ(loaded.calibration_tools.docker_image, "kalibr:test");
+    EXPECT_DOUBLE_EQ(loaded.calibration_tools.max_reprojection_rms_px, 0.8);
+    EXPECT_DOUBLE_EQ(loaded.calibration_tools.max_camera_imu_rms_px, 1.2);
     ASSERT_EQ(loaded.calibration_targets.size(), 2u);
     // Ordered by id ASC: "apgrid_lab" before "chk_7x6".
     EXPECT_EQ(loaded.calibration_targets[0].id, "apgrid_lab");
@@ -641,6 +665,52 @@ CREATE TABLE teensy_config (
     read_timeout_ms INTEGER NOT NULL DEFAULT 20,
     time_sync_interval_ms INTEGER NOT NULL DEFAULT 1000
 );
+-- Pre-stage the v3/v4 tables so later ALTER TABLE migrations can run
+-- against this fixture. Migration 12 (W2) adds columns to these.
+CREATE TABLE calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    image_width INTEGER NOT NULL,
+    image_height INTEGER NOT NULL,
+    camera_model TEXT NOT NULL,
+    distortion_model TEXT NOT NULL,
+    fx REAL NOT NULL,
+    fy REAL NOT NULL,
+    cx REAL NOT NULL,
+    cy REAL NOT NULL,
+    distortion_coefficients_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (camera_id, version)
+);
+CREATE TABLE camera_imu_calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    cam_imu_tx_m REAL NOT NULL,
+    cam_imu_ty_m REAL NOT NULL,
+    cam_imu_tz_m REAL NOT NULL,
+    cam_imu_roll_rad REAL NOT NULL,
+    cam_imu_pitch_rad REAL NOT NULL,
+    cam_imu_yaw_rad REAL NOT NULL,
+    imu_cam_tx_m REAL NOT NULL,
+    imu_cam_ty_m REAL NOT NULL,
+    imu_cam_tz_m REAL NOT NULL,
+    imu_cam_roll_rad REAL NOT NULL,
+    imu_cam_pitch_rad REAL NOT NULL,
+    imu_cam_yaw_rad REAL NOT NULL,
+    time_shift_s REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (camera_id, version)
+);
+CREATE TABLE calibration_tool_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    docker_image TEXT NOT NULL DEFAULT 'kalibr:latest'
+);
+INSERT INTO calibration_tool_config (id, docker_image)
+    VALUES (1, 'kalibr:latest');
 INSERT INTO teensy_config (id, serial_port, fused_pose_can_id, status_can_id,
     pose_publish_hz, baud_rate)
     VALUES (1, '/dev/ttyACM0', 0, 0, 50.0, 115200);
@@ -686,6 +756,52 @@ CREATE TABLE teensy_config (
     read_timeout_ms INTEGER NOT NULL DEFAULT 20,
     time_sync_interval_ms INTEGER NOT NULL DEFAULT 1000
 );
+-- Pre-stage the v3/v4 tables so later ALTER TABLE migrations can run
+-- against this fixture. Migration 12 (W2) adds columns to these.
+CREATE TABLE calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    image_width INTEGER NOT NULL,
+    image_height INTEGER NOT NULL,
+    camera_model TEXT NOT NULL,
+    distortion_model TEXT NOT NULL,
+    fx REAL NOT NULL,
+    fy REAL NOT NULL,
+    cx REAL NOT NULL,
+    cy REAL NOT NULL,
+    distortion_coefficients_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (camera_id, version)
+);
+CREATE TABLE camera_imu_calibrations (
+    camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_file_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    cam_imu_tx_m REAL NOT NULL,
+    cam_imu_ty_m REAL NOT NULL,
+    cam_imu_tz_m REAL NOT NULL,
+    cam_imu_roll_rad REAL NOT NULL,
+    cam_imu_pitch_rad REAL NOT NULL,
+    cam_imu_yaw_rad REAL NOT NULL,
+    imu_cam_tx_m REAL NOT NULL,
+    imu_cam_ty_m REAL NOT NULL,
+    imu_cam_tz_m REAL NOT NULL,
+    imu_cam_roll_rad REAL NOT NULL,
+    imu_cam_pitch_rad REAL NOT NULL,
+    imu_cam_yaw_rad REAL NOT NULL,
+    time_shift_s REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (camera_id, version)
+);
+CREATE TABLE calibration_tool_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    docker_image TEXT NOT NULL DEFAULT 'kalibr:latest'
+);
+INSERT INTO calibration_tool_config (id, docker_image)
+    VALUES (1, 'kalibr:latest');
 INSERT INTO teensy_config (id, serial_port, fused_pose_can_id, status_can_id,
     pose_publish_hz, baud_rate)
     VALUES (1, '/dev/ttyACM0', 0, 0, 50.0, 460800);
@@ -948,6 +1064,26 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     // square_size_m left at 0 → invalid for checkerboard
     checkerboard_missing_size.calibration_targets.push_back(chk);
     expect_invalid(checkerboard_missing_size);
+
+    auto negative_rms = config;
+    negative_rms.calibrations[0].reprojection_rms_px = -0.1;
+    expect_invalid(negative_rms);
+
+    auto negative_observation_count = config;
+    negative_observation_count.calibrations[0].observation_count = -1;
+    expect_invalid(negative_observation_count);
+
+    auto non_positive_rms_threshold = config;
+    non_positive_rms_threshold.calibration_tools.max_reprojection_rms_px = 0.0;
+    expect_invalid(non_positive_rms_threshold);
+
+    auto non_positive_imu_rms_threshold = config;
+    non_positive_imu_rms_threshold.calibration_tools.max_camera_imu_rms_px = -1.0;
+    expect_invalid(non_positive_imu_rms_threshold);
+
+    auto negative_imu_reprojection_rms = config;
+    negative_imu_reprojection_rms.camera_imu_calibrations[0].reprojection_rms_px = -0.5;
+    expect_invalid(negative_imu_reprojection_rms);
 }
 
 TEST(ConfigStore, InMemoryRoundTripsRuntimeConfig) {

@@ -1,0 +1,18 @@
+Calibration results
+====================
+
+Camera-system parameters:
+        cam0 (/cam/image_raw):
+        type: <CameraGeometry libcalibration.geometries.types.PinholeRadialTangentialCamera>
+        principal point: [319.6, 239.8]
+        focal length: [400.1, 400.2]
+        distortion: [-0.21, 0.04, 0.001, 0.0001]
+        reprojection error: [-0.000000, -0.000000] +- [0.181675, 0.194522]
+
+Target configuration:
+        Type: aprilgrid
+        Tags:
+                Cols: 6
+                Rows: 6
+                Size: 0.088 [m]
+                Spacing: 0.3 [m]

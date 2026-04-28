@@ -136,6 +136,17 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
                     isFinite),
                 "calibration for camera '" + calibration.camera_id +
                     "' has non-finite distortion coefficient");
+        require(isFinite(calibration.reprojection_rms_px) &&
+                    calibration.reprojection_rms_px >= 0.0,
+                "calibration for camera '" + calibration.camera_id +
+                    "' reprojection_rms_px must be finite and >= 0");
+        require(calibration.observation_count >= 0,
+                "calibration for camera '" + calibration.camera_id +
+                    "' observation_count must be >= 0");
+        require(isFinite(calibration.coverage_score) &&
+                    calibration.coverage_score >= 0.0,
+                "calibration for camera '" + calibration.camera_id +
+                    "' coverage_score must be finite and >= 0");
         if (calibration.active) {
             require(active_calibration_cameras.insert(calibration.camera_id).second,
                     "multiple active calibrations for camera: " + calibration.camera_id);
@@ -164,6 +175,18 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
                     isFinite(calibration.time_shift_s),
                 "camera-IMU calibration for camera '" + calibration.camera_id +
                     "' has non-finite value");
+        require(isFinite(calibration.reprojection_rms_px) &&
+                    calibration.reprojection_rms_px >= 0.0,
+                "camera-IMU calibration for camera '" + calibration.camera_id +
+                    "' reprojection_rms_px must be finite and >= 0");
+        require(isFinite(calibration.gyro_rms_radps) &&
+                    calibration.gyro_rms_radps >= 0.0,
+                "camera-IMU calibration for camera '" + calibration.camera_id +
+                    "' gyro_rms_radps must be finite and >= 0");
+        require(isFinite(calibration.accel_rms_mps2) &&
+                    calibration.accel_rms_mps2 >= 0.0,
+                "camera-IMU calibration for camera '" + calibration.camera_id +
+                    "' accel_rms_mps2 must be finite and >= 0");
         if (calibration.active) {
             require(active_camera_imu_cameras.insert(calibration.camera_id).second,
                     "multiple active camera-IMU calibrations for camera: " +
@@ -189,6 +212,12 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
     }
     require(!config.calibration_tools.docker_image.empty(),
             "Kalibr Docker image default is empty");
+    require(config.calibration_tools.max_reprojection_rms_px > 0.0 &&
+                isFinite(config.calibration_tools.max_reprojection_rms_px),
+            "calibration_tools.max_reprojection_rms_px must be finite and > 0");
+    require(config.calibration_tools.max_camera_imu_rms_px > 0.0 &&
+                isFinite(config.calibration_tools.max_camera_imu_rms_px),
+            "calibration_tools.max_camera_imu_rms_px must be finite and > 0");
 
     std::unordered_set<std::string> calibration_target_ids;
     static const std::unordered_set<std::string> kAllowedTargetTypes{
