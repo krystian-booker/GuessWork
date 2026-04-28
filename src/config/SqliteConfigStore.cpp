@@ -417,6 +417,27 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
         }
     }
 
+    {
+        Statement stmt(
+            db_,
+            "SELECT id, type, rows, cols, tag_size_m, tag_spacing_ratio, "
+            "square_size_m, tag_family, notes "
+            "FROM calibration_targets ORDER BY id");
+        while (stmt.stepRow()) {
+            runtime::CalibrationTargetConfig target;
+            target.id = stmt.columnText(0);
+            target.type = stmt.columnText(1);
+            target.rows = stmt.columnInt(2);
+            target.cols = stmt.columnInt(3);
+            target.tag_size_m = stmt.columnDouble(4);
+            target.tag_spacing_ratio = stmt.columnDouble(5);
+            target.square_size_m = stmt.columnDouble(6);
+            target.tag_family = stmt.columnText(7);
+            target.notes = stmt.columnText(8);
+            config.calibration_targets.push_back(std::move(target));
+        }
+    }
+
     std::unordered_map<std::string, std::size_t> field_layout_index;
     {
         Statement stmt(
@@ -695,6 +716,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM field_layouts");
     exec(db_, "DELETE FROM camera_imu_calibrations");
     exec(db_, "DELETE FROM kalibr_datasets");
+    exec(db_, "DELETE FROM calibration_targets");
     exec(db_, "DELETE FROM calibration_tool_config");
     exec(db_, "DELETE FROM camera_extrinsics");
     exec(db_, "DELETE FROM calibrations");
@@ -854,6 +876,25 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             db_,
             "INSERT INTO calibration_tool_config (id, docker_image) VALUES (1, ?)");
         insert.bindText(1, config.calibration_tools.docker_image);
+        insert.stepDone();
+    }
+
+    for (const auto& target : config.calibration_targets) {
+        Statement insert(
+            db_,
+            "INSERT INTO calibration_targets "
+            "(id, type, rows, cols, tag_size_m, tag_spacing_ratio, "
+            " square_size_m, tag_family, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, target.id);
+        insert.bindText(2, target.type);
+        insert.bindInt(3, target.rows);
+        insert.bindInt(4, target.cols);
+        insert.bindDouble(5, target.tag_size_m);
+        insert.bindDouble(6, target.tag_spacing_ratio);
+        insert.bindDouble(7, target.square_size_m);
+        insert.bindText(8, target.tag_family);
+        insert.bindText(9, target.notes);
         insert.stepDone();
     }
 

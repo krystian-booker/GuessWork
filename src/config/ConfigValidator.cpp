@@ -190,6 +190,37 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
     require(!config.calibration_tools.docker_image.empty(),
             "Kalibr Docker image default is empty");
 
+    std::unordered_set<std::string> calibration_target_ids;
+    static const std::unordered_set<std::string> kAllowedTargetTypes{
+        "aprilgrid", "checkerboard", "circlegrid"};
+    for (const auto& target : config.calibration_targets) {
+        require(!target.id.empty(), "calibration target id is empty");
+        require(calibration_target_ids.insert(target.id).second,
+                "duplicate calibration target id: " + target.id);
+        require(kAllowedTargetTypes.count(target.type) == 1,
+                "calibration target '" + target.id +
+                    "' has unsupported type: " + target.type);
+        require(target.rows > 0 && target.cols > 0,
+                "calibration target '" + target.id +
+                    "' must have positive rows and cols");
+        if (target.type == "aprilgrid") {
+            require(target.tag_size_m > 0.0 && isFinite(target.tag_size_m),
+                    "calibration target '" + target.id +
+                        "' aprilgrid tag_size_m must be finite and > 0");
+            require(target.tag_spacing_ratio > 0.0 &&
+                        isFinite(target.tag_spacing_ratio),
+                    "calibration target '" + target.id +
+                        "' aprilgrid tag_spacing_ratio must be finite and > 0");
+            require(!target.tag_family.empty(),
+                    "calibration target '" + target.id +
+                        "' aprilgrid tag_family is empty");
+        } else {
+            require(target.square_size_m > 0.0 && isFinite(target.square_size_m),
+                    "calibration target '" + target.id +
+                        "' square_size_m must be finite and > 0");
+        }
+    }
+
     std::unordered_set<std::string> extrinsics;
     for (const auto& entry : config.camera_extrinsics) {
         require(!entry.camera_id.empty(), "camera extrinsics has empty camera id");

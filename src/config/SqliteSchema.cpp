@@ -452,10 +452,39 @@ COMMIT;
 )sql";
 }
 
+const char* migration11Sql() {
+    // Calibration target catalog. Operators pick a row by id when starting a
+    // calibration run; the daemon materializes a Kalibr-shaped target.yaml on
+    // demand. The default AprilGrid 6x6 row matches Kalibr's bundled board so
+    // a fresh install can run intrinsic calibration without manual setup.
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS calibration_targets (
+    id TEXT PRIMARY KEY NOT NULL,
+    type TEXT NOT NULL,
+    rows INTEGER NOT NULL,
+    cols INTEGER NOT NULL,
+    tag_size_m REAL NOT NULL DEFAULT 0.0,
+    tag_spacing_ratio REAL NOT NULL DEFAULT 0.0,
+    square_size_m REAL NOT NULL DEFAULT 0.0,
+    tag_family TEXT NOT NULL DEFAULT 'tag36h11',
+    notes TEXT NOT NULL DEFAULT ''
+);
+
+INSERT OR IGNORE INTO calibration_targets
+    (id, type, rows, cols, tag_size_m, tag_spacing_ratio, tag_family)
+    VALUES ('default_aprilgrid_6x6', 'aprilgrid', 6, 6, 0.088, 0.3, 'tag36h11');
+
+PRAGMA user_version = 11;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 10;
+    return 11;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -506,6 +535,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 9) {
         exec(db, migration10Sql());
+        migrated_version = 10;
+    }
+    if (migrated_version == 10) {
+        exec(db, migration11Sql());
     }
 }
 

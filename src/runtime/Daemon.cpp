@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include "posest/calibration/CalibrationRecorder.h"
+#include "posest/calibration/CalibrationTargetWriter.h"
 #include "posest/config/CalibrationParsers.h"
 
 namespace posest::runtime {
@@ -142,6 +143,33 @@ void replaceCalibration(
     calibration.active = true;
     config.calibrations.push_back(std::move(calibration));
     config.camera_extrinsics.push_back(std::move(extrinsics));
+}
+
+void upsertCalibrationTarget(
+    RuntimeConfig& config,
+    CalibrationTargetConfig target) {
+    config.calibration_targets.erase(
+        std::remove_if(
+            config.calibration_targets.begin(),
+            config.calibration_targets.end(),
+            [&target](const CalibrationTargetConfig& entry) {
+                return entry.id == target.id;
+            }),
+        config.calibration_targets.end());
+    config.calibration_targets.push_back(std::move(target));
+}
+
+const CalibrationTargetConfig& findCalibrationTarget(
+    const RuntimeConfig& config,
+    const std::string& id) {
+    const auto it = std::find_if(
+        config.calibration_targets.begin(),
+        config.calibration_targets.end(),
+        [&id](const CalibrationTargetConfig& entry) { return entry.id == id; });
+    if (it == config.calibration_targets.end()) {
+        throw std::invalid_argument("unknown calibration target id: " + id);
+    }
+    return *it;
 }
 
 void replaceFieldLayout(
@@ -311,6 +339,11 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
                 throw std::invalid_argument("only one subcommand may be provided");
             }
             options.command = DaemonCommand::CalibrateCameraImu;
+        } else if (arg == "import-calibration-target") {
+            if (options.command != DaemonCommand::Run) {
+                throw std::invalid_argument("only one subcommand may be provided");
+            }
+            options.command = DaemonCommand::ImportCalibrationTarget;
         } else if (arg == "--help" || arg == "-h") {
             options.help = true;
         } else if (arg == "--config") {
@@ -367,6 +400,34 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
             options.calibrate_camera_imu.dataset_dir = path;
         } else if (arg == "--imu") {
             options.calibrate_camera_imu.imu_path = requireValue(i, argc, argv, arg);
+        } else if (arg == "--target-id") {
+            const std::string id = requireValue(i, argc, argv, arg);
+            options.calibrate_camera.target_id = id;
+            options.import_calibration_target.target_id = id;
+        } else if (arg == "--from-yaml") {
+            options.import_calibration_target.from_yaml = requireValue(i, argc, argv, arg);
+        } else if (arg == "--type") {
+            options.import_calibration_target.type = requireValue(i, argc, argv, arg);
+        } else if (arg == "--rows") {
+            options.import_calibration_target.rows =
+                std::stoi(requireValue(i, argc, argv, arg));
+        } else if (arg == "--cols") {
+            options.import_calibration_target.cols =
+                std::stoi(requireValue(i, argc, argv, arg));
+        } else if (arg == "--tag-size-m") {
+            options.import_calibration_target.tag_size_m =
+                std::stod(requireValue(i, argc, argv, arg));
+        } else if (arg == "--tag-spacing-ratio") {
+            options.import_calibration_target.tag_spacing_ratio =
+                std::stod(requireValue(i, argc, argv, arg));
+        } else if (arg == "--square-size-m") {
+            options.import_calibration_target.square_size_m =
+                std::stod(requireValue(i, argc, argv, arg));
+        } else if (arg == "--tag-family") {
+            options.import_calibration_target.tag_family =
+                requireValue(i, argc, argv, arg);
+        } else if (arg == "--notes") {
+            options.import_calibration_target.notes = requireValue(i, argc, argv, arg);
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
@@ -375,11 +436,25 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
     if (options.command == DaemonCommand::CalibrateCamera) {
         const auto& command = options.calibrate_camera;
         if (command.camera_id.empty() || command.bag_path.empty() ||
-            command.target_path.empty() || command.topic.empty() ||
-            command.output_dir.empty() || command.version.empty() ||
-            !command.has_camera_to_robot) {
-            throw std::invalid_argument("calibrate-camera requires camera-id, bag, target, topic, "
-                                        "output-dir, version, and camera-to-robot");
+            (command.target_path.empty() && command.target_id.empty()) ||
+            command.topic.empty() || command.output_dir.empty() ||
+            command.version.empty() || !command.has_camera_to_robot) {
+            throw std::invalid_argument(
+                "calibrate-camera requires camera-id, bag, target/target-id, topic, "
+                "output-dir, version, and camera-to-robot");
+        }
+    } else if (options.command == DaemonCommand::ImportCalibrationTarget) {
+        const auto& command = options.import_calibration_target;
+        if (command.target_id.empty()) {
+            throw std::invalid_argument(
+                "import-calibration-target requires --target-id");
+        }
+        if (command.from_yaml.empty()) {
+            if (command.type.empty() || command.rows <= 0 || command.cols <= 0) {
+                throw std::invalid_argument(
+                    "import-calibration-target without --from-yaml requires "
+                    "--type, --rows, --cols");
+            }
         }
     } else if (options.command == DaemonCommand::ImportFieldLayout) {
         const auto& command = options.import_field_layout;
@@ -416,7 +491,8 @@ std::string daemonUsage(const char* argv0) {
     out << "usage: " << exe
         << " [--config PATH] [--health-once] [--health-interval-ms N]\n"
         << "       " << exe
-        << " calibrate-camera --config PATH --camera-id ID --bag BAG --target TARGET "
+        << " calibrate-camera --config PATH --camera-id ID --bag BAG "
+           "(--target TARGET | --target-id ID) "
            "--topic TOPIC --output-dir DIR --version VERSION "
            "--camera-to-robot x,y,z,roll,pitch,yaw --docker-image IMAGE\n"
         << "       " << exe
@@ -430,7 +506,12 @@ std::string daemonUsage(const char* argv0) {
            "[--docker-image IMAGE]\n"
         << "       " << exe
         << " calibrate-camera-imu --config PATH --dataset DIR --target TARGET.yaml "
-           "--imu IMU.yaml --version VERSION [--docker-image IMAGE]\n";
+           "--imu IMU.yaml --version VERSION [--docker-image IMAGE]\n"
+        << "       " << exe
+        << " import-calibration-target --config PATH --target-id ID "
+           "(--from-yaml PATH | --type TYPE --rows N --cols N "
+           "[--tag-size-m X] [--tag-spacing-ratio X] [--square-size-m X] "
+           "[--tag-family STR] [--notes ...])\n";
     return out.str();
 }
 
@@ -657,6 +738,16 @@ void runConfigCommand(
         auto kalibr_options = options.calibrate_camera;
         kalibr_options.docker_image =
             resolvedKalibrDockerImage(kalibr_options.docker_image, config);
+        // Resolve --target-id to a materialized target.yaml when --target was
+        // not explicitly given. Path precedence: --target wins over --target-id.
+        if (kalibr_options.target_path.empty() && !kalibr_options.target_id.empty()) {
+            const auto& target = findCalibrationTarget(config, kalibr_options.target_id);
+            std::filesystem::create_directories(kalibr_options.output_dir);
+            const auto materialized =
+                kalibr_options.output_dir / (target.id + "-target.yaml");
+            calibration::writeKalibrTargetYaml(target, materialized);
+            kalibr_options.target_path = materialized;
+        }
         const auto command = buildKalibrDockerCommand(kalibr_options);
         const int rc = std::system(command.c_str());
         if (rc != 0) {
@@ -686,6 +777,29 @@ void runConfigCommand(
             options.import_field_layout.field_id,
             options.import_field_layout.name);
         replaceFieldLayout(config, std::move(layout), options.import_field_layout.activate);
+        config_store.saveRuntimeConfig(config);
+        return;
+    }
+
+    if (options.command == DaemonCommand::ImportCalibrationTarget) {
+        auto config = config_store.loadRuntimeConfig();
+        const auto& cmd = options.import_calibration_target;
+        CalibrationTargetConfig target;
+        if (!cmd.from_yaml.empty()) {
+            target = config::parseKalibrTargetYaml(cmd.from_yaml, cmd.target_id);
+            target.notes = cmd.notes;
+        } else {
+            target.id = cmd.target_id;
+            target.type = cmd.type;
+            target.rows = cmd.rows;
+            target.cols = cmd.cols;
+            target.tag_size_m = cmd.tag_size_m;
+            target.tag_spacing_ratio = cmd.tag_spacing_ratio;
+            target.square_size_m = cmd.square_size_m;
+            target.tag_family = cmd.tag_family;
+            target.notes = cmd.notes;
+        }
+        upsertCalibrationTarget(config, std::move(target));
         config_store.saveRuntimeConfig(config);
         return;
     }

@@ -157,6 +157,118 @@ TEST(DaemonOptions, ParsesCalibrationAndFieldImportCommands) {
     EXPECT_EQ(imu.calibrate_camera_imu.version, "imu-v1");
 }
 
+TEST(DaemonOptions, ParsesImportCalibrationTargetExplicit) {
+    const char* args[] = {
+        "posest_daemon",
+        "import-calibration-target",
+        "--config",
+        "/tmp/robot.db",
+        "--target-id",
+        "apgrid_88",
+        "--type",
+        "aprilgrid",
+        "--rows",
+        "6",
+        "--cols",
+        "6",
+        "--tag-size-m",
+        "0.088",
+        "--tag-spacing-ratio",
+        "0.3",
+        "--tag-family",
+        "tag36h11",
+        "--notes",
+        "lab board",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.command, posest::runtime::DaemonCommand::ImportCalibrationTarget);
+    EXPECT_EQ(options.import_calibration_target.target_id, "apgrid_88");
+    EXPECT_EQ(options.import_calibration_target.type, "aprilgrid");
+    EXPECT_EQ(options.import_calibration_target.rows, 6);
+    EXPECT_EQ(options.import_calibration_target.cols, 6);
+    EXPECT_DOUBLE_EQ(options.import_calibration_target.tag_size_m, 0.088);
+    EXPECT_DOUBLE_EQ(options.import_calibration_target.tag_spacing_ratio, 0.3);
+    EXPECT_EQ(options.import_calibration_target.tag_family, "tag36h11");
+    EXPECT_EQ(options.import_calibration_target.notes, "lab board");
+}
+
+TEST(DaemonOptions, ParsesImportCalibrationTargetFromYaml) {
+    const char* args[] = {
+        "posest_daemon",
+        "import-calibration-target",
+        "--config",
+        "/tmp/robot.db",
+        "--target-id",
+        "apgrid_from_yaml",
+        "--from-yaml",
+        "/tmp/target.yaml",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.command, posest::runtime::DaemonCommand::ImportCalibrationTarget);
+    EXPECT_EQ(options.import_calibration_target.target_id, "apgrid_from_yaml");
+    EXPECT_EQ(options.import_calibration_target.from_yaml,
+              std::filesystem::path("/tmp/target.yaml"));
+}
+
+TEST(DaemonOptions, RejectsImportCalibrationTargetMissingFields) {
+    const char* missing_target_id[] = {
+        "posest_daemon",
+        "import-calibration-target",
+        "--type",
+        "aprilgrid",
+        "--rows",
+        "6",
+        "--cols",
+        "6",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(missing_target_id) / sizeof(missing_target_id[0])),
+            missing_target_id),
+        std::invalid_argument);
+
+    const char* missing_explicit_fields[] = {
+        "posest_daemon",
+        "import-calibration-target",
+        "--target-id",
+        "apgrid_88",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(
+                sizeof(missing_explicit_fields) / sizeof(missing_explicit_fields[0])),
+            missing_explicit_fields),
+        std::invalid_argument);
+}
+
+TEST(DaemonOptions, CalibrateCameraAcceptsTargetIdInsteadOfTargetPath) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera",
+        "--camera-id",
+        "cam0",
+        "--bag",
+        "/data/calib.bag",
+        "--target-id",
+        "apgrid_88",
+        "--topic",
+        "/cam/image_raw",
+        "--output-dir",
+        "/tmp/kalibr",
+        "--version",
+        "v1",
+        "--camera-to-robot",
+        "0.1,0.2,0.3,0.0,0.1,0.2",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.command, posest::runtime::DaemonCommand::CalibrateCamera);
+    EXPECT_EQ(options.calibrate_camera.target_id, "apgrid_88");
+    EXPECT_TRUE(options.calibrate_camera.target_path.empty());
+}
+
 TEST(DaemonOptions, BuildsKalibrDockerCommandWithExpectedMounts) {
     posest::runtime::CalibrateCameraOptions options;
     options.bag_path = "/home/team/calib/cam.bag";

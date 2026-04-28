@@ -298,6 +298,58 @@ runtime::CameraImuCalibrationConfig parseKalibrCameraImuCalibration(
     return out;
 }
 
+runtime::CalibrationTargetConfig parseKalibrTargetYaml(
+    const std::filesystem::path& path,
+    std::string id) {
+    const YAML::Node root = YAML::LoadFile(path.string());
+    if (!root || !root.IsMap()) {
+        throw std::invalid_argument("Kalibr target YAML must be a map: " + path.string());
+    }
+    const auto type_node = root["target_type"];
+    if (!type_node) {
+        throw std::invalid_argument("Kalibr target YAML missing target_type: " + path.string());
+    }
+
+    runtime::CalibrationTargetConfig out;
+    out.id = std::move(id);
+    out.type = type_node.as<std::string>();
+
+    if (out.type == "aprilgrid") {
+        out.cols = root["tagCols"].as<int>();
+        out.rows = root["tagRows"].as<int>();
+        out.tag_size_m = root["tagSize"].as<double>();
+        out.tag_spacing_ratio = root["tagSpacing"].as<double>();
+        const auto family = root["tagFamily"];
+        out.tag_family = family ? family.as<std::string>() : std::string("tag36h11");
+    } else if (out.type == "checkerboard") {
+        out.cols = root["targetCols"].as<int>();
+        out.rows = root["targetRows"].as<int>();
+        const auto row_spacing = root["rowSpacingMeters"];
+        const auto col_spacing = root["colSpacingMeters"];
+        if (!row_spacing || !col_spacing) {
+            throw std::invalid_argument(
+                "Kalibr checkerboard target missing row/col spacing: " + path.string());
+        }
+        out.square_size_m = row_spacing.as<double>();
+        // Kalibr accepts row != col spacing, but our schema collapses them; keep
+        // the row value and ignore col when they disagree to avoid silently
+        // losing a non-square target.
+        if (std::abs(row_spacing.as<double>() - col_spacing.as<double>()) > 1e-9) {
+            throw std::invalid_argument(
+                "non-square checkerboard targets are not supported: " + path.string());
+        }
+    } else if (out.type == "circlegrid") {
+        out.cols = root["targetCols"].as<int>();
+        out.rows = root["targetRows"].as<int>();
+        out.square_size_m = root["spacingMeters"].as<double>();
+    } else {
+        throw std::invalid_argument(
+            "unsupported Kalibr target_type: " + out.type);
+    }
+
+    return out;
+}
+
 Pose3d parsePoseCsv(const std::string& value) {
     std::array<double, 6> values{};
     std::stringstream in(value);

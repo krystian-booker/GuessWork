@@ -32,4 +32,10 @@ runtime::CameraImuCalibrationConfig parseKalibrCameraImuCalibration(
 
 Pose3d parsePoseCsv(const std::string& value);
 
+// Parse a Kalibr target.yaml (aprilgrid / checkerboard / circlegrid) and
+// return a CalibrationTargetConfig with the caller-supplied id.
+runtime::CalibrationTargetConfig parseKalibrTargetYaml(
+    const std::filesystem::path& path,
+    std::string id);
+
 }  // namespace posest::config

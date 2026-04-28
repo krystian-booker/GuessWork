@@ -71,6 +71,7 @@ target_link_libraries(posest_runtime PUBLIC posest_core posest_camera posest_con
 # --- posest_calibration: dataset recording and Kalibr Docker command helpers
 add_library(posest_calibration
     src/calibration/CalibrationRecorder.cpp
+    src/calibration/CalibrationTargetWriter.cpp
 )
 target_link_libraries(posest_calibration PUBLIC
     posest_core
@@ -207,6 +208,7 @@ add_executable(posest_tests
     test/test_teensy_service.cpp
     test/test_time_sync_filter.cpp
     test/test_calibration_recorder.cpp
+    test/test_calibration_target_writer.cpp
     test/test_config_schema.cpp
     test/test_camera_producer.cpp
     test/test_fusion_service.cpp

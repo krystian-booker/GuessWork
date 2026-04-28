@@ -148,6 +148,23 @@ posest::runtime::RuntimeConfig makeValidConfig() {
         {"cam0"},
     });
     config.calibration_tools.docker_image = "kalibr:test";
+    posest::runtime::CalibrationTargetConfig aprilgrid;
+    aprilgrid.id = "apgrid_lab";
+    aprilgrid.type = "aprilgrid";
+    aprilgrid.rows = 6;
+    aprilgrid.cols = 6;
+    aprilgrid.tag_size_m = 0.088;
+    aprilgrid.tag_spacing_ratio = 0.3;
+    aprilgrid.tag_family = "tag36h11";
+    aprilgrid.notes = "lab calibration board";
+    config.calibration_targets.push_back(aprilgrid);
+    posest::runtime::CalibrationTargetConfig checkerboard;
+    checkerboard.id = "chk_7x6";
+    checkerboard.type = "checkerboard";
+    checkerboard.rows = 7;
+    checkerboard.cols = 6;
+    checkerboard.square_size_m = 0.025;
+    config.calibration_targets.push_back(checkerboard);
     posest::runtime::FieldLayoutConfig field;
     field.id = "reefscape";
     field.name = "Reefscape";
@@ -253,6 +270,11 @@ TEST(SqliteConfigStore, EmptyDatabaseLoadsDefaultRuntimeConfig) {
     EXPECT_EQ(config.calibration_tools.docker_image, "kalibr:latest");
     EXPECT_TRUE(config.field_layouts.empty());
     EXPECT_TRUE(config.active_field_layout_id.empty());
+    // Migration 11 seeds the default AprilGrid 6x6 row.
+    ASSERT_EQ(config.calibration_targets.size(), 1u);
+    EXPECT_EQ(config.calibration_targets[0].id, "default_aprilgrid_6x6");
+    EXPECT_EQ(config.calibration_targets[0].type, "aprilgrid");
+    EXPECT_DOUBLE_EQ(config.calibration_targets[0].tag_size_m, 0.088);
     EXPECT_DOUBLE_EQ(config.teensy.pose_publish_hz, 50.0);
     std::filesystem::remove(path);
 }
@@ -311,6 +333,17 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
     ASSERT_EQ(loaded.kalibr_datasets.size(), 1u);
     EXPECT_EQ(loaded.kalibr_datasets[0].camera_ids[0], "cam0");
     EXPECT_EQ(loaded.calibration_tools.docker_image, "kalibr:test");
+    ASSERT_EQ(loaded.calibration_targets.size(), 2u);
+    // Ordered by id ASC: "apgrid_lab" before "chk_7x6".
+    EXPECT_EQ(loaded.calibration_targets[0].id, "apgrid_lab");
+    EXPECT_EQ(loaded.calibration_targets[0].type, "aprilgrid");
+    EXPECT_DOUBLE_EQ(loaded.calibration_targets[0].tag_size_m, 0.088);
+    EXPECT_DOUBLE_EQ(loaded.calibration_targets[0].tag_spacing_ratio, 0.3);
+    EXPECT_EQ(loaded.calibration_targets[0].tag_family, "tag36h11");
+    EXPECT_EQ(loaded.calibration_targets[1].id, "chk_7x6");
+    EXPECT_EQ(loaded.calibration_targets[1].type, "checkerboard");
+    EXPECT_EQ(loaded.calibration_targets[1].rows, 7);
+    EXPECT_DOUBLE_EQ(loaded.calibration_targets[1].square_size_m, 0.025);
     ASSERT_EQ(loaded.field_layouts.size(), 1u);
     EXPECT_EQ(loaded.active_field_layout_id, "reefscape");
     ASSERT_EQ(loaded.field_layouts[0].tags.size(), 1u);
@@ -886,6 +919,35 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     auto bad_teensy_serial_timing = config;
     bad_teensy_serial_timing.teensy.read_timeout_ms = 0;
     expect_invalid(bad_teensy_serial_timing);
+
+    auto duplicate_target = config;
+    posest::runtime::CalibrationTargetConfig t;
+    t.id = "dup";
+    t.type = "aprilgrid";
+    t.rows = 6;
+    t.cols = 6;
+    t.tag_size_m = 0.088;
+    t.tag_spacing_ratio = 0.3;
+    duplicate_target.calibration_targets.push_back(t);
+    duplicate_target.calibration_targets.push_back(t);
+    expect_invalid(duplicate_target);
+
+    auto unknown_target_type = config;
+    posest::runtime::CalibrationTargetConfig bad_type = t;
+    bad_type.id = "weird";
+    bad_type.type = "fiducial";
+    unknown_target_type.calibration_targets.push_back(bad_type);
+    expect_invalid(unknown_target_type);
+
+    auto checkerboard_missing_size = config;
+    posest::runtime::CalibrationTargetConfig chk;
+    chk.id = "chk_no_size";
+    chk.type = "checkerboard";
+    chk.rows = 7;
+    chk.cols = 6;
+    // square_size_m left at 0 → invalid for checkerboard
+    checkerboard_missing_size.calibration_targets.push_back(chk);
+    expect_invalid(checkerboard_missing_size);
 }
 
 TEST(ConfigStore, InMemoryRoundTripsRuntimeConfig) {

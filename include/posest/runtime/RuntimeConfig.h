@@ -57,6 +57,26 @@ struct CalibrationToolConfig {
     std::string docker_image{"kalibr:latest"};
 };
 
+// Calibration target description (e.g. AprilGrid, checkerboard, circle grid).
+// Persisted in SQLite so the operator selects a target by id when starting a
+// run; the daemon then materializes a Kalibr-shaped target.yaml on demand.
+struct CalibrationTargetConfig {
+    std::string id;
+    // Allowed: "aprilgrid", "checkerboard", "circlegrid".
+    std::string type;
+    int rows{0};
+    int cols{0};
+    // AprilGrid: edge length of one tag, in meters.
+    double tag_size_m{0.0};
+    // AprilGrid: spacing-to-size ratio (Kalibr's tagSpacing).
+    double tag_spacing_ratio{0.0};
+    // Checkerboard / circlegrid: square or circle spacing, in meters.
+    double square_size_m{0.0};
+    // AprilGrid family. Defaults to tag36h11 to match Kalibr's bundled board.
+    std::string tag_family{"tag36h11"};
+    std::string notes;
+};
+
 struct FieldTagConfig {
     int tag_id{0};
     Pose3d field_to_tag;
@@ -229,6 +249,7 @@ struct RuntimeConfig {
     std::vector<CameraImuCalibrationConfig> camera_imu_calibrations;
     std::vector<KalibrDatasetConfig> kalibr_datasets;
     CalibrationToolConfig calibration_tools;
+    std::vector<CalibrationTargetConfig> calibration_targets;
     std::vector<FieldLayoutConfig> field_layouts;
     std::string active_field_layout_id;
     std::vector<CameraTriggerConfig> camera_triggers;

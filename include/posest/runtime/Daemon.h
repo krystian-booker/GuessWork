@@ -42,18 +42,40 @@ enum class DaemonCommand {
     RecordKalibrDataset,
     MakeKalibrBag,
     CalibrateCameraImu,
+    ImportCalibrationTarget,
 };
 
 struct CalibrateCameraOptions {
     std::string camera_id;
     std::filesystem::path bag_path;
+    // Path to a Kalibr-shaped target.yaml. Either this or target_id must be
+    // set. When both are present target_path wins (operator override).
     std::filesystem::path target_path;
+    // Calibration target id to look up in RuntimeConfig::calibration_targets;
+    // the daemon materializes the Kalibr YAML to a tempfile for the run.
+    std::string target_id;
     std::string topic;
     std::filesystem::path output_dir;
     std::string version;
     Pose3d camera_to_robot;
     bool has_camera_to_robot{false};
     std::string docker_image;
+};
+
+struct ImportCalibrationTargetOptions {
+    std::string target_id;
+    // When --from-yaml is given, every other field is ignored: the Kalibr
+    // YAML at this path is parsed into a CalibrationTargetConfig.
+    std::filesystem::path from_yaml;
+    // Otherwise these populate the row directly.
+    std::string type;
+    int rows{0};
+    int cols{0};
+    double tag_size_m{0.0};
+    double tag_spacing_ratio{0.0};
+    double square_size_m{0.0};
+    std::string tag_family{"tag36h11"};
+    std::string notes;
 };
 
 struct ImportFieldLayoutOptions {
@@ -94,6 +116,7 @@ struct DaemonOptions {
     RecordKalibrDatasetOptions record_kalibr_dataset;
     MakeKalibrBagOptions make_kalibr_bag;
     CalibrateCameraImuOptions calibrate_camera_imu;
+    ImportCalibrationTargetOptions import_calibration_target;
 };
 
 struct DaemonHealth {
