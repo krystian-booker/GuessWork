@@ -63,6 +63,12 @@ public:
     // Test introspection.
     std::uint64_t imuPushCount() const { return imu_push_count_.load(); }
     std::uint64_t framePushCount() const { return frame_push_count_.load(); }
+    // teensy_time_us of the most recent IMU push (the value the
+    // consumer handed in, not the frame's). 0 before any push. Used
+    // by the wire-level timestamp regression test.
+    std::uint64_t lastImuTeensyTimeUs() const {
+        return last_imu_teensy_time_us_.load();
+    }
 
 private:
     Config config_;
@@ -72,6 +78,7 @@ private:
     std::uint64_t frame_index_{0};
     std::atomic<std::uint64_t> imu_push_count_{0};
     std::atomic<std::uint64_t> frame_push_count_{0};
+    std::atomic<std::uint64_t> last_imu_teensy_time_us_{0};
     std::atomic<bool> running_{false};
 };
 

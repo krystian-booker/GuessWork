@@ -191,10 +191,14 @@ TEST(KimeraVioConsumer, ForwardsImuSamplesToBackend) {
         std::move(backend), {});
     consumer.start();
 
-    // Push 5 IMU samples timestamped before the next frame.
-    for (int i = 0; i < 5; ++i) {
+    // Push 5 IMU samples whose teensy times bracket the next frame's.
+    // The consumer compares each sample's teensy_time_us directly
+    // against frame.teensy_time_us — no host-clock round trip.
+    for (std::uint64_t i = 0; i < 5; ++i) {
         posest::ImuSample s;
-        s.timestamp = posest::Timestamp{std::chrono::microseconds(500 + 100 * i)};
+        const std::uint64_t t = 500 + 100 * i;
+        s.timestamp = posest::Timestamp{std::chrono::microseconds(t)};
+        s.teensy_time_us = t;
         s.accel_mps2 = {0.0, 0.0, 9.81};
         imu_bus.publish(s);
     }
@@ -203,6 +207,38 @@ TEST(KimeraVioConsumer, ForwardsImuSamplesToBackend) {
 
     EXPECT_GE(backend_ptr->imuPushCount(), 5u);
     EXPECT_GE(backend_ptr->framePushCount(), 1u);
+
+    consumer.stop();
+}
+
+// Regression test for the wire-level fix: the backend must receive each
+// sample's own teensy_time_us, not the frame's. Before the fix the
+// consumer stamped every IMU push with frame.teensy_time_us because
+// ImuSample dropped the field on the bus.
+TEST(KimeraVioConsumer, ImuTimestampPropagatedToBackend) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    auto* backend_ptr = backend.get();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), {});
+    consumer.start();
+
+    posest::ImuSample s;
+    s.timestamp = posest::Timestamp{std::chrono::microseconds(1234)};
+    s.teensy_time_us = 1234;
+    s.accel_mps2 = {0.0, 0.0, 9.81};
+    imu_bus.publish(s);
+
+    // Frame at t=5000 us — distinct from the sample's 1234, so the
+    // assertion below would fail under the old work-around that
+    // stamped IMU pushes with frame_teensy_us.
+    deliverPaced(consumer, makeFrame(5'000, 0, 0.05));
+
+    ASSERT_GE(backend_ptr->imuPushCount(), 1u);
+    EXPECT_EQ(backend_ptr->lastImuTeensyTimeUs(), 1234u);
 
     consumer.stop();
 }

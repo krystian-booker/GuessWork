@@ -66,13 +66,14 @@ bool FakeVioBackend::tryPushFrame(std::uint64_t teensy_time_us,
     return true;
 }
 
-bool FakeVioBackend::tryPushImu(std::uint64_t /*teensy_time_us*/,
+bool FakeVioBackend::tryPushImu(std::uint64_t teensy_time_us,
                                 const Eigen::Vector3d& /*accel_mps2*/,
                                 const Eigen::Vector3d& /*gyro_radps*/) {
     if (!running_.load()) {
         return false;
     }
     imu_push_count_.fetch_add(1);
+    last_imu_teensy_time_us_.store(teensy_time_us);
     return true;
 }
 

@@ -173,6 +173,7 @@ TEST(TeensyService, PublishesImuSamplesEvenBeforeTimeSync) {
     ASSERT_TRUE(measurement.has_value());
     const auto& imu = std::get<posest::ImuSample>(*measurement);
     EXPECT_DOUBLE_EQ(imu.accel_mps2.y, 2.0);
+    EXPECT_EQ(imu.teensy_time_us, 10u);
     EXPECT_NE(imu.status_flags & posest::teensy::kStatusUnsynchronizedTime, 0u);
 
     service.stop();

@@ -220,32 +220,17 @@ void KimeraVioConsumer::imuDrainerLoop() {
 }
 
 void KimeraVioConsumer::drainImuUpTo(std::uint64_t frame_teensy_us) {
-    // Pop samples whose timestamp <= frame_teensy_us under the buffer
+    // Pop samples whose Teensy time <= frame_teensy_us under the buffer
     // mutex, then push them to the backend without holding the mutex
     // (Kimera's tryPushImu may take its own internal lock and we must
-    // not invert that ordering).
+    // not invert that ordering). Comparison is wire-level: ImuSample
+    // carries the same teensy_time_us as Frame, so no time-sync round
+    // trip is needed.
     std::deque<ImuSample> to_push;
     {
         std::lock_guard<std::mutex> g(imu_buffer_mu_);
         while (!imu_buffer_.empty()) {
-            // ImuSample carries a host steady_clock timestamp; we need
-            // to compare on the Teensy domain. The TimeSyncFilter is
-            // monotonic on average, so converting the steady_clock
-            // value back is a round-trip we want to avoid. The wire
-            // ImuPayload has teensy_time_us but TeensyService strips
-            // it before publishing onto the bus (MeasurementTypes.h:72
-            // does not carry it). We therefore convert frame_teensy_us
-            // to host time via the TeensyTimeConverter and compare in
-            // the steady_clock domain.
-            //
-            // Note: this is slightly weaker than wire-level matching
-            // because the time-sync filter has small skew. For VIO
-            // preintegration that's fine — Kimera tolerates IMU
-            // samples a few milliseconds out of order around the frame
-            // boundary.
-            const Timestamp frame_host_time = time_converter_(
-                frame_teensy_us, std::chrono::steady_clock::now());
-            if (imu_buffer_.front().timestamp > frame_host_time) {
+            if (imu_buffer_.front().teensy_time_us > frame_teensy_us) {
                 break;
             }
             to_push.push_back(std::move(imu_buffer_.front()));
@@ -258,13 +243,7 @@ void KimeraVioConsumer::drainImuUpTo(std::uint64_t frame_teensy_us) {
             s.accel_mps2.x, s.accel_mps2.y, s.accel_mps2.z);
         const Eigen::Vector3d gyro(
             s.gyro_radps.x, s.gyro_radps.y, s.gyro_radps.z);
-        // We use frame_teensy_us as the IMU timestamp here because the
-        // host-side ImuSample dropped its teensy_time_us. The backend
-        // receives a stream of IMU samples bracketing each frame; for
-        // the FakeVioBackend this is irrelevant and for KimeraBackend
-        // a follow-up wire-level fix (carry teensy_time_us on
-        // ImuSample) will replace this approximation. TODO(IMU-T).
-        const bool ok = backend_->tryPushImu(frame_teensy_us, accel, gyro);
+        const bool ok = backend_->tryPushImu(s.teensy_time_us, accel, gyro);
         std::lock_guard<std::mutex> g(stats_mu_);
         if (ok) {
             ++stats_.imu_pushed;

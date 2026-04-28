@@ -45,13 +45,14 @@ TEST(CalibrationRecorder, WritesMatchedFramesImuTriggersAndSessionMetadata) {
         1,
         0,
     });
-    recorder.publish(posest::ImuSample{
-        anchor + std::chrono::microseconds(50),
-        {1.0, 2.0, 3.0},
-        {4.0, 5.0, 6.0},
-        25.0,
-        0,
-    });
+    {
+        posest::ImuSample s;
+        s.timestamp = anchor + std::chrono::microseconds(50);
+        s.accel_mps2 = {1.0, 2.0, 3.0};
+        s.gyro_radps = {4.0, 5.0, 6.0};
+        s.temperature_c = 25.0;
+        recorder.publish(s);
+    }
 
     auto frame = std::make_shared<posest::Frame>();
     frame->camera_id = "cam0";

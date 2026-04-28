@@ -273,6 +273,7 @@ void TeensyService::handleFrame(const Frame& frame) {
 
             ImuSample sample;
             sample.timestamp = timestampFromTeensyTime(decoded->teensy_time_us, now);
+            sample.teensy_time_us = decoded->teensy_time_us;
             sample.accel_mps2 = decoded->accel_mps2;
             sample.gyro_radps = decoded->gyro_radps;
             sample.temperature_c = decoded->temperature_c;

@@ -71,6 +71,13 @@ struct VioMeasurement {
 
 struct ImuSample {
     Timestamp timestamp{};
+    // Teensy hardware-clock microseconds, copied from
+    // teensy::ImuPayload::teensy_time_us by TeensyService at decode
+    // time. 0 only on synthetic samples constructed by tests that don't
+    // route through TeensyService. KimeraVioConsumer compares this
+    // directly against Frame::teensy_time_us, avoiding a host-clock
+    // round-trip through the time-sync filter.
+    std::uint64_t teensy_time_us{0};
     Vec3 accel_mps2;
     Vec3 gyro_radps;
     std::optional<double> temperature_c;
