@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -423,6 +424,16 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
                 throw std::invalid_argument("only one subcommand may be provided");
             }
             options.command = DaemonCommand::ImportCalibrationTarget;
+        } else if (arg == "list-kalibr-datasets") {
+            if (options.command != DaemonCommand::Run) {
+                throw std::invalid_argument("only one subcommand may be provided");
+            }
+            options.command = DaemonCommand::ListKalibrDatasets;
+        } else if (arg == "delete-kalibr-dataset") {
+            if (options.command != DaemonCommand::Run) {
+                throw std::invalid_argument("only one subcommand may be provided");
+            }
+            options.command = DaemonCommand::DeleteKalibrDataset;
         } else if (arg == "--help" || arg == "-h") {
             options.help = true;
         } else if (arg == "--config") {
@@ -516,6 +527,12 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
             const double value = std::stod(requireValue(i, argc, argv, arg));
             options.calibrate_camera.max_reprojection_rms_px = value;
             options.calibrate_camera_imu.max_reprojection_rms_px = value;
+        } else if (arg == "--json") {
+            options.list_kalibr_datasets.json = true;
+        } else if (arg == "--id") {
+            options.delete_kalibr_dataset.id = requireValue(i, argc, argv, arg);
+        } else if (arg == "--remove-files") {
+            options.delete_kalibr_dataset.remove_files = true;
         } else if (arg == "--require-imu") {
             const std::string value = requireValue(i, argc, argv, arg);
             if (value == "auto") {
@@ -558,6 +575,10 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
                     "import-calibration-target without --from-yaml requires "
                     "--type, --rows, --cols");
             }
+        }
+    } else if (options.command == DaemonCommand::DeleteKalibrDataset) {
+        if (options.delete_kalibr_dataset.id.empty()) {
+            throw std::invalid_argument("delete-kalibr-dataset requires --id");
         }
     } else if (options.command == DaemonCommand::ImportFieldLayout) {
         const auto& command = options.import_field_layout;
@@ -657,7 +678,11 @@ std::string daemonUsage(const char* argv0) {
         << " import-calibration-target --config PATH --target-id ID "
            "(--from-yaml PATH | --type TYPE --rows N --cols N "
            "[--tag-size-m X] [--tag-spacing-ratio X] [--square-size-m X] "
-           "[--tag-family STR] [--notes ...])\n";
+           "[--tag-family STR] [--notes ...])\n"
+        << "       " << exe
+        << " list-kalibr-datasets --config PATH [--json]\n"
+        << "       " << exe
+        << " delete-kalibr-dataset --config PATH --id ID [--remove-files]\n";
     return out.str();
 }
 
@@ -1016,6 +1041,81 @@ void runConfigCommand(
         }
         upsertCalibrationTarget(config, std::move(target));
         config_store.saveRuntimeConfig(config);
+        return;
+    }
+
+    if (options.command == DaemonCommand::ListKalibrDatasets) {
+        const auto config = config_store.loadRuntimeConfig();
+        if (options.list_kalibr_datasets.json) {
+            nlohmann::json out = nlohmann::json::array();
+            for (const auto& dataset : config.kalibr_datasets) {
+                std::error_code ec;
+                const bool on_disk =
+                    std::filesystem::is_directory(dataset.path, ec);
+                out.push_back({
+                    {"id", dataset.id},
+                    {"path", dataset.path},
+                    {"created_at", dataset.created_at},
+                    {"duration_s", dataset.duration_s},
+                    {"camera_ids", dataset.camera_ids},
+                    {"exists_on_disk", on_disk},
+                });
+            }
+            std::cout << out.dump(2) << "\n";
+        } else {
+            for (const auto& dataset : config.kalibr_datasets) {
+                std::error_code ec;
+                const bool on_disk =
+                    std::filesystem::is_directory(dataset.path, ec);
+                std::cout << dataset.id << "\t"
+                          << dataset.created_at << "\t"
+                          << std::fixed << std::setprecision(1)
+                          << dataset.duration_s << "s\tcameras=";
+                for (std::size_t i = 0; i < dataset.camera_ids.size(); ++i) {
+                    if (i != 0) std::cout << ",";
+                    std::cout << dataset.camera_ids[i];
+                }
+                std::cout << "\t" << (on_disk ? "on_disk" : "missing")
+                          << "\n";
+            }
+        }
+        return;
+    }
+
+    if (options.command == DaemonCommand::DeleteKalibrDataset) {
+        auto config = config_store.loadRuntimeConfig();
+        const auto& cmd = options.delete_kalibr_dataset;
+
+        const auto it = std::find_if(
+            config.kalibr_datasets.begin(),
+            config.kalibr_datasets.end(),
+            [&cmd](const KalibrDatasetConfig& entry) {
+                return entry.id == cmd.id;
+            });
+        if (it == config.kalibr_datasets.end()) {
+            throw std::invalid_argument(
+                "no Kalibr dataset with id: " + cmd.id);
+        }
+
+        const std::filesystem::path dataset_path = it->path;
+        config.kalibr_datasets.erase(it);
+        // Commit row removal before any disk mutation. If saveRuntimeConfig
+        // throws we haven't touched the filesystem.
+        config_store.saveRuntimeConfig(config);
+
+        if (cmd.remove_files) {
+            std::error_code ec;
+            if (std::filesystem::is_directory(dataset_path, ec)) {
+                std::filesystem::remove_all(dataset_path, ec);
+                if (ec) {
+                    throw std::runtime_error(
+                        "failed to remove dataset directory " +
+                        dataset_path.string() + ": " + ec.message());
+                }
+            }
+            // Missing directory is acceptable: the row is gone and the
+            // operator's "remove files" intent is satisfied (idempotent).
+        }
         return;
     }
 

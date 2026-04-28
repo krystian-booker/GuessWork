@@ -43,6 +43,8 @@ enum class DaemonCommand {
     MakeKalibrBag,
     CalibrateCameraImu,
     ImportCalibrationTarget,
+    ListKalibrDatasets,
+    DeleteKalibrDataset,
 };
 
 struct CalibrateCameraOptions {
@@ -86,6 +88,18 @@ struct ImportCalibrationTargetOptions {
     double square_size_m{0.0};
     std::string tag_family{"tag36h11"};
     std::string notes;
+};
+
+// W5: dataset lifecycle CLI. list emits the kalibr_datasets vector to
+// stdout (text or JSON); delete removes a row by id and optionally its
+// directory.
+struct ListKalibrDatasetsOptions {
+    bool json{false};
+};
+
+struct DeleteKalibrDatasetOptions {
+    std::string id;
+    bool remove_files{false};
 };
 
 struct ImportFieldLayoutOptions {
@@ -148,6 +162,8 @@ struct DaemonOptions {
     MakeKalibrBagOptions make_kalibr_bag;
     CalibrateCameraImuOptions calibrate_camera_imu;
     ImportCalibrationTargetOptions import_calibration_target;
+    ListKalibrDatasetsOptions list_kalibr_datasets;
+    DeleteKalibrDatasetOptions delete_kalibr_dataset;
 };
 
 struct DaemonHealth {

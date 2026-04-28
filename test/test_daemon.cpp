@@ -363,6 +363,56 @@ TEST(QualityGate, CameraImuRespectsItsOwnThreshold) {
         std::runtime_error);
 }
 
+TEST(DaemonOptions, ParsesListKalibrDatasetsCommand) {
+    const char* defaults[] = {
+        "posest_daemon",
+        "list-kalibr-datasets",
+        "--config", "/tmp/robot.db",
+    };
+    const auto plain = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(defaults) / sizeof(defaults[0])), defaults);
+    EXPECT_EQ(plain.command, posest::runtime::DaemonCommand::ListKalibrDatasets);
+    EXPECT_FALSE(plain.list_kalibr_datasets.json);
+
+    const char* json_args[] = {
+        "posest_daemon",
+        "list-kalibr-datasets",
+        "--config", "/tmp/robot.db",
+        "--json",
+    };
+    const auto with_json = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(json_args) / sizeof(json_args[0])), json_args);
+    EXPECT_TRUE(with_json.list_kalibr_datasets.json);
+}
+
+TEST(DaemonOptions, ParsesDeleteKalibrDatasetCommand) {
+    const char* args[] = {
+        "posest_daemon",
+        "delete-kalibr-dataset",
+        "--config", "/tmp/robot.db",
+        "--id", "/tmp/dataset",
+        "--remove-files",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.command,
+              posest::runtime::DaemonCommand::DeleteKalibrDataset);
+    EXPECT_EQ(options.delete_kalibr_dataset.id, "/tmp/dataset");
+    EXPECT_TRUE(options.delete_kalibr_dataset.remove_files);
+}
+
+TEST(DaemonOptions, RejectsDeleteKalibrDatasetMissingId) {
+    const char* args[] = {
+        "posest_daemon",
+        "delete-kalibr-dataset",
+        "--config", "/tmp/robot.db",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args),
+        std::invalid_argument);
+}
+
 TEST(DaemonOptions, ParsesRecordKalibrDatasetRequireImuFlag) {
     auto run = [](const char* value) {
         const char* args[] = {

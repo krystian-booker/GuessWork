@@ -211,6 +211,7 @@ add_executable(posest_tests
     test/test_calibration_recorder.cpp
     test/test_calibration_target_writer.cpp
     test/test_config_schema.cpp
+    test/test_kalibr_dataset_lifecycle.cpp
     test/test_camera_producer.cpp
     test/test_fusion_service.cpp
     test/test_daemon.cpp
