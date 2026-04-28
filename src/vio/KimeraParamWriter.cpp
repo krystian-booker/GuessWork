@@ -228,6 +228,15 @@ std::string buildImuParamsYaml(const runtime::RuntimeConfig& cfg) {
         static_params::kImuParamsTemplateYaml.back() != '\n') {
         out << '\n';
     }
+    // Bias random-walk coefficients. FusionService's preintegration
+    // (FusionService.cpp IMU param block) consumes
+    // accel_bias_rw_sigma / gyro_bias_rw_sigma directly; Kimera reads
+    // the same physical quantity under different names. Sharing the
+    // values keeps both preintegrators consistent on this BMI088 unit.
+    out << "accelerometer_random_walk: " << std::setprecision(17)
+        << cfg.fusion.accel_bias_rw_sigma << '\n';
+    out << "gyroscope_random_walk: " << std::setprecision(17)
+        << cfg.fusion.gyro_bias_rw_sigma << '\n';
     // IMU → body. FusionConfig::imu_extrinsic_body_to_imu is assigned to
     // gtsam's body_P_sensor (FusionService.cpp:942-943), which is the
     // pose of the sensor in body frame — i.e., transforms IMU → body.

@@ -1,6 +1,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -185,6 +186,41 @@ TEST(KimeraParamWriter, RejectsUnknownDistortionModel) {
 
     EXPECT_THROW(posest::vio::emitKimeraParamYamls(cfg, dir),
                  std::runtime_error);
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST(KimeraParamWriter, ImuParamsCarriesRandomWalkFromFusionConfig) {
+    const auto dir = tempDir("imu_random_walk");
+    auto cfg = makeVioReadyConfig();
+    // Distinct, non-default values so the assertion can't pass on
+    // FusionConfig defaults.
+    cfg.fusion.accel_bias_rw_sigma = 2.5e-4;
+    cfg.fusion.gyro_bias_rw_sigma = 3.5e-5;
+
+    posest::vio::emitKimeraParamYamls(cfg, dir);
+    const auto imu_yaml = readWhole(dir / "ImuParams.yaml");
+
+    // Build the expected substrings using the same setprecision(17)
+    // formatting the writer applies, so the test is not coupled to
+    // platform-specific double-to-string rounding decisions.
+    const auto fmt = [](double v) {
+        std::ostringstream s;
+        s << std::setprecision(17) << v;
+        return s.str();
+    };
+    EXPECT_NE(imu_yaml.find("accelerometer_random_walk: " + fmt(2.5e-4)),
+              std::string::npos);
+    EXPECT_NE(imu_yaml.find("gyroscope_random_walk: " + fmt(3.5e-5)),
+              std::string::npos);
+    // Both lines must precede the IMUtoBodyT_BS matrix block — Kimera
+    // reads by key so order is irrelevant for parsing, but the writer's
+    // contract is "scalars first, matrix block last".
+    const auto rw_pos = imu_yaml.find("accelerometer_random_walk:");
+    const auto extrinsic_pos = imu_yaml.find("IMUtoBodyT_BS:");
+    ASSERT_NE(rw_pos, std::string::npos);
+    ASSERT_NE(extrinsic_pos, std::string::npos);
+    EXPECT_LT(rw_pos, extrinsic_pos);
 
     std::filesystem::remove_all(dir);
 }
