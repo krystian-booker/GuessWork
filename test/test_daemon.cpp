@@ -90,9 +90,13 @@ TEST(DaemonOptions, ParsesCalibrationAndFieldImportCommands) {
         static_cast<int>(sizeof(calibrate_args) / sizeof(calibrate_args[0])),
         calibrate_args);
     EXPECT_EQ(calibrate.command, posest::runtime::DaemonCommand::CalibrateCamera);
-    EXPECT_EQ(calibrate.calibrate_camera.camera_id, "cam0");
-    EXPECT_TRUE(calibrate.calibrate_camera.has_camera_to_robot);
-    EXPECT_DOUBLE_EQ(calibrate.calibrate_camera.camera_to_robot.translation_m.z, 0.3);
+    ASSERT_EQ(calibrate.calibrate_camera.camera_ids.size(), 1u);
+    EXPECT_EQ(calibrate.calibrate_camera.camera_ids[0], "cam0");
+    ASSERT_EQ(calibrate.calibrate_camera.topics.size(), 1u);
+    EXPECT_EQ(calibrate.calibrate_camera.topics[0], "/cam/image_raw");
+    ASSERT_EQ(calibrate.calibrate_camera.camera_to_robots.size(), 1u);
+    EXPECT_DOUBLE_EQ(
+        calibrate.calibrate_camera.camera_to_robots[0].translation_m.z, 0.3);
 
     const char* field_args[] = {
         "posest_daemon",
@@ -359,6 +363,127 @@ TEST(QualityGate, CameraImuRespectsItsOwnThreshold) {
         std::runtime_error);
 }
 
+TEST(DaemonOptions, ParsesRecordKalibrDatasetRequireImuFlag) {
+    auto run = [](const char* value) {
+        const char* args[] = {
+            "posest_daemon",
+            "record-kalibr-dataset",
+            "--config", "/tmp/robot.db",
+            "--camera-id", "cam0",
+            "--duration-s", "12.0",
+            "--output-dir", "/tmp/dataset",
+            "--require-imu", value,
+        };
+        return posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    };
+
+    const auto auto_options = run("auto");
+    EXPECT_EQ(auto_options.record_kalibr_dataset.require_imu,
+              posest::runtime::ImuRequirement::Auto);
+
+    const auto yes_options = run("yes");
+    EXPECT_EQ(yes_options.record_kalibr_dataset.require_imu,
+              posest::runtime::ImuRequirement::Yes);
+
+    const auto no_options = run("no");
+    EXPECT_EQ(no_options.record_kalibr_dataset.require_imu,
+              posest::runtime::ImuRequirement::No);
+}
+
+TEST(DaemonOptions, RecordKalibrDatasetRequireImuDefaultsToAuto) {
+    const char* args[] = {
+        "posest_daemon",
+        "record-kalibr-dataset",
+        "--camera-id", "cam0",
+        "--duration-s", "5",
+        "--output-dir", "/tmp/dataset",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.record_kalibr_dataset.require_imu,
+              posest::runtime::ImuRequirement::Auto);
+}
+
+TEST(DaemonOptions, RejectsUnknownRequireImuValue) {
+    const char* args[] = {
+        "posest_daemon",
+        "record-kalibr-dataset",
+        "--camera-id", "cam0",
+        "--duration-s", "5",
+        "--output-dir", "/tmp/dataset",
+        "--require-imu", "maybe",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args),
+        std::invalid_argument);
+}
+
+TEST(DaemonOptions, BuildsKalibrBagDockerCommandWithoutImuFlag) {
+    posest::runtime::MakeKalibrBagOptions bag;
+    bag.dataset_dir = "/home/team/dataset";
+    bag.bag_path = "/home/team/out/kalibr.bag";
+    const auto with_imu =
+        posest::runtime::buildMakeKalibrBagDockerCommand(bag, "kalibr:test");
+    EXPECT_EQ(with_imu.find("--no-imu"), std::string::npos);
+
+    bag.no_imu = true;
+    const auto no_imu =
+        posest::runtime::buildMakeKalibrBagDockerCommand(bag, "kalibr:test");
+    EXPECT_NE(no_imu.find("--no-imu"), std::string::npos);
+}
+
+TEST(DaemonOptions, ParsesMultiCameraCalibrateCommand) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera",
+        "--camera-id", "cam0",
+        "--camera-id", "cam1",
+        "--topic", "/posest/cam0/image_raw",
+        "--topic", "/posest/cam1/image_raw",
+        "--bag", "/data/calib.bag",
+        "--target", "/data/target.yaml",
+        "--output-dir", "/tmp/kalibr",
+        "--version", "v1",
+        "--camera-to-robot", "0.10,0.0,0.20,0.0,0.0,0.0",
+        "--camera-to-robot", "-0.10,0.0,0.20,0.0,0.0,0.0",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.command, posest::runtime::DaemonCommand::CalibrateCamera);
+    ASSERT_EQ(options.calibrate_camera.camera_ids.size(), 2u);
+    EXPECT_EQ(options.calibrate_camera.camera_ids[0], "cam0");
+    EXPECT_EQ(options.calibrate_camera.camera_ids[1], "cam1");
+    ASSERT_EQ(options.calibrate_camera.topics.size(), 2u);
+    EXPECT_EQ(options.calibrate_camera.topics[1], "/posest/cam1/image_raw");
+    ASSERT_EQ(options.calibrate_camera.camera_to_robots.size(), 2u);
+    EXPECT_DOUBLE_EQ(
+        options.calibrate_camera.camera_to_robots[0].translation_m.x, 0.10);
+    EXPECT_DOUBLE_EQ(
+        options.calibrate_camera.camera_to_robots[1].translation_m.x, -0.10);
+}
+
+TEST(DaemonOptions, RejectsMismatchedCalibrateFlagCounts) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera",
+        "--camera-id", "cam0",
+        "--camera-id", "cam1",
+        "--topic", "/posest/cam0/image_raw",  // only one topic for two cameras
+        "--bag", "/data/calib.bag",
+        "--target", "/data/target.yaml",
+        "--output-dir", "/tmp/kalibr",
+        "--version", "v1",
+        "--camera-to-robot", "0.10,0.0,0.20,0.0,0.0,0.0",
+        "--camera-to-robot", "-0.10,0.0,0.20,0.0,0.0,0.0",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args),
+        std::invalid_argument);
+}
+
 TEST(DaemonOptions, CalibrateCameraAcceptsTargetIdInsteadOfTargetPath) {
     const char* args[] = {
         "posest_daemon",
@@ -390,7 +515,7 @@ TEST(DaemonOptions, BuildsKalibrDockerCommandWithExpectedMounts) {
     options.bag_path = "/home/team/calib/cam.bag";
     options.target_path = "/home/team/calib/target.yaml";
     options.output_dir = "/home/team/out";
-    options.topic = "/cam/image_raw";
+    options.topics = {"/cam/image_raw"};
     options.docker_image = "kalibr:test";
 
     const auto command = posest::runtime::buildKalibrDockerCommand(options);
@@ -400,6 +525,22 @@ TEST(DaemonOptions, BuildsKalibrDockerCommandWithExpectedMounts) {
     EXPECT_NE(command.find("--bag '/data/cam.bag'"), std::string::npos);
     EXPECT_NE(command.find("--target '/target/target.yaml'"), std::string::npos);
     EXPECT_NE(command.find("--topics '/cam/image_raw'"), std::string::npos);
+    EXPECT_NE(command.find("--models pinhole-radtan"), std::string::npos);
+}
+
+TEST(DaemonOptions, BuildsKalibrDockerCommandForTwoCameras) {
+    posest::runtime::CalibrateCameraOptions options;
+    options.bag_path = "/home/team/calib/cam.bag";
+    options.target_path = "/home/team/calib/target.yaml";
+    options.output_dir = "/home/team/out";
+    options.topics = {"/posest/cam0/image_raw", "/posest/cam1/image_raw"};
+    options.docker_image = "kalibr:test";
+
+    const auto command = posest::runtime::buildKalibrDockerCommand(options);
+    EXPECT_NE(command.find("--topics '/posest/cam0/image_raw' '/posest/cam1/image_raw'"),
+              std::string::npos);
+    EXPECT_NE(command.find("--models pinhole-radtan pinhole-radtan"),
+              std::string::npos);
 }
 
 TEST(DaemonOptions, BuildsKalibrBagAndCameraImuDockerCommands) {

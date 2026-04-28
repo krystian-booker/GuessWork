@@ -71,3 +71,67 @@ TEST(KalibrCameraImuResultsParser, LeavesMissingMetricsAtZero) {
     EXPECT_DOUBLE_EQ(metrics.at("cam0").gyro_rms_radps, 0.0);
     EXPECT_DOUBLE_EQ(metrics.at("cam0").accel_rms_mps2, 0.0);
 }
+
+TEST(KalibrAllCamerasParser, ReturnsBothCamerasPlusOneBaseline) {
+    std::unordered_map<std::string, std::string> topic_to_id{
+        {"/posest/cam0/image_raw", "left_cam"},
+        {"/posest/cam1/image_raw", "right_cam"},
+    };
+    const auto bundle = posest::config::parseKalibrAllCameras(
+        fixturePath("camchain_two_cameras.yaml"),
+        topic_to_id, "v1", "2026-04-27T00:00:00Z");
+
+    ASSERT_EQ(bundle.cameras.size(), 2u);
+    EXPECT_EQ(bundle.cameras[0].camera_id, "left_cam");
+    EXPECT_DOUBLE_EQ(bundle.cameras[0].fx, 400.1);
+    EXPECT_TRUE(bundle.cameras[0].active);
+    EXPECT_EQ(bundle.cameras[0].version, "v1");
+    EXPECT_EQ(bundle.cameras[1].camera_id, "right_cam");
+    EXPECT_DOUBLE_EQ(bundle.cameras[1].fx, 402.0);
+
+    ASSERT_EQ(bundle.cam_to_cam.size(), 1u);
+    EXPECT_EQ(bundle.cam_to_cam[0].reference_camera_id, "left_cam");
+    EXPECT_EQ(bundle.cam_to_cam[0].target_camera_id, "right_cam");
+    EXPECT_EQ(bundle.cam_to_cam[0].version, "v1");
+    EXPECT_DOUBLE_EQ(
+        bundle.cam_to_cam[0].target_in_reference.translation_m.x, 0.10);
+    EXPECT_DOUBLE_EQ(
+        bundle.cam_to_cam[0].target_in_reference.translation_m.y, 0.0);
+}
+
+TEST(KalibrAllCamerasParser, SingleCameraReturnsZeroBaselines) {
+    std::unordered_map<std::string, std::string> topic_to_id{
+        {"/posest/cam0/image_raw", "only_cam"},
+    };
+    const auto bundle = posest::config::parseKalibrAllCameras(
+        fixturePath("camchain_single_camera.yaml"),
+        topic_to_id, "v1", "2026-04-27T00:00:00Z");
+    ASSERT_EQ(bundle.cameras.size(), 1u);
+    EXPECT_EQ(bundle.cameras[0].camera_id, "only_cam");
+    EXPECT_TRUE(bundle.cam_to_cam.empty());
+}
+
+TEST(KalibrAllCamerasParser, ThrowsOnUnknownTopic) {
+    std::unordered_map<std::string, std::string> topic_to_id{
+        {"/posest/cam0/image_raw", "left_cam"},
+        // cam1's rostopic intentionally absent.
+    };
+    EXPECT_THROW(
+        posest::config::parseKalibrAllCameras(
+            fixturePath("camchain_two_cameras.yaml"),
+            topic_to_id, "v1", "2026-04-27T00:00:00Z"),
+        std::invalid_argument);
+}
+
+TEST(KalibrAllCamerasParser, ThrowsOnPartialResult) {
+    std::unordered_map<std::string, std::string> topic_to_id{
+        {"/posest/cam0/image_raw", "left_cam"},
+        {"/posest/cam1/image_raw", "right_cam"},
+    };
+    // Single-camera fixture against a two-camera request — fail-safe.
+    EXPECT_THROW(
+        posest::config::parseKalibrAllCameras(
+            fixturePath("camchain_single_camera.yaml"),
+            topic_to_id, "v1", "2026-04-27T00:00:00Z"),
+        std::runtime_error);
+}

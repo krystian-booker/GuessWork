@@ -361,6 +361,32 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
     {
         Statement stmt(
             db_,
+            "SELECT reference_camera_id, target_camera_id, version, "
+            "tx_m, ty_m, tz_m, roll_rad, pitch_rad, yaw_rad "
+            "FROM camera_to_camera_extrinsics "
+            "ORDER BY reference_camera_id, target_camera_id, version");
+        while (stmt.stepRow()) {
+            runtime::CameraToCameraExtrinsicsConfig entry;
+            entry.reference_camera_id = stmt.columnText(0);
+            entry.target_camera_id = stmt.columnText(1);
+            entry.version = stmt.columnText(2);
+            entry.target_in_reference.translation_m = {
+                stmt.columnDouble(3),
+                stmt.columnDouble(4),
+                stmt.columnDouble(5),
+            };
+            entry.target_in_reference.rotation_rpy_rad = {
+                stmt.columnDouble(6),
+                stmt.columnDouble(7),
+                stmt.columnDouble(8),
+            };
+            config.camera_to_camera_extrinsics.push_back(entry);
+        }
+    }
+
+    {
+        Statement stmt(
+            db_,
             "SELECT camera_id, version, active, source_file_path, created_at, "
             "cam_imu_tx_m, cam_imu_ty_m, cam_imu_tz_m, "
             "cam_imu_roll_rad, cam_imu_pitch_rad, cam_imu_yaw_rad, "
@@ -733,6 +759,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM kalibr_datasets");
     exec(db_, "DELETE FROM calibration_targets");
     exec(db_, "DELETE FROM calibration_tool_config");
+    exec(db_, "DELETE FROM camera_to_camera_extrinsics");
     exec(db_, "DELETE FROM camera_extrinsics");
     exec(db_, "DELETE FROM calibrations");
     exec(db_, "DELETE FROM camera_pipeline_bindings");
@@ -844,6 +871,25 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindDouble(6, extrinsics.camera_to_robot.rotation_rpy_rad.x);
         insert.bindDouble(7, extrinsics.camera_to_robot.rotation_rpy_rad.y);
         insert.bindDouble(8, extrinsics.camera_to_robot.rotation_rpy_rad.z);
+        insert.stepDone();
+    }
+
+    for (const auto& entry : config.camera_to_camera_extrinsics) {
+        Statement insert(
+            db_,
+            "INSERT INTO camera_to_camera_extrinsics "
+            "(reference_camera_id, target_camera_id, version, "
+            " tx_m, ty_m, tz_m, roll_rad, pitch_rad, yaw_rad) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, entry.reference_camera_id);
+        insert.bindText(2, entry.target_camera_id);
+        insert.bindText(3, entry.version);
+        insert.bindDouble(4, entry.target_in_reference.translation_m.x);
+        insert.bindDouble(5, entry.target_in_reference.translation_m.y);
+        insert.bindDouble(6, entry.target_in_reference.translation_m.z);
+        insert.bindDouble(7, entry.target_in_reference.rotation_rpy_rad.x);
+        insert.bindDouble(8, entry.target_in_reference.rotation_rpy_rad.y);
+        insert.bindDouble(9, entry.target_in_reference.rotation_rpy_rad.z);
         insert.stepDone();
     }
 

@@ -46,7 +46,13 @@ enum class DaemonCommand {
 };
 
 struct CalibrateCameraOptions {
-    std::string camera_id;
+    // W3: repeated --camera-id / --topic / --camera-to-robot flags drive
+    // a single multi-camera Kalibr invocation. The three vectors must have
+    // matching non-zero size; index i in each refers to the same camera.
+    std::vector<std::string> camera_ids;
+    std::vector<std::string> topics;
+    std::vector<Pose3d> camera_to_robots;
+
     std::filesystem::path bag_path;
     // Path to a Kalibr-shaped target.yaml. Either this or target_id must be
     // set. When both are present target_path wins (operator override).
@@ -54,15 +60,13 @@ struct CalibrateCameraOptions {
     // Calibration target id to look up in RuntimeConfig::calibration_targets;
     // the daemon materializes the Kalibr YAML to a tempfile for the run.
     std::string target_id;
-    std::string topic;
     std::filesystem::path output_dir;
     std::string version;
-    Pose3d camera_to_robot;
-    bool has_camera_to_robot{false};
     std::string docker_image;
     // W2: bypass the post-Kalibr quality gate. Persists the calibration row
     // even when the reprojection RMS exceeds the threshold or could not
-    // be parsed.
+    // be parsed. Does NOT bypass the W3 partial-Kalibr-result guard, which
+    // is a structural mismatch rather than a quality issue.
     bool force{false};
     // W2: per-run override of CalibrationToolConfig::max_reprojection_rms_px.
     std::optional<double> max_reprojection_rms_px;
@@ -91,16 +95,33 @@ struct ImportFieldLayoutOptions {
     bool activate{false};
 };
 
+// W4: how strictly the recorder requires a working Teensy + IMU stream.
+//   Auto: gate iff a Teensy serial port is configured. Skip when empty.
+//   Yes:  always require Teensy time sync; throw if not established.
+//   No:   intrinsic-only recording. Don't construct TeensyService at all
+//         and accept frames that have no trigger event attached.
+enum class ImuRequirement {
+    Auto,
+    Yes,
+    No,
+};
+
 struct RecordKalibrDatasetOptions {
     std::vector<std::string> camera_ids;
     std::filesystem::path output_dir;
     double duration_s{0.0};
+    ImuRequirement require_imu{ImuRequirement::Auto};
 };
 
 struct MakeKalibrBagOptions {
     std::filesystem::path dataset_dir;
     std::filesystem::path bag_path;
     std::string docker_image;
+    // W4: when true, make_rosbag.py keeps every recorded frame (matched or
+    // not) and skips emitting an IMU topic entirely. The MakeKalibrBag
+    // dispatch branch sets this automatically by inspecting session.json's
+    // imu_samples_recorded field; the camera-IMU path always leaves it false.
+    bool no_imu{false};
 };
 
 struct CalibrateCameraImuOptions {

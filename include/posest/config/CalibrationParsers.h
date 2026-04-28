@@ -29,6 +29,16 @@ struct KalibrCameraImuQualityMetrics {
     double accel_rms_mps2{0.0};
 };
 
+// W3 multi-camera bundle from Kalibr's camchain.yaml. `cameras` is in
+// Kalibr iteration order (cam0, cam1, ...). `cam_to_cam` carries the
+// adjacent-pair T_cn_cnm1 baselines (cam0→cam1, cam1→cam2, ...). The
+// W2 quality metrics on each CameraCalibrationConfig are NOT filled by
+// this parser; callers stitch them in from parseKalibrCameraResults.
+struct KalibrCalibrationBundle {
+    std::vector<runtime::CameraCalibrationConfig> cameras;
+    std::vector<runtime::CameraToCameraExtrinsicsConfig> cam_to_cam;
+};
+
 runtime::CameraCalibrationConfig parseKalibrCameraCalibration(
     const std::filesystem::path& path,
     const std::string& camera_id,
@@ -72,5 +82,17 @@ parseKalibrCameraResults(const std::filesystem::path& path);
 // the result map. Missing sections leave their fields at 0.0.
 std::unordered_map<std::string, KalibrCameraImuQualityMetrics>
 parseKalibrCameraImuResults(const std::filesystem::path& path);
+
+// Walk every cam<N> entry in Kalibr's camchain.yaml. The
+// topic_to_camera_id map translates Kalibr's `rostopic` field into the
+// GuessWork camera id used by the CalibrationConfig rows. Throws if a
+// rostopic is not found in the map (CLI/Kalibr disagreement) or if the
+// number of cam<N> entries does not match the size of the map (partial
+// Kalibr result — fail-safe). active=true on every returned camera.
+KalibrCalibrationBundle parseKalibrAllCameras(
+    const std::filesystem::path& camchain_path,
+    const std::unordered_map<std::string, std::string>& topic_to_camera_id,
+    const std::string& version,
+    const std::string& created_at);
 
 }  // namespace posest::config

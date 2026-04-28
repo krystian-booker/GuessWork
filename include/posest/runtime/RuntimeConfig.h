@@ -44,6 +44,18 @@ struct CameraExtrinsicsConfig {
     Pose3d camera_to_robot;
 };
 
+// W3 cam-to-cam baseline emitted by a multi-camera Kalibr run. Pose stored
+// as Kalibr's raw T_cn_cnm1: target_in_reference maps a point from the
+// reference camera frame to the target camera frame
+// (p_target = T * p_reference). reference_camera_id is cam(n-1) and
+// target_camera_id is cam(n) in Kalibr's iteration order.
+struct CameraToCameraExtrinsicsConfig {
+    std::string reference_camera_id;
+    std::string target_camera_id;
+    std::string version;
+    Pose3d target_in_reference;
+};
+
 struct CameraImuCalibrationConfig {
     std::string camera_id;
     std::string version;
@@ -269,6 +281,7 @@ struct RuntimeConfig {
     std::vector<CameraPipelineBinding> bindings;
     std::vector<CameraCalibrationConfig> calibrations;
     std::vector<CameraExtrinsicsConfig> camera_extrinsics;
+    std::vector<CameraToCameraExtrinsicsConfig> camera_to_camera_extrinsics;
     std::vector<CameraImuCalibrationConfig> camera_imu_calibrations;
     std::vector<KalibrDatasetConfig> kalibr_datasets;
     CalibrationToolConfig calibration_tools;

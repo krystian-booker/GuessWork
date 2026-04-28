@@ -517,10 +517,39 @@ COMMIT;
 )sql";
 }
 
+const char* migration13Sql() {
+    // W3 cam-to-cam baselines from a multi-camera Kalibr run. Pose stored
+    // exactly as Kalibr emits T_cn_cnm1: the 4x4 maps a point from
+    // reference_camera_id (cam(n-1)) to target_camera_id (cam(n)) — i.e.
+    // p_target = T * p_reference. Consumers that need the inverse direction
+    // must invert the stored pose.
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS camera_to_camera_extrinsics (
+    reference_camera_id TEXT NOT NULL,
+    target_camera_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    tx_m REAL NOT NULL,
+    ty_m REAL NOT NULL,
+    tz_m REAL NOT NULL,
+    roll_rad REAL NOT NULL,
+    pitch_rad REAL NOT NULL,
+    yaw_rad REAL NOT NULL,
+    PRIMARY KEY (reference_camera_id, target_camera_id, version),
+    FOREIGN KEY (reference_camera_id) REFERENCES cameras(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_camera_id)    REFERENCES cameras(id) ON DELETE CASCADE
+);
+
+PRAGMA user_version = 13;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 12;
+    return 13;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -579,6 +608,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 11) {
         exec(db, migration12Sql());
+        migrated_version = 12;
+    }
+    if (migrated_version == 12) {
+        exec(db, migration13Sql());
     }
 }
 

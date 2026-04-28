@@ -1,10 +1,12 @@
 #include "posest/config/CalibrationParsers.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -145,6 +147,43 @@ const YAML::Node chooseKalibrCameraNode(
     return fallback;
 }
 
+// Shared YAML → CameraCalibrationConfig conversion. `source_file_path` is
+// set by the caller because the camchain path is a single-file convention
+// shared by every cam<N> entry the multi-camera parser walks.
+runtime::CameraCalibrationConfig cameraConfigFromYamlNode(
+    const YAML::Node& camera,
+    const std::string& camera_id,
+    const std::string& version,
+    bool active,
+    const std::string& created_at,
+    const std::string& source_file_path) {
+    const auto intrinsics = yamlDoubleVector(camera, "intrinsics");
+    const auto resolution = yamlDoubleVector(camera, "resolution");
+    if (intrinsics.size() != 4) {
+        throw std::invalid_argument("Kalibr intrinsics must contain fx, fy, cx, cy");
+    }
+    if (resolution.size() != 2) {
+        throw std::invalid_argument("Kalibr resolution must contain width and height");
+    }
+
+    runtime::CameraCalibrationConfig out;
+    out.camera_id = camera_id;
+    out.version = version;
+    out.active = active;
+    out.source_file_path = source_file_path;
+    out.created_at = created_at;
+    out.image_width = static_cast<int>(resolution[0]);
+    out.image_height = static_cast<int>(resolution[1]);
+    out.camera_model = yamlStringOr(camera, "camera_model", "pinhole");
+    out.distortion_model = yamlStringOr(camera, "distortion_model", "none");
+    out.fx = yamlDouble(camera["intrinsics"][0], "intrinsics[0]");
+    out.fy = yamlDouble(camera["intrinsics"][1], "intrinsics[1]");
+    out.cx = yamlDouble(camera["intrinsics"][2], "intrinsics[2]");
+    out.cy = yamlDouble(camera["intrinsics"][3], "intrinsics[3]");
+    out.distortion_coefficients = yamlDoubleVector(camera, "distortion_coeffs");
+    return out;
+}
+
 double jsonDouble(const nlohmann::json& json, const char* field) {
     if (!json.contains(field) || !json.at(field).is_number()) {
         throw std::invalid_argument(std::string("field layout JSON missing numeric ") + field);
@@ -283,31 +322,80 @@ runtime::CameraCalibrationConfig parseKalibrCameraCalibration(
     const std::string& created_at,
     const std::optional<std::string>& topic) {
     const YAML::Node camera = chooseKalibrCameraNode(YAML::LoadFile(path.string()), topic);
-    const auto intrinsics = yamlDoubleVector(camera, "intrinsics");
-    const auto resolution = yamlDoubleVector(camera, "resolution");
-    if (intrinsics.size() != 4) {
-        throw std::invalid_argument("Kalibr intrinsics must contain fx, fy, cx, cy");
-    }
-    if (resolution.size() != 2) {
-        throw std::invalid_argument("Kalibr resolution must contain width and height");
+    return cameraConfigFromYamlNode(
+        camera, camera_id, version, active, created_at, path.string());
+}
+
+KalibrCalibrationBundle parseKalibrAllCameras(
+    const std::filesystem::path& camchain_path,
+    const std::unordered_map<std::string, std::string>& topic_to_camera_id,
+    const std::string& version,
+    const std::string& created_at) {
+    const YAML::Node root = YAML::LoadFile(camchain_path.string());
+    if (!root || !root.IsMap()) {
+        throw std::invalid_argument(
+            "Kalibr camchain YAML must be a map: " + camchain_path.string());
     }
 
-    runtime::CameraCalibrationConfig out;
-    out.camera_id = camera_id;
-    out.version = version;
-    out.active = active;
-    out.source_file_path = path.string();
-    out.created_at = created_at;
-    out.image_width = static_cast<int>(resolution[0]);
-    out.image_height = static_cast<int>(resolution[1]);
-    out.camera_model = yamlStringOr(camera, "camera_model", "pinhole");
-    out.distortion_model = yamlStringOr(camera, "distortion_model", "none");
-    out.fx = yamlDouble(camera["intrinsics"][0], "intrinsics[0]");
-    out.fy = yamlDouble(camera["intrinsics"][1], "intrinsics[1]");
-    out.cx = yamlDouble(camera["intrinsics"][2], "intrinsics[2]");
-    out.cy = yamlDouble(camera["intrinsics"][3], "intrinsics[3]");
-    out.distortion_coefficients = yamlDoubleVector(camera, "distortion_coeffs");
-    return out;
+    // Walk root entries in cam-key sort order so iteration is deterministic
+    // and matches Kalibr's internal cam0/cam1/... numbering. yaml-cpp's
+    // root iteration order is implementation-defined; sort by string key.
+    std::map<std::string, YAML::Node> ordered;
+    for (const auto& entry : root) {
+        const auto key = entry.first.as<std::string>();
+        if (key.rfind("cam", 0) != 0) continue;
+        ordered.emplace(key, entry.second);
+    }
+
+    KalibrCalibrationBundle bundle;
+    bundle.cameras.reserve(ordered.size());
+    std::string previous_camera_id;
+    for (const auto& [kalibr_label, camera_node] : ordered) {
+        if (!camera_node || !camera_node.IsMap()) continue;
+        const auto rostopic = camera_node["rostopic"];
+        if (!rostopic) {
+            throw std::invalid_argument(
+                "Kalibr camchain entry " + kalibr_label + " has no rostopic");
+        }
+        const auto topic_key = rostopic.as<std::string>();
+        const auto map_it = topic_to_camera_id.find(topic_key);
+        if (map_it == topic_to_camera_id.end()) {
+            throw std::invalid_argument(
+                "Kalibr camchain references rostopic with no GuessWork "
+                "camera id mapping: " + topic_key);
+        }
+        const std::string camera_id = map_it->second;
+
+        bundle.cameras.push_back(cameraConfigFromYamlNode(
+            camera_node, camera_id, version, /*active=*/true, created_at,
+            camchain_path.string()));
+
+        const auto t_cn_cnm1 = camera_node["T_cn_cnm1"];
+        if (t_cn_cnm1) {
+            if (previous_camera_id.empty()) {
+                throw std::invalid_argument(
+                    "Kalibr camchain entry " + kalibr_label +
+                    " has T_cn_cnm1 but no preceding camera");
+            }
+            runtime::CameraToCameraExtrinsicsConfig edge;
+            edge.reference_camera_id = previous_camera_id;
+            edge.target_camera_id = camera_id;
+            edge.version = version;
+            edge.target_in_reference =
+                poseFromKalibrMatrix(t_cn_cnm1, "T_cn_cnm1");
+            bundle.cam_to_cam.push_back(std::move(edge));
+        }
+        previous_camera_id = camera_id;
+    }
+
+    if (bundle.cameras.size() != topic_to_camera_id.size()) {
+        throw std::runtime_error(
+            "Kalibr camchain returned " + std::to_string(bundle.cameras.size()) +
+            " camera entries but " +
+            std::to_string(topic_to_camera_id.size()) +
+            " were requested — partial result rejected");
+    }
+    return bundle;
 }
 
 runtime::FieldLayoutConfig parseWpilibFieldLayout(

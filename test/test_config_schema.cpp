@@ -134,6 +134,15 @@ posest::runtime::RuntimeConfig makeValidConfig() {
         "v1",
         {{0.2, 0.0, 0.5}, {0.0, 0.1, 0.2}},
     });
+    // W3 cam-to-cam baseline (cam0 → cam1). The validator only requires that
+    // each id refers to a known camera (matches the kalibr_datasets pattern);
+    // cam1 stays disabled in the rest of the fixture.
+    config.camera_to_camera_extrinsics.push_back({
+        "cam0",
+        "cam1",
+        "v1",
+        {{0.10, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+    });
     posest::runtime::CameraImuCalibrationConfig camera_imu;
     camera_imu.camera_id = "cam0";
     camera_imu.version = "imu-v1";
@@ -343,6 +352,13 @@ TEST(SqliteConfigStore, FullRuntimeConfigRoundTripsAndReopens) {
     ASSERT_EQ(loaded.camera_extrinsics.size(), 1u);
     EXPECT_EQ(loaded.camera_extrinsics[0].camera_id, "cam0");
     EXPECT_DOUBLE_EQ(loaded.camera_extrinsics[0].camera_to_robot.translation_m.x, 0.2);
+    ASSERT_EQ(loaded.camera_to_camera_extrinsics.size(), 1u);
+    EXPECT_EQ(loaded.camera_to_camera_extrinsics[0].reference_camera_id, "cam0");
+    EXPECT_EQ(loaded.camera_to_camera_extrinsics[0].target_camera_id, "cam1");
+    EXPECT_EQ(loaded.camera_to_camera_extrinsics[0].version, "v1");
+    EXPECT_DOUBLE_EQ(
+        loaded.camera_to_camera_extrinsics[0].target_in_reference.translation_m.x,
+        0.10);
     ASSERT_EQ(loaded.camera_imu_calibrations.size(), 1u);
     EXPECT_TRUE(loaded.camera_imu_calibrations[0].active);
     EXPECT_DOUBLE_EQ(loaded.camera_imu_calibrations[0].camera_to_imu.translation_m.y, 0.02);
@@ -1084,6 +1100,25 @@ TEST(ConfigValidator, RejectsStrictCoreFieldFailures) {
     auto negative_imu_reprojection_rms = config;
     negative_imu_reprojection_rms.camera_imu_calibrations[0].reprojection_rms_px = -0.5;
     expect_invalid(negative_imu_reprojection_rms);
+
+    auto cam_to_cam_unknown_reference = config;
+    cam_to_cam_unknown_reference.camera_to_camera_extrinsics.push_back({
+        "no_such_camera", "cam1", "v1", {{0.1, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+    });
+    expect_invalid(cam_to_cam_unknown_reference);
+
+    auto cam_to_cam_self_loop = config;
+    cam_to_cam_self_loop.camera_to_camera_extrinsics.push_back({
+        "cam0", "cam0", "v1", {{0.1, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+    });
+    expect_invalid(cam_to_cam_self_loop);
+
+    auto cam_to_cam_duplicate_tuple = config;
+    // makeValidConfig already pushes (cam0, cam1, "v1"). Add it again.
+    cam_to_cam_duplicate_tuple.camera_to_camera_extrinsics.push_back({
+        "cam0", "cam1", "v1", {{0.20, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+    });
+    expect_invalid(cam_to_cam_duplicate_tuple);
 }
 
 TEST(ConfigStore, InMemoryRoundTripsRuntimeConfig) {

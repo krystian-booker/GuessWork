@@ -274,6 +274,35 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
         }
     }
 
+    std::unordered_set<std::string> cam_to_cam_keys;
+    for (const auto& entry : config.camera_to_camera_extrinsics) {
+        require(!entry.reference_camera_id.empty(),
+                "camera-to-camera extrinsics has empty reference camera id");
+        require(!entry.target_camera_id.empty(),
+                "camera-to-camera extrinsics has empty target camera id");
+        require(entry.reference_camera_id != entry.target_camera_id,
+                "camera-to-camera extrinsics reference and target must differ: " +
+                    entry.reference_camera_id);
+        require(cameras_enabled.find(entry.reference_camera_id) != cameras_enabled.end(),
+                "camera-to-camera extrinsics references unknown reference camera: " +
+                    entry.reference_camera_id);
+        require(cameras_enabled.find(entry.target_camera_id) != cameras_enabled.end(),
+                "camera-to-camera extrinsics references unknown target camera: " +
+                    entry.target_camera_id);
+        require(!entry.version.empty(),
+                "camera-to-camera extrinsics for '" + entry.reference_camera_id +
+                    "->" + entry.target_camera_id + "' has empty version");
+        const std::string key = entry.reference_camera_id + "\n" +
+                                entry.target_camera_id + "\n" + entry.version;
+        require(cam_to_cam_keys.insert(key).second,
+                "duplicate camera-to-camera extrinsics for triple: " +
+                    entry.reference_camera_id + "->" + entry.target_camera_id +
+                    "/" + entry.version);
+        require(isFinitePose(entry.target_in_reference),
+                "camera-to-camera extrinsics for '" + entry.reference_camera_id +
+                    "->" + entry.target_camera_id + "' has non-finite pose");
+    }
+
     std::unordered_set<std::string> field_layout_ids;
     bool saw_active_field_layout = config.active_field_layout_id.empty();
     for (const auto& layout : config.field_layouts) {
