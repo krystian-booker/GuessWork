@@ -1706,6 +1706,12 @@ void DaemonController::loadAndBuild() {
                 if (fusion) {
                     fusion->applyConfig(fusion::buildFusionConfig(cfg));
                 }
+                // Kimera-VIO live-edit hook lands here once the daemon
+                // constructs a KimeraVioConsumer (currently the
+                // PlaceholderVioPipeline owns the "vio" slot — see
+                // ProductionFactories.cpp:132). The translator already
+                // exists: vio::buildKimeraVioConfig(cfg) →
+                // KimeraVioConsumer::applyConfig.
             });
         graph_ = std::make_unique<RuntimeGraph>(
             config_, camera_factory_, pipeline_factory_, *measurement_bus_);

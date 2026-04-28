@@ -60,6 +60,13 @@ public:
 
     const AirborneThresholds& thresholds() const { return thresholds_; }
 
+    // Live-tunable swap of the hysteresis thresholds. Preserves the
+    // current state and any in-flight settle deadline; the next update()
+    // is what actually sees the new thresholds. Caller must serialize
+    // calls with update() — the AirborneTracker owns no lock and is
+    // single-threaded by contract.
+    void setThresholds(AirborneThresholds t) { thresholds_ = t; }
+
 private:
     AirborneThresholds thresholds_{};
     AirborneState state_{AirborneState::kGrounded};

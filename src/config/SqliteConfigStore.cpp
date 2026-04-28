@@ -1,5 +1,6 @@
 #include "posest/config/SqliteConfigStore.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -742,6 +743,39 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
         }
     }
 
+    {
+        Statement stmt(
+            db_,
+            "SELECT param_dir, airborne_above_m, airborne_below_m, "
+            "airborne_settle_ms, inflation_factor, inflation_cap, "
+            "covariance_strategy, covariance_scale_alpha, "
+            "imu_buffer_capacity, airborne_lookup_capacity "
+            "FROM kimera_vio_config WHERE id = 1");
+        if (stmt.stepRow()) {
+            config.kimera_vio.param_dir = stmt.columnText(0);
+            config.kimera_vio.airborne.above_m = stmt.columnDouble(1);
+            config.kimera_vio.airborne.below_m = stmt.columnDouble(2);
+            config.kimera_vio.airborne.settle = std::chrono::milliseconds(
+                static_cast<long long>(stmt.columnInt64(3)));
+            config.kimera_vio.inflation_factor = stmt.columnDouble(4);
+            config.kimera_vio.inflation_cap = stmt.columnDouble(5);
+            const int strategy = stmt.columnInt(6);
+            if (strategy < 0 || strategy > 2) {
+                throw std::runtime_error(
+                    "kimera_vio_config has invalid covariance_strategy: " +
+                    std::to_string(strategy));
+            }
+            config.kimera_vio.covariance_strategy =
+                static_cast<vio::CovarianceStrategy>(strategy);
+            config.kimera_vio.covariance_scale_alpha = stmt.columnDouble(7);
+            config.kimera_vio.imu_buffer_capacity = static_cast<std::size_t>(
+                checkedUint32(stmt.columnInt64(8), "imu_buffer_capacity"));
+            config.kimera_vio.airborne_lookup_capacity =
+                static_cast<std::size_t>(checkedUint32(
+                    stmt.columnInt64(9), "airborne_lookup_capacity"));
+        }
+    }
+
     validateRuntimeConfig(config);
     return config;
 }
@@ -770,6 +804,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
     exec(db_, "DELETE FROM imu_config");
     exec(db_, "DELETE FROM can_config");
     exec(db_, "DELETE FROM vio_config");
+    exec(db_, "DELETE FROM kimera_vio_config");
     exec(db_, "DELETE FROM fusion_config");
 
     for (const auto& camera : config.cameras) {
@@ -1223,6 +1258,36 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             insert.bindDouble(idx++, config.fusion.floor_constraint_sigmas[i]);
         }
         insert.bindDouble(idx++, config.fusion.max_chassis_speed_mps);
+        insert.stepDone();
+    }
+
+    {
+        Statement insert(
+            db_,
+            "INSERT INTO kimera_vio_config "
+            "(id, param_dir, airborne_above_m, airborne_below_m, "
+            "airborne_settle_ms, inflation_factor, inflation_cap, "
+            "covariance_strategy, covariance_scale_alpha, "
+            "imu_buffer_capacity, airborne_lookup_capacity) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        insert.bindText(1, config.kimera_vio.param_dir);
+        insert.bindDouble(2, config.kimera_vio.airborne.above_m);
+        insert.bindDouble(3, config.kimera_vio.airborne.below_m);
+        const auto settle_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                config.kimera_vio.airborne.settle)
+                .count();
+        insert.bindInt64(4, static_cast<sqlite3_int64>(settle_ms));
+        insert.bindDouble(5, config.kimera_vio.inflation_factor);
+        insert.bindDouble(6, config.kimera_vio.inflation_cap);
+        insert.bindInt(7,
+            static_cast<int>(config.kimera_vio.covariance_strategy));
+        insert.bindDouble(8, config.kimera_vio.covariance_scale_alpha);
+        insert.bindInt64(9,
+            static_cast<sqlite3_int64>(config.kimera_vio.imu_buffer_capacity));
+        insert.bindInt64(10,
+            static_cast<sqlite3_int64>(
+                config.kimera_vio.airborne_lookup_capacity));
         insert.stepDone();
     }
 

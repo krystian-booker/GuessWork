@@ -207,6 +207,105 @@ TEST(KimeraVioConsumer, ForwardsImuSamplesToBackend) {
     consumer.stop();
 }
 
+// applyConfig swaps live fields on the next process() iteration.
+// inflation_factor is the cleanest dial to observe — kAbsolute strategy
+// makes the measurement covariance equal to the backend's covariance,
+// scaled by inflation_factor when airborne.
+TEST(KimeraVioConsumer, ApplyConfigSwapsLiveFieldsOnNextFrame) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.inflation_factor = 1.0e3;
+    cfg.inflation_cap = 1.0e6;
+    cfg.covariance_strategy =
+        posest::vio::CovarianceStrategy::kAbsolute;
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+
+    // Frame 0: grounded — sets last_kimera_pose (no publish).
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    // Frame 1: airborne — published with default inflation_factor.
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.30));
+
+    auto first = drainVio(out_bus, 1);
+    ASSERT_EQ(first.size(), 1u);
+    EXPECT_NEAR(first[0].covariance[21], 1e-4 * 1e3, 1e-9);
+
+    // Live edit from a side thread — same shape the WebService callback
+    // uses on the daemon's web thread.
+    posest::vio::KimeraVioConfig updated = cfg;
+    updated.inflation_factor = 2.0e3;
+    std::thread t(
+        [&consumer, updated]() { consumer.applyConfig(updated); });
+    t.join();
+
+    // Frame 2: airborne again. drainPendingConfig swaps inflation_factor
+    // before update(), so the published covariance reflects 2.0e3.
+    deliverPaced(consumer, makeFrame(3'000, 2, 0.30));
+    auto second = drainVio(out_bus, 1);
+    ASSERT_EQ(second.size(), 1u);
+    EXPECT_NEAR(second[0].covariance[21], 1e-4 * 2e3, 1e-9);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.config_reloads_applied, 1u);
+    EXPECT_EQ(s.config_reloads_structural_skipped, 0u);
+
+    consumer.stop();
+}
+
+// Structural fields (param_dir, imu_buffer_capacity, camera_id) revert
+// to the running config and bump config_reloads_structural_skipped.
+// Live fields in the same applyConfig call still take effect.
+TEST(KimeraVioConsumer, ApplyConfigRevertsStructuralFields) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.param_dir = "/original";
+    cfg.imu_buffer_capacity = 1024;
+    cfg.camera_id = "vio";
+    cfg.covariance_strategy =
+        posest::vio::CovarianceStrategy::kAbsolute;
+    cfg.inflation_factor = 1.0e3;
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+
+    // Drive one frame so the consumer's worker has actually started
+    // processing — keeps the structural-revert assertion deterministic.
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+
+    posest::vio::KimeraVioConfig updated = cfg;
+    updated.param_dir = "/changed";              // structural — reverted
+    updated.imu_buffer_capacity = 4096;          // structural — reverted
+    updated.camera_id = "different";             // structural — reverted
+    updated.inflation_factor = 5.0e3;            // live — applied
+    consumer.applyConfig(updated);
+
+    // Next frame triggers drainPendingConfig.
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.30));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+    // The live inflation_factor change took effect.
+    EXPECT_NEAR(got[0].covariance[21], 1e-4 * 5e3, 1e-9);
+    // The reverted camera_id stamp survived.
+    EXPECT_EQ(got[0].camera_id, "vio");
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.config_reloads_applied, 1u);
+    EXPECT_EQ(s.config_reloads_structural_skipped, 1u);
+
+    consumer.stop();
+}
+
 // Frames without a Teensy timestamp can't be aligned to IMU and must
 // be dropped with the right counter bumped.
 TEST(KimeraVioConsumer, DropsFramesMissingTeensyTimestamp) {

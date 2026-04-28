@@ -104,7 +104,65 @@ KimeraVioStats KimeraVioConsumer::stats() const {
     return s;
 }
 
+void KimeraVioConsumer::applyConfig(KimeraVioConfig new_config) {
+    // Stage-and-swap mirroring FusionService::applyConfig. The web
+    // thread returns immediately; the frame worker picks up the new
+    // config at the top of its next process() iteration. We do *not*
+    // touch config_ here — that would race with the frame worker, which
+    // reads it without locking on every frame.
+    std::lock_guard<std::mutex> g(pending_config_mu_);
+    pending_config_ = std::move(new_config);
+}
+
+bool KimeraVioConsumer::drainPendingConfig() {
+    std::optional<KimeraVioConfig> staged;
+    {
+        std::lock_guard<std::mutex> g(pending_config_mu_);
+        staged.swap(pending_config_);
+    }
+    if (!staged.has_value()) {
+        return false;
+    }
+
+    // Detect structural drift (fields the live path can't honor) and
+    // count + revert before applying. param_dir is read by the backend
+    // at start(); imu_buffer_capacity sizes the deque consulted by the
+    // IMU drainer thread (B); camera_id is stamped on every emitted
+    // measurement and changing it would scramble FusionService's
+    // routing. Each requires a backend restart and is silently rolled
+    // back here for parity with FusionService's structural reversion
+    // (FusionService.cpp:762-806).
+    const bool structural_diff =
+        staged->param_dir != config_.param_dir ||
+        staged->imu_buffer_capacity != config_.imu_buffer_capacity ||
+        staged->camera_id != config_.camera_id;
+    if (structural_diff) {
+        staged->param_dir = config_.param_dir;
+        staged->imu_buffer_capacity = config_.imu_buffer_capacity;
+        staged->camera_id = config_.camera_id;
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.config_reloads_structural_skipped;
+    }
+
+    // Live fields. airborne_tracker_ is touched only from this thread
+    // (process()) so its setter is safe to call without locking.
+    config_ = std::move(*staged);
+    airborne_tracker_.setThresholds(config_.airborne);
+
+    {
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.config_reloads_applied;
+    }
+    return true;
+}
+
 void KimeraVioConsumer::process(const Frame& frame) {
+    // Drain any web-saved config before touching anything that depends
+    // on it. The swap is at the top of the loop so the frame and its
+    // recorded airborne state are evaluated against a single config
+    // version.
+    drainPendingConfig();
+
     // Update the airborne state machine on the same thread that drives
     // frames into Kimera, so the (teensy_time → state) snapshot we
     // record below corresponds exactly to the frame the backend will

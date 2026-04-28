@@ -1440,3 +1440,120 @@ TEST(ConfigValidator, RejectsMaxChassisSpeedBelowOne) {
     config.fusion.max_chassis_speed_mps = 0.5;  // below the 1.0 floor
     EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
 }
+
+// Migration 14 seeds the kimera_vio_config singleton row with the
+// compile-time KimeraVioConfig defaults. A fresh DB must round-trip
+// those defaults rather than throwing on a missing row.
+TEST(SqliteConfigStore, KimeraVioConfigDefaultsForFreshDatabase) {
+    const auto path = tempDbPath("kimera_vio_defaults");
+    std::filesystem::remove(path);
+    {
+        posest::config::SqliteConfigStore store(path);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.airborne.above_m, 0.15);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.airborne.below_m, 0.127);
+    EXPECT_EQ(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            loaded.kimera_vio.airborne.settle)
+            .count(),
+        50);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.inflation_factor, 1.0e3);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.inflation_cap, 1.0e6);
+    EXPECT_EQ(loaded.kimera_vio.covariance_strategy,
+              posest::vio::CovarianceStrategy::kScaled);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.covariance_scale_alpha, 0.8);
+    EXPECT_EQ(loaded.kimera_vio.imu_buffer_capacity, 1024u);
+    EXPECT_EQ(loaded.kimera_vio.airborne_lookup_capacity, 64u);
+
+    std::filesystem::remove(path);
+}
+
+// Round-trip non-default values through save → reopen → load and
+// verify byte-for-byte equality on the persisted fields. camera_id is
+// not persisted on this row (the daemon-side builder derives it from
+// vio.vio_camera_id) so it is intentionally not asserted here.
+TEST(SqliteConfigStore, KimeraVioConfigRoundTripsAndReopens) {
+    const auto path = tempDbPath("kimera_vio_roundtrip");
+    std::filesystem::remove(path);
+
+    auto config = makeValidConfig();
+    config.kimera_vio.param_dir = "/etc/posest/kimera";
+    config.kimera_vio.airborne.above_m = 0.20;
+    config.kimera_vio.airborne.below_m = 0.10;
+    config.kimera_vio.airborne.settle = std::chrono::milliseconds(80);
+    config.kimera_vio.inflation_factor = 500.0;
+    config.kimera_vio.inflation_cap = 5.0e5;
+    config.kimera_vio.covariance_strategy =
+        posest::vio::CovarianceStrategy::kAbsolute;
+    config.kimera_vio.covariance_scale_alpha = 0.6;
+    config.kimera_vio.imu_buffer_capacity = 2048;
+    config.kimera_vio.airborne_lookup_capacity = 96;
+
+    {
+        posest::config::SqliteConfigStore store(path);
+        store.saveRuntimeConfig(config);
+    }
+
+    posest::config::SqliteConfigStore reopened(path);
+    const auto loaded = reopened.loadRuntimeConfig();
+    EXPECT_EQ(loaded.kimera_vio.param_dir, "/etc/posest/kimera");
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.airborne.above_m, 0.20);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.airborne.below_m, 0.10);
+    EXPECT_EQ(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            loaded.kimera_vio.airborne.settle)
+            .count(),
+        80);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.inflation_factor, 500.0);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.inflation_cap, 5.0e5);
+    EXPECT_EQ(loaded.kimera_vio.covariance_strategy,
+              posest::vio::CovarianceStrategy::kAbsolute);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.covariance_scale_alpha, 0.6);
+    EXPECT_EQ(loaded.kimera_vio.imu_buffer_capacity, 2048u);
+    EXPECT_EQ(loaded.kimera_vio.airborne_lookup_capacity, 96u);
+
+    std::filesystem::remove(path);
+}
+
+TEST(ConfigValidator, RejectsKimeraVioAboveNotGreaterThanBelow) {
+    auto config = makeValidConfig();
+    config.kimera_vio.airborne.above_m = 0.10;
+    config.kimera_vio.airborne.below_m = 0.10;  // not strictly less
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsKimeraVioInflationCapBelowFactor) {
+    auto config = makeValidConfig();
+    config.kimera_vio.inflation_factor = 1000.0;
+    config.kimera_vio.inflation_cap = 100.0;  // < factor
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsKimeraVioScaleAlphaZeroWhenScaledStrategy) {
+    auto config = makeValidConfig();
+    config.kimera_vio.covariance_strategy =
+        posest::vio::CovarianceStrategy::kScaled;
+    config.kimera_vio.covariance_scale_alpha = 0.0;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, AllowsKimeraVioScaleAlphaZeroWhenNonScaledStrategy) {
+    auto config = makeValidConfig();
+    config.kimera_vio.covariance_strategy =
+        posest::vio::CovarianceStrategy::kAbsolute;
+    config.kimera_vio.covariance_scale_alpha = 0.0;  // unused on this path
+    EXPECT_NO_THROW(posest::config::validateRuntimeConfig(config));
+}
+
+TEST(ConfigValidator, RejectsKimeraVioImuBufferCapacityBelowMinimum) {
+    auto config = makeValidConfig();
+    config.kimera_vio.imu_buffer_capacity = 8;  // below the 16 floor
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}

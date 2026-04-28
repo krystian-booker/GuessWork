@@ -92,6 +92,7 @@ target_link_libraries(posest_fusion PUBLIC posest_core posest_runtime ${POSEST_G
 add_library(posest_vio_core
     src/vio/AirborneCovariance.cpp
     src/vio/FakeVioBackend.cpp
+    src/vio/KimeraVioConfigBuilder.cpp
     src/vio/KimeraVioConsumer.cpp
 )
 target_link_libraries(posest_vio_core PUBLIC

@@ -546,10 +546,43 @@ COMMIT;
 )sql";
 }
 
+const char* migration14Sql() {
+    // Single-row Kimera-VIO algorithm tunables. Kept separate from
+    // vio_config (which holds hardware-layer ToF/IR-LED settings) so the
+    // FK-on-camera-deletion behavior of vio_config doesn't bleed into
+    // the algorithm tier. Defaults mirror posest::vio::KimeraVioConfig
+    // compile-time defaults; covariance_strategy is the integer cast of
+    // CovarianceStrategy::kScaled (2). The settle window is stored in
+    // integer milliseconds — the runtime materializes it as a
+    // std::chrono::duration in the C++ struct.
+    return R"sql(
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS kimera_vio_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    param_dir TEXT NOT NULL DEFAULT '',
+    airborne_above_m REAL NOT NULL DEFAULT 0.15,
+    airborne_below_m REAL NOT NULL DEFAULT 0.127,
+    airborne_settle_ms INTEGER NOT NULL DEFAULT 50,
+    inflation_factor REAL NOT NULL DEFAULT 1000.0,
+    inflation_cap REAL NOT NULL DEFAULT 1000000.0,
+    covariance_strategy INTEGER NOT NULL DEFAULT 2,
+    covariance_scale_alpha REAL NOT NULL DEFAULT 0.8,
+    imu_buffer_capacity INTEGER NOT NULL DEFAULT 1024,
+    airborne_lookup_capacity INTEGER NOT NULL DEFAULT 64
+);
+
+INSERT OR IGNORE INTO kimera_vio_config (id) VALUES (1);
+
+PRAGMA user_version = 14;
+COMMIT;
+)sql";
+}
+
 }  // namespace
 
 int currentSchemaVersion() {
-    return 13;
+    return 14;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -612,6 +645,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 12) {
         exec(db, migration13Sql());
+        migrated_version = 13;
+    }
+    if (migrated_version == 13) {
+        exec(db, migration14Sql());
     }
 }
 

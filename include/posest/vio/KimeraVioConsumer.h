@@ -41,6 +41,12 @@ struct KimeraVioStats {
     std::uint64_t outputs_skipped_no_tracking{0};
     std::uint64_t outputs_inflated_airborne{0};
     std::uint64_t ground_distance_missing{0};
+    // Live-config bookkeeping. Mirrors FusionService's
+    // config_reloads_applied / config_reloads_structural_skipped split
+    // (FusionService.h:225) so a website save that touches a structural
+    // field is observable instead of silently no-op.
+    std::uint64_t config_reloads_applied{0};
+    std::uint64_t config_reloads_structural_skipped{0};
 };
 
 // Consumes Frame objects (via ConsumerBase) and ImuSample measurements
@@ -72,6 +78,15 @@ public:
     void start() override;
     void stop() override;
 
+    // Stage a new config for the next process() iteration. Safe to call
+    // from any thread; the swap happens at the top of process() before
+    // any backend interaction. Live fields take effect immediately;
+    // structural fields (param_dir, imu_buffer_capacity, camera_id) are
+    // reverted to the running config and bump
+    // KimeraVioStats::config_reloads_structural_skipped — they require
+    // a backend restart to apply. Mirrors FusionService::applyConfig.
+    void applyConfig(KimeraVioConfig new_config);
+
     KimeraVioStats stats() const;
 
 protected:
@@ -92,6 +107,13 @@ private:
     void recordAirborneState(std::uint64_t teensy_time_us,
                              AirborneState state);
     AirborneState lookupAirborneState(std::uint64_t teensy_time_us) const;
+
+    // Drain any staged config (set by applyConfig) and merge live fields
+    // into config_. Called from the frame worker (thread A) before
+    // touching the backend or the airborne tracker. Returns true if a
+    // config was applied (touched live fields), false if no config was
+    // pending. Independent of the structural-skipped counter.
+    bool drainPendingConfig();
 
     KimeraVioConfig config_;
     MeasurementBus& imu_bus_;
@@ -117,6 +139,13 @@ private:
     std::optional<Eigen::Matrix<double, 6, 6>> last_kimera_pose_cov_;
 
     AirborneTracker airborne_tracker_;
+
+    // Staged config from applyConfig. Producer is the web thread (any
+    // thread); consumer is the frame worker (thread A) at the top of
+    // process(). The mutex guards only the optional swap — the
+    // KimeraVioConfig payload is copied out under the lock.
+    mutable std::mutex pending_config_mu_;
+    std::optional<KimeraVioConfig> pending_config_;
 
     std::thread imu_drainer_;
     std::atomic<bool> imu_drainer_running_{false};

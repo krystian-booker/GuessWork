@@ -8,6 +8,7 @@
 #include "posest/CameraConfig.h"
 #include "posest/MeasurementTypes.h"
 #include "posest/runtime/PipelineConfig.h"
+#include "posest/vio/KimeraVioConfig.h"
 
 namespace posest::runtime {
 
@@ -291,6 +292,7 @@ struct RuntimeConfig {
     std::vector<CameraTriggerConfig> camera_triggers;
     TeensyConfig teensy;
     VioConfig vio;
+    vio::KimeraVioConfig kimera_vio;
     FusionConfig fusion;
 };
 

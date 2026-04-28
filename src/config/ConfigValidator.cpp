@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cmath>
 #include <stdexcept>
@@ -391,6 +392,57 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
         require(cameras_enabled.find(config.vio.vio_camera_id) != cameras_enabled.end(),
                 "VIO references unknown camera: " + config.vio.vio_camera_id);
     }
+
+    // Kimera-VIO algorithm tunables. Bounds keep the airborne hysteresis
+    // well-formed (above > below > 0), prevent the BetweenFactor inflation
+    // path from collapsing into a no-op or overflowing the information
+    // matrix, and clamp buffer sizes to ranges that match the producer
+    // cadence on this platform (~120 Hz frames, 1 kHz IMU).
+    require(isFinite(config.kimera_vio.airborne.above_m) &&
+                isFinite(config.kimera_vio.airborne.below_m),
+            "kimera_vio airborne thresholds must be finite");
+    require(config.kimera_vio.airborne.below_m > 0.0,
+            "kimera_vio airborne.below_m must be > 0");
+    require(config.kimera_vio.airborne.above_m >
+                config.kimera_vio.airborne.below_m,
+            "kimera_vio airborne.above_m must be > airborne.below_m "
+            "(Schmitt-trigger hysteresis)");
+    {
+        const auto settle_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                config.kimera_vio.airborne.settle)
+                .count();
+        require(settle_ms >= 0 && settle_ms <= 5000,
+                "kimera_vio airborne.settle must be in [0, 5000] ms");
+    }
+    require(isFinite(config.kimera_vio.inflation_factor) &&
+                config.kimera_vio.inflation_factor >= 1.0,
+            "kimera_vio inflation_factor must be finite and >= 1");
+    require(isFinite(config.kimera_vio.inflation_cap) &&
+                config.kimera_vio.inflation_cap >=
+                    config.kimera_vio.inflation_factor,
+            "kimera_vio inflation_cap must be finite and >= inflation_factor");
+    {
+        const int strategy =
+            static_cast<int>(config.kimera_vio.covariance_strategy);
+        require(strategy >= 0 && strategy <= 2,
+                "kimera_vio covariance_strategy must be one of "
+                "{kAbsolute=0, kDelta=1, kScaled=2}");
+    }
+    if (config.kimera_vio.covariance_strategy ==
+        vio::CovarianceStrategy::kScaled) {
+        require(isFinite(config.kimera_vio.covariance_scale_alpha) &&
+                    config.kimera_vio.covariance_scale_alpha > 0.0 &&
+                    config.kimera_vio.covariance_scale_alpha <= 1.0,
+                "kimera_vio covariance_scale_alpha must be finite and in "
+                "(0, 1] when covariance_strategy is kScaled");
+    }
+    require(config.kimera_vio.imu_buffer_capacity >= 16 &&
+                config.kimera_vio.imu_buffer_capacity <= 65536,
+            "kimera_vio imu_buffer_capacity must be in [16, 65536]");
+    require(config.kimera_vio.airborne_lookup_capacity >= 8 &&
+                config.kimera_vio.airborne_lookup_capacity <= 65536,
+            "kimera_vio airborne_lookup_capacity must be in [8, 65536]");
 
     // GTSAM fusion-graph tunables. Bounds are deliberately loose where the
     // graph itself will gracefully degrade and tight where a bad value would
