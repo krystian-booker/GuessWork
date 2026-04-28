@@ -35,8 +35,8 @@ imu_integration_sigma: 1.0e-8
 # internally — match the firmware emit rate (1 kHz) exactly.
 nominal_sampling_time_s: 0.001
 
-# Body↔IMU extrinsic. The Teensy mounts the BMI088 at a fixed
-# location and orientation relative to the chassis frame; that 4×4
-# transform belongs here. Populated at runtime from RuntimeConfig
-# so we don't bake mechanical layout into the static YAML.
-# TODO(EXTRINSIC): wire IMUtoBodyT_BS from RuntimeConfig.
+# Body↔IMU extrinsic (IMUtoBodyT_BS) is appended to this file at
+# daemon start by KimeraParamWriter. The runtime composes it from
+# FusionConfig::imu_extrinsic_body_to_imu (inverted to satisfy
+# Kimera's IMU→body convention). Anything below this comment is
+# overwritten on every daemon boot — do not hand-edit.

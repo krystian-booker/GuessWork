@@ -1557,3 +1557,32 @@ TEST(ConfigValidator, RejectsKimeraVioImuBufferCapacityBelowMinimum) {
     EXPECT_THROW(posest::config::validateRuntimeConfig(config),
                  std::invalid_argument);
 }
+
+// VIO enabled requires both an active intrinsic calibration and an
+// active camera-IMU calibration for vio_camera_id. KimeraParamWriter
+// would throw at daemon start otherwise; catching the missing row at
+// save time is the better failure mode.
+TEST(ConfigValidator, RejectsEnabledVioWithoutActiveIntrinsicCalibration) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = "cam0";
+    config.calibrations[0].active = false;  // makeValidConfig leaves this true
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsEnabledVioWithoutActiveCameraImuCalibration) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = "cam0";
+    config.camera_imu_calibrations[0].active = false;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, AllowsEnabledVioWithBothActiveCalibrations) {
+    auto config = makeValidConfig();
+    config.vio.enabled = true;
+    config.vio.vio_camera_id = "cam0";
+    EXPECT_NO_THROW(posest::config::validateRuntimeConfig(config));
+}

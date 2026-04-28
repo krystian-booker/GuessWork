@@ -391,6 +391,30 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
                 "VIO is enabled but vio_camera_id is empty");
         require(cameras_enabled.find(config.vio.vio_camera_id) != cameras_enabled.end(),
                 "VIO references unknown camera: " + config.vio.vio_camera_id);
+        // KimeraParamWriter requires both an active CameraCalibrationConfig
+        // and an active CameraImuCalibrationConfig for vio_camera_id;
+        // catching a missing row here surfaces the failure at save time
+        // instead of at daemon start.
+        bool has_active_calib = false;
+        for (const auto& c : config.calibrations) {
+            if (c.camera_id == config.vio.vio_camera_id && c.active) {
+                has_active_calib = true;
+                break;
+            }
+        }
+        require(has_active_calib,
+                "VIO is enabled but no active intrinsic calibration exists "
+                "for camera: " + config.vio.vio_camera_id);
+        bool has_active_cam_imu = false;
+        for (const auto& c : config.camera_imu_calibrations) {
+            if (c.camera_id == config.vio.vio_camera_id && c.active) {
+                has_active_cam_imu = true;
+                break;
+            }
+        }
+        require(has_active_cam_imu,
+                "VIO is enabled but no active camera-IMU calibration exists "
+                "for camera: " + config.vio.vio_camera_id);
     }
 
     // Kimera-VIO algorithm tunables. Bounds keep the airborne hysteresis

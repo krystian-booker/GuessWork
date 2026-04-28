@@ -89,11 +89,40 @@ target_link_libraries(posest_fusion PUBLIC posest_core posest_runtime ${POSEST_G
 # --- posest_vio_core: airborne covariance gate, IVioBackend, FakeVioBackend,
 # KimeraVioConsumer. Always built so tests + Linux CI can exercise the
 # consumer against FakeVioBackend without needing a Kimera-VIO install.
+
+# Embed the static Kimera YAML templates as raw string literals so the
+# runtime KimeraParamWriter can lay down a self-contained param_dir
+# without needing to look up the install prefix at runtime. CMake reads
+# each source YAML once at configure time and substitutes its contents
+# into a generated header. Touching any of the three YAMLs reruns
+# CMake on the next build.
+set(POSEST_KIMERA_FRONTEND_YAML_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/FrontendParams.yaml)
+set(POSEST_KIMERA_BACKEND_YAML_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/BackendParams.yaml)
+set(POSEST_KIMERA_IMU_YAML_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/ImuParams.yaml)
+file(READ ${POSEST_KIMERA_FRONTEND_YAML_PATH} POSEST_KIMERA_FRONTEND_YAML)
+file(READ ${POSEST_KIMERA_BACKEND_YAML_PATH} POSEST_KIMERA_BACKEND_YAML)
+file(READ ${POSEST_KIMERA_IMU_YAML_PATH} POSEST_KIMERA_IMU_TEMPLATE_YAML)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${POSEST_KIMERA_FRONTEND_YAML_PATH}
+    ${POSEST_KIMERA_BACKEND_YAML_PATH}
+    ${POSEST_KIMERA_IMU_YAML_PATH})
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vio/KimeraStaticParams.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/posest_vio_core_gen/posest/vio/KimeraStaticParams.h
+    @ONLY)
+
 add_library(posest_vio_core
     src/vio/AirborneCovariance.cpp
     src/vio/FakeVioBackend.cpp
+    src/vio/KimeraParamWriter.cpp
     src/vio/KimeraVioConfigBuilder.cpp
     src/vio/KimeraVioConsumer.cpp
+)
+target_include_directories(posest_vio_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/posest_vio_core_gen>
 )
 target_link_libraries(posest_vio_core PUBLIC
     posest_core
@@ -172,6 +201,7 @@ target_link_libraries(posest_daemon_lib PUBLIC
     posest_fusion
     posest_teensy
     posest_pipelines
+    posest_vio_core
     nlohmann_json::nlohmann_json
 )
 if(TARGET posest_v4l2)
@@ -218,6 +248,7 @@ add_executable(posest_tests
     test/test_fusion_service.cpp
     test/test_daemon.cpp
     test/test_airborne_covariance.cpp
+    test/test_kimera_param_writer.cpp
     test/test_kimera_vio_consumer.cpp
     test/test_tee_sink.cpp
 )

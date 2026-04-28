@@ -20,6 +20,7 @@
 #include "posest/calibration/CalibrationRecorder.h"
 #include "posest/calibration/CalibrationTargetWriter.h"
 #include "posest/config/CalibrationParsers.h"
+#include "posest/vio/KimeraParamWriter.h"
 
 namespace posest::runtime {
 
@@ -1670,6 +1671,16 @@ DaemonController::~DaemonController() {
 void DaemonController::loadAndBuild() {
     try {
         config_ = config_store_->loadRuntimeConfig();
+        // Materialize the Kimera param_dir contents from the active
+        // Kalibr calibrations + FusionConfig::imu_extrinsic_body_to_imu.
+        // No-op when vio.enabled is false; throws when active rows are
+        // missing (validator catches the latter at save time, but
+        // legacy DBs predating the constraint can still slip through —
+        // we treat that as a daemon-failure condition rather than a
+        // silent fallback to Kimera defaults).
+        if (!config_.kimera_vio.param_dir.empty()) {
+            vio::emitKimeraParamYamls(config_, config_.kimera_vio.param_dir);
+        }
         {
             std::lock_guard<std::mutex> g(mu_);
             health_.state = DaemonState::LoadedConfig;
