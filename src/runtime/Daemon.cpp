@@ -28,6 +28,17 @@ namespace {
 constexpr std::size_t kMeasurementBusCapacity = 4096;
 std::atomic<int>* g_process_signal = nullptr;
 
+// W6: every Kalibr Docker invocation goes through this hook so end-to-end
+// tests can stage fixture YAMLs at the path the parser expects, return 0,
+// and skip the real `docker run`. Function-local static dodges static-init
+// ordering pitfalls and is trivially thread-safe in C++11+.
+SystemImpl& systemImplStorage() {
+    static SystemImpl impl = [](const char* cmd) { return std::system(cmd); };
+    return impl;
+}
+
+int runShell(const char* cmd) { return systemImplStorage()(cmd); }
+
 void signalHandler(int signal_number) {
     if (g_process_signal) {
         g_process_signal->store(signal_number, std::memory_order_release);
@@ -434,6 +445,11 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
                 throw std::invalid_argument("only one subcommand may be provided");
             }
             options.command = DaemonCommand::DeleteKalibrDataset;
+        } else if (arg == "calibrate-camera-end-to-end") {
+            if (options.command != DaemonCommand::Run) {
+                throw std::invalid_argument("only one subcommand may be provided");
+            }
+            options.command = DaemonCommand::CalibrateCameraEndToEnd;
         } else if (arg == "--help" || arg == "-h") {
             options.help = true;
         } else if (arg == "--config") {
@@ -446,6 +462,7 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
             const std::string camera_id = requireValue(i, argc, argv, arg);
             options.calibrate_camera.camera_ids.push_back(camera_id);
             options.record_kalibr_dataset.camera_ids.push_back(camera_id);
+            options.calibrate_camera_end_to_end.camera_ids.push_back(camera_id);
         } else if (arg == "--bag") {
             const std::string path = requireValue(i, argc, argv, arg);
             options.calibrate_camera.bag_path = path;
@@ -455,24 +472,30 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
             options.calibrate_camera.target_path = path;
             options.calibrate_camera_imu.target_path = path;
         } else if (arg == "--topic") {
-            options.calibrate_camera.topics.push_back(
-                requireValue(i, argc, argv, arg));
+            const std::string topic = requireValue(i, argc, argv, arg);
+            options.calibrate_camera.topics.push_back(topic);
+            options.calibrate_camera_end_to_end.topics.push_back(topic);
         } else if (arg == "--output-dir") {
             const std::string path = requireValue(i, argc, argv, arg);
             options.calibrate_camera.output_dir = path;
             options.record_kalibr_dataset.output_dir = path;
+            options.calibrate_camera_end_to_end.output_dir = path;
         } else if (arg == "--version") {
             const std::string version = requireValue(i, argc, argv, arg);
             options.calibrate_camera.version = version;
             options.calibrate_camera_imu.version = version;
+            options.calibrate_camera_end_to_end.version = version;
         } else if (arg == "--camera-to-robot") {
-            options.calibrate_camera.camera_to_robots.push_back(
-                config::parsePoseCsv(requireValue(i, argc, argv, arg)));
+            const auto pose =
+                config::parsePoseCsv(requireValue(i, argc, argv, arg));
+            options.calibrate_camera.camera_to_robots.push_back(pose);
+            options.calibrate_camera_end_to_end.camera_to_robots.push_back(pose);
         } else if (arg == "--docker-image") {
             const std::string image = requireValue(i, argc, argv, arg);
             options.calibrate_camera.docker_image = image;
             options.make_kalibr_bag.docker_image = image;
             options.calibrate_camera_imu.docker_image = image;
+            options.calibrate_camera_end_to_end.docker_image = image;
         } else if (arg == "--field-id") {
             options.import_field_layout.field_id = requireValue(i, argc, argv, arg);
         } else if (arg == "--name") {
@@ -482,18 +505,22 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
         } else if (arg == "--activate") {
             options.import_field_layout.activate = true;
         } else if (arg == "--duration-s") {
-            options.record_kalibr_dataset.duration_s =
-                std::stod(requireValue(i, argc, argv, arg));
+            const double duration = std::stod(requireValue(i, argc, argv, arg));
+            options.record_kalibr_dataset.duration_s = duration;
+            options.calibrate_camera_end_to_end.duration_s = duration;
         } else if (arg == "--dataset") {
             const std::string path = requireValue(i, argc, argv, arg);
             options.make_kalibr_bag.dataset_dir = path;
             options.calibrate_camera_imu.dataset_dir = path;
         } else if (arg == "--imu") {
-            options.calibrate_camera_imu.imu_path = requireValue(i, argc, argv, arg);
+            const std::string imu = requireValue(i, argc, argv, arg);
+            options.calibrate_camera_imu.imu_path = imu;
+            options.calibrate_camera_end_to_end.imu_path = imu;
         } else if (arg == "--target-id") {
             const std::string id = requireValue(i, argc, argv, arg);
             options.calibrate_camera.target_id = id;
             options.import_calibration_target.target_id = id;
+            options.calibrate_camera_end_to_end.target_id = id;
         } else if (arg == "--from-yaml") {
             options.import_calibration_target.from_yaml = requireValue(i, argc, argv, arg);
         } else if (arg == "--type") {
@@ -519,14 +546,16 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
         } else if (arg == "--notes") {
             options.import_calibration_target.notes = requireValue(i, argc, argv, arg);
         } else if (arg == "--force") {
-            // Shared between calibrate-camera and calibrate-camera-imu so
-            // the orchestrator (W6) can hand both struct fields the flag.
+            // Shared between calibrate-camera, calibrate-camera-imu, and the
+            // W6 orchestrator so a single CLI invocation populates each.
             options.calibrate_camera.force = true;
             options.calibrate_camera_imu.force = true;
+            options.calibrate_camera_end_to_end.force = true;
         } else if (arg == "--max-reprojection-rms-px") {
             const double value = std::stod(requireValue(i, argc, argv, arg));
             options.calibrate_camera.max_reprojection_rms_px = value;
             options.calibrate_camera_imu.max_reprojection_rms_px = value;
+            options.calibrate_camera_end_to_end.max_reprojection_rms_px = value;
         } else if (arg == "--json") {
             options.list_kalibr_datasets.json = true;
         } else if (arg == "--id") {
@@ -535,16 +564,34 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
             options.delete_kalibr_dataset.remove_files = true;
         } else if (arg == "--require-imu") {
             const std::string value = requireValue(i, argc, argv, arg);
+            ImuRequirement parsed;
             if (value == "auto") {
-                options.record_kalibr_dataset.require_imu = ImuRequirement::Auto;
+                parsed = ImuRequirement::Auto;
             } else if (value == "yes") {
-                options.record_kalibr_dataset.require_imu = ImuRequirement::Yes;
+                parsed = ImuRequirement::Yes;
             } else if (value == "no") {
-                options.record_kalibr_dataset.require_imu = ImuRequirement::No;
+                parsed = ImuRequirement::No;
             } else {
                 throw std::invalid_argument(
                     "--require-imu must be one of {auto, yes, no}, got: " + value);
             }
+            options.record_kalibr_dataset.require_imu = parsed;
+            options.calibrate_camera_end_to_end.require_imu = parsed;
+        } else if (arg == "--mode") {
+            const std::string value = requireValue(i, argc, argv, arg);
+            if (value == "intrinsic") {
+                options.calibrate_camera_end_to_end.mode =
+                    CalibrationMode::Intrinsic;
+            } else if (value == "intrinsic+imu") {
+                options.calibrate_camera_end_to_end.mode =
+                    CalibrationMode::IntrinsicAndImu;
+            } else {
+                throw std::invalid_argument(
+                    "--mode must be one of {intrinsic, intrinsic+imu}, got: " +
+                    value);
+            }
+        } else if (arg == "--cleanup-dataset") {
+            options.calibrate_camera_end_to_end.cleanup_dataset = true;
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
@@ -580,6 +627,26 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
         if (options.delete_kalibr_dataset.id.empty()) {
             throw std::invalid_argument("delete-kalibr-dataset requires --id");
         }
+    } else if (options.command == DaemonCommand::CalibrateCameraEndToEnd) {
+        const auto& cmd = options.calibrate_camera_end_to_end;
+        const auto n = cmd.camera_ids.size();
+        if (n == 0 ||
+            cmd.topics.size() != n ||
+            cmd.camera_to_robots.size() != n ||
+            cmd.target_id.empty() ||
+            cmd.output_dir.empty() ||
+            cmd.version.empty() ||
+            !(cmd.duration_s > 0.0)) {
+            throw std::invalid_argument(
+                "calibrate-camera-end-to-end requires equal-count "
+                "--camera-id/--topic/--camera-to-robot, plus --target-id, "
+                "--output-dir, --version, --duration-s");
+        }
+        if (cmd.mode == CalibrationMode::IntrinsicAndImu &&
+            cmd.imu_path.empty()) {
+            throw std::invalid_argument(
+                "calibrate-camera-end-to-end --mode=intrinsic+imu requires --imu PATH");
+        }
     } else if (options.command == DaemonCommand::ImportFieldLayout) {
         const auto& command = options.import_field_layout;
         if (command.field_id.empty() || command.name.empty() || command.file_path.empty()) {
@@ -607,6 +674,53 @@ DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
     }
 
     return options;
+}
+
+SystemImpl setSystemImplForTesting(SystemImpl impl) {
+    auto previous = systemImplStorage();
+    systemImplStorage() = std::move(impl);
+    return previous;
+}
+
+void resetSystemImplForTesting() {
+    systemImplStorage() = [](const char* cmd) { return std::system(cmd); };
+}
+
+// W6 (refactor lifted from W5's DeleteKalibrDataset dispatch): remove the
+// kalibr_datasets row keyed by `id`; if `remove_files` is true and the
+// row's path resolves to an existing directory, recursively delete it.
+// Throws std::invalid_argument when no row matches; the disk side is
+// idempotent (missing directory is acceptable).
+void cleanupKalibrDataset(
+    config::IConfigStore& config_store,
+    const std::string& id,
+    bool remove_files) {
+    auto config = config_store.loadRuntimeConfig();
+    const auto it = std::find_if(
+        config.kalibr_datasets.begin(),
+        config.kalibr_datasets.end(),
+        [&id](const KalibrDatasetConfig& entry) { return entry.id == id; });
+    if (it == config.kalibr_datasets.end()) {
+        throw std::invalid_argument("no Kalibr dataset with id: " + id);
+    }
+
+    const std::filesystem::path dataset_path = it->path;
+    config.kalibr_datasets.erase(it);
+    // Commit row removal before any disk mutation. If saveRuntimeConfig
+    // throws we haven't touched the filesystem.
+    config_store.saveRuntimeConfig(config);
+
+    if (remove_files) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(dataset_path, ec)) {
+            std::filesystem::remove_all(dataset_path, ec);
+            if (ec) {
+                throw std::runtime_error(
+                    "failed to remove dataset directory " +
+                    dataset_path.string() + ": " + ec.message());
+            }
+        }
+    }
 }
 
 void throwIfUnacceptableCalibration(
@@ -682,7 +796,14 @@ std::string daemonUsage(const char* argv0) {
         << "       " << exe
         << " list-kalibr-datasets --config PATH [--json]\n"
         << "       " << exe
-        << " delete-kalibr-dataset --config PATH --id ID [--remove-files]\n";
+        << " delete-kalibr-dataset --config PATH --id ID [--remove-files]\n"
+        << "       " << exe
+        << " calibrate-camera-end-to-end --config PATH "
+           "--camera-id ID... --topic T... --camera-to-robot x,y,z,r,p,y... "
+           "--target-id ID --output-dir DIR --version V --duration-s N "
+           "[--mode={intrinsic,intrinsic+imu}] [--imu IMU.yaml] "
+           "[--require-imu={auto,yes,no}] [--max-reprojection-rms-px X] "
+           "[--force] [--docker-image IMAGE] [--cleanup-dataset]\n";
     return out.str();
 }
 
@@ -939,7 +1060,7 @@ void runConfigCommand(
             kalibr_options.target_path = materialized;
         }
         const auto command = buildKalibrDockerCommand(kalibr_options);
-        const int rc = std::system(command.c_str());
+        const int rc = runShell(command.c_str());
         if (rc != 0) {
             throw std::runtime_error("Kalibr Docker command failed");
         }
@@ -1083,39 +1204,10 @@ void runConfigCommand(
     }
 
     if (options.command == DaemonCommand::DeleteKalibrDataset) {
-        auto config = config_store.loadRuntimeConfig();
-        const auto& cmd = options.delete_kalibr_dataset;
-
-        const auto it = std::find_if(
-            config.kalibr_datasets.begin(),
-            config.kalibr_datasets.end(),
-            [&cmd](const KalibrDatasetConfig& entry) {
-                return entry.id == cmd.id;
-            });
-        if (it == config.kalibr_datasets.end()) {
-            throw std::invalid_argument(
-                "no Kalibr dataset with id: " + cmd.id);
-        }
-
-        const std::filesystem::path dataset_path = it->path;
-        config.kalibr_datasets.erase(it);
-        // Commit row removal before any disk mutation. If saveRuntimeConfig
-        // throws we haven't touched the filesystem.
-        config_store.saveRuntimeConfig(config);
-
-        if (cmd.remove_files) {
-            std::error_code ec;
-            if (std::filesystem::is_directory(dataset_path, ec)) {
-                std::filesystem::remove_all(dataset_path, ec);
-                if (ec) {
-                    throw std::runtime_error(
-                        "failed to remove dataset directory " +
-                        dataset_path.string() + ": " + ec.message());
-                }
-            }
-            // Missing directory is acceptable: the row is gone and the
-            // operator's "remove files" intent is satisfied (idempotent).
-        }
+        cleanupKalibrDataset(
+            config_store,
+            options.delete_kalibr_dataset.id,
+            options.delete_kalibr_dataset.remove_files);
         return;
     }
 
@@ -1227,7 +1319,7 @@ void runConfigCommand(
         if (!bag_options.no_imu) {
             bag_options.no_imu = !datasetHasImuSamples(bag_options.dataset_dir);
         }
-        const int rc = std::system(
+        const int rc = runShell(
             buildMakeKalibrBagDockerCommand(bag_options, image).c_str());
         if (rc != 0) {
             throw std::runtime_error("Kalibr bag Docker command failed");
@@ -1235,44 +1327,62 @@ void runConfigCommand(
         return;
     }
 
+    if (options.command == DaemonCommand::CalibrateCameraImu) {
+        runCameraImuCalibration(options.calibrate_camera_imu, config_store);
+        return;
+    }
+
+    if (options.command == DaemonCommand::CalibrateCameraEndToEnd) {
+        runCalibrationEndToEnd(options, config_store, camera_factory);
+        return;
+    }
+}
+
+// W6 (refactor lifted from the W2 CalibrateCameraImu dispatch): runs the
+// bag → kalibr_calibrate_imu_camera → parse → gate → persist sequence
+// for one CalibrateCameraImuOptions. Reused by both the legacy
+// CalibrateCameraImu CLI dispatch and runCalibrationEndToEnd.
+void runCameraImuCalibration(
+    const CalibrateCameraImuOptions& imu_options,
+    config::IConfigStore& config_store) {
     auto config = config_store.loadRuntimeConfig();
-    const auto image = resolvedKalibrDockerImage(options.calibrate_camera_imu.docker_image, config);
-    const auto camera_ids = loadDatasetCameraIds(options.calibrate_camera_imu.dataset_dir);
-    const auto bag_path = options.calibrate_camera_imu.dataset_dir / "kalibr.bag";
+    const auto image = resolvedKalibrDockerImage(imu_options.docker_image, config);
+    const auto camera_ids = loadDatasetCameraIds(imu_options.dataset_dir);
+    const auto bag_path = imu_options.dataset_dir / "kalibr.bag";
     MakeKalibrBagOptions bag_options;
-    bag_options.dataset_dir = options.calibrate_camera_imu.dataset_dir;
+    bag_options.dataset_dir = imu_options.dataset_dir;
     bag_options.bag_path = bag_path;
     const int bag_rc =
-        std::system(buildMakeKalibrBagDockerCommand(bag_options, image).c_str());
+        runShell(buildMakeKalibrBagDockerCommand(bag_options, image).c_str());
     if (bag_rc != 0) {
         throw std::runtime_error("Kalibr bag Docker command failed");
     }
 
-    const auto camchain_path = options.calibrate_camera_imu.dataset_dir / "input-camchain.yaml";
+    const auto camchain_path = imu_options.dataset_dir / "input-camchain.yaml";
     exportActiveCamchain(config, camera_ids, camchain_path);
-    const int kalibr_rc = std::system(
+    const int kalibr_rc = runShell(
         buildCalibrateCameraImuDockerCommand(
-            options.calibrate_camera_imu, bag_path, camchain_path, image).c_str());
+            imu_options, bag_path, camchain_path, image).c_str());
     if (kalibr_rc != 0) {
         throw std::runtime_error("Kalibr camera-IMU Docker command failed");
     }
 
-    const auto result_path = findKalibrImuCamchain(options.calibrate_camera_imu.dataset_dir);
+    const auto result_path = findKalibrImuCamchain(imu_options.dataset_dir);
 
     // W2: pull quality metrics from results-imucam.txt before persisting any
     // row. Gyro/accel errors are global to the run and broadcast across all
     // camera entries by parseKalibrCameraImuResults.
     const auto imucam_results_path =
-        findKalibrResultsImuCam(options.calibrate_camera_imu.dataset_dir);
+        findKalibrResultsImuCam(imu_options.dataset_dir);
     const auto imucam_metrics =
         config::parseKalibrCameraImuResults(imucam_results_path);
     const auto report_path = findKalibrReportCam(
-        options.calibrate_camera_imu.dataset_dir, "report-imucam").string();
+        imu_options.dataset_dir, "report-imucam").string();
 
     CalibrationToolConfig effective_tool = config.calibration_tools;
-    if (options.calibrate_camera_imu.max_reprojection_rms_px) {
+    if (imu_options.max_reprojection_rms_px) {
         effective_tool.max_camera_imu_rms_px =
-            *options.calibrate_camera_imu.max_reprojection_rms_px;
+            *imu_options.max_reprojection_rms_px;
     }
 
     // First pass: parse + gate every camera's calibration. We gate before
@@ -1284,7 +1394,7 @@ void runConfigCommand(
         auto calibration = config::parseKalibrCameraImuCalibration(
             result_path,
             camera_id,
-            options.calibrate_camera_imu.version,
+            imu_options.version,
             true,
             nowIsoUtc(),
             "/posest/" + camera_id + "/image_raw");
@@ -1301,7 +1411,7 @@ void runConfigCommand(
         }
         calibration.report_path = report_path;
         throwIfUnacceptableCameraImu(
-            calibration, effective_tool, options.calibrate_camera_imu.force);
+            calibration, effective_tool, imu_options.force);
         validated.push_back(std::move(calibration));
     }
 
@@ -1309,6 +1419,203 @@ void runConfigCommand(
         replaceCameraImuCalibration(config, std::move(calibration));
     }
     config_store.saveRuntimeConfig(config);
+}
+
+void runCalibrationEndToEnd(
+    const DaemonOptions& options,
+    config::IConfigStore& config_store,
+    ICameraBackendFactory& camera_factory) {
+    const auto& cmd = options.calibrate_camera_end_to_end;
+    auto config = config_store.loadRuntimeConfig();
+
+    // -------------------- 1. Recording (W4-aware). --------------------
+    const bool serial_configured = !config.teensy.serial_port.empty();
+    bool start_teensy = false;
+    bool require_time_sync = false;
+    switch (cmd.require_imu) {
+        case ImuRequirement::Auto:
+            start_teensy = serial_configured;
+            require_time_sync = serial_configured;
+            break;
+        case ImuRequirement::Yes:
+            start_teensy = true;
+            require_time_sync = true;
+            break;
+        case ImuRequirement::No:
+            start_teensy = false;
+            require_time_sync = false;
+            break;
+    }
+
+    calibration::CalibrationRecorderConfig recorder_config{
+        cmd.output_dir,
+        cmd.camera_ids,
+        config.camera_triggers,
+        cmd.duration_s,
+        /*trigger_to_exposure_center_us=*/0,
+        /*min_trigger_match_fraction=*/start_teensy ? 1.0 : 0.0,
+    };
+    calibration::CalibrationRecorder recorder(std::move(recorder_config));
+    std::vector<std::shared_ptr<IFrameProducer>> cameras;
+    auto recorder_consumer =
+        std::shared_ptr<IFrameConsumer>(&recorder, [](IFrameConsumer*) {});
+    for (const auto& camera_id : cmd.camera_ids) {
+        const auto camera_it = std::find_if(
+            config.cameras.begin(),
+            config.cameras.end(),
+            [&camera_id](const CameraConfig& camera) {
+                return camera.id == camera_id;
+            });
+        if (camera_it == config.cameras.end() || !camera_it->enabled) {
+            throw std::runtime_error("selected camera is missing or disabled: " +
+                                     camera_id);
+        }
+        auto camera = camera_factory.createCamera(*camera_it);
+        camera->addConsumer(recorder_consumer);
+        cameras.push_back(camera);
+    }
+    recorder.start();
+
+    std::optional<teensy::TeensyService> teensy;
+    if (start_teensy) {
+        teensy.emplace(config.teensy, config.camera_triggers, recorder);
+        teensy->start();
+        if (require_time_sync) {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!teensy->stats().time_sync_established &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            if (!teensy->stats().time_sync_established) {
+                teensy->stop();
+                recorder.stop();
+                throw std::runtime_error("Teensy time sync was not established");
+            }
+        }
+    }
+
+    for (auto& camera : cameras) {
+        if (camera->start() != ProducerState::Running) {
+            throw std::runtime_error(
+                "Failed to start camera " + camera->id() +
+                " for kalibr recording (already in terminal state)");
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::duration<double>(cmd.duration_s));
+    for (auto& camera : cameras) camera->stop();
+    if (teensy) teensy->stop();
+    recorder.stop();
+    recorder.throwIfUnacceptable();
+
+    rememberDataset(config, cmd.output_dir, cmd.camera_ids, cmd.duration_s);
+    config_store.saveRuntimeConfig(config);
+
+    // -------------------- 2. Materialize target (W1). --------------------
+    config = config_store.loadRuntimeConfig();
+    const auto& target = findCalibrationTarget(config, cmd.target_id);
+    std::filesystem::create_directories(cmd.output_dir);
+    const auto materialized_target =
+        cmd.output_dir / (target.id + "-target.yaml");
+    calibration::writeKalibrTargetYaml(target, materialized_target);
+
+    // -------------------- 3. Bag (W4 auto-detects no-imu). --------------
+    const auto image = resolvedKalibrDockerImage(cmd.docker_image, config);
+    MakeKalibrBagOptions bag_options;
+    bag_options.dataset_dir = cmd.output_dir;
+    bag_options.bag_path = cmd.output_dir / "kalibr.bag";
+    bag_options.no_imu = !datasetHasImuSamples(cmd.output_dir);
+    const int bag_rc =
+        runShell(buildMakeKalibrBagDockerCommand(bag_options, image).c_str());
+    if (bag_rc != 0) {
+        throw std::runtime_error("Kalibr bag Docker command failed");
+    }
+
+    // -------------------- 4. Kalibr intrinsic (W3 docker). --------------
+    CalibrateCameraOptions kalibr_options;
+    kalibr_options.camera_ids = cmd.camera_ids;
+    kalibr_options.topics = cmd.topics;
+    kalibr_options.camera_to_robots = cmd.camera_to_robots;
+    kalibr_options.bag_path = bag_options.bag_path;
+    kalibr_options.target_path = materialized_target;
+    kalibr_options.target_id = cmd.target_id;
+    kalibr_options.output_dir = cmd.output_dir;
+    kalibr_options.version = cmd.version;
+    kalibr_options.docker_image = image;
+    kalibr_options.force = cmd.force;
+    kalibr_options.max_reprojection_rms_px = cmd.max_reprojection_rms_px;
+    const int kalibr_rc =
+        runShell(buildKalibrDockerCommand(kalibr_options).c_str());
+    if (kalibr_rc != 0) {
+        throw std::runtime_error("Kalibr Docker command failed");
+    }
+
+    // -------------------- 5. Parse + gate (W3 + W2). --------------------
+    std::unordered_map<std::string, std::string> topic_to_camera_id;
+    for (std::size_t i = 0; i < cmd.camera_ids.size(); ++i) {
+        topic_to_camera_id.emplace(cmd.topics[i], cmd.camera_ids[i]);
+    }
+    const auto created_at = nowIsoUtc();
+    auto bundle = config::parseKalibrAllCameras(
+        findKalibrCamchain(cmd.output_dir),
+        topic_to_camera_id,
+        cmd.version,
+        created_at);
+
+    const auto results_path = findKalibrResultsCam(cmd.output_dir);
+    const auto metrics = config::parseKalibrCameraResults(results_path);
+    const auto report_path =
+        findKalibrReportCam(cmd.output_dir, "report-cam").string();
+
+    CalibrationToolConfig effective_tool = config.calibration_tools;
+    if (cmd.max_reprojection_rms_px) {
+        effective_tool.max_reprojection_rms_px = *cmd.max_reprojection_rms_px;
+    }
+
+    for (std::size_t i = 0; i < bundle.cameras.size(); ++i) {
+        auto& calibration = bundle.cameras[i];
+        const std::string kalibr_label = "cam" + std::to_string(i);
+        if (const auto it = metrics.find(kalibr_label); it != metrics.end()) {
+            calibration.reprojection_rms_px = it->second.reprojection_rms_px;
+            calibration.observation_count = it->second.observation_count;
+        }
+        calibration.report_path = report_path;
+        throwIfUnacceptableCalibration(calibration, effective_tool, cmd.force);
+    }
+
+    // -------------------- 6. Persist intrinsics + cam-to-cam. -----------
+    // Save intrinsics BEFORE the IMU step so a partial failure preserves
+    // useful data (the partial-failure decision baked into W6).
+    for (std::size_t i = 0; i < bundle.cameras.size(); ++i) {
+        CameraExtrinsicsConfig extrinsics;
+        extrinsics.camera_id = bundle.cameras[i].camera_id;
+        extrinsics.version = cmd.version;
+        extrinsics.camera_to_robot = cmd.camera_to_robots[i];
+        replaceCalibration(
+            config, std::move(bundle.cameras[i]), std::move(extrinsics));
+    }
+    for (auto& edge : bundle.cam_to_cam) {
+        replaceCameraToCameraExtrinsics(config, std::move(edge));
+    }
+    config_store.saveRuntimeConfig(config);
+
+    // -------------------- 7. Optional camera-IMU step. -------------------
+    if (cmd.mode == CalibrationMode::IntrinsicAndImu) {
+        CalibrateCameraImuOptions imu_options;
+        imu_options.dataset_dir = cmd.output_dir;
+        imu_options.target_path = materialized_target;
+        imu_options.imu_path = cmd.imu_path;
+        imu_options.version = cmd.version;
+        imu_options.docker_image = image;
+        imu_options.force = cmd.force;
+        imu_options.max_reprojection_rms_px = cmd.max_reprojection_rms_px;
+        runCameraImuCalibration(imu_options, config_store);
+    }
+
+    // -------------------- 8. Optional dataset cleanup. -------------------
+    if (cmd.cleanup_dataset) {
+        cleanupKalibrDataset(config_store, cmd.output_dir.string(), true);
+    }
 }
 
 void ShutdownSignal::request(int signal_number) {

@@ -1,0 +1,16 @@
+cam0:
+  rostopic: /posest/cam0/image_raw
+  T_cam_imu:
+    - [1.0, 0.0, 0.0, 0.05]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  timeshift_cam_imu: 0.001
+cam1:
+  rostopic: /posest/cam1/image_raw
+  T_cam_imu:
+    - [1.0, 0.0, 0.0, -0.05]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  timeshift_cam_imu: 0.001

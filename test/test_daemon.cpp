@@ -534,6 +534,112 @@ TEST(DaemonOptions, RejectsMismatchedCalibrateFlagCounts) {
         std::invalid_argument);
 }
 
+TEST(DaemonOptions, ParsesCalibrateCameraEndToEndCommand) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera-end-to-end",
+        "--config", "/tmp/robot.db",
+        "--camera-id", "cam0",
+        "--camera-id", "cam1",
+        "--topic", "/posest/cam0/image_raw",
+        "--topic", "/posest/cam1/image_raw",
+        "--camera-to-robot", "0.10,0.0,0.20,0.0,0.0,0.0",
+        "--camera-to-robot", "-0.10,0.0,0.20,0.0,0.0,0.0",
+        "--target-id", "apgrid_88",
+        "--output-dir", "/tmp/datasets/run",
+        "--version", "v1",
+        "--duration-s", "30",
+        "--mode", "intrinsic+imu",
+        "--imu", "/tmp/imu.yaml",
+        "--require-imu", "yes",
+        "--max-reprojection-rms-px", "0.8",
+        "--force",
+        "--docker-image", "kalibr:test",
+        "--cleanup-dataset",
+    };
+    const auto options = posest::runtime::parseDaemonOptions(
+        static_cast<int>(sizeof(args) / sizeof(args[0])), args);
+    EXPECT_EQ(options.command,
+              posest::runtime::DaemonCommand::CalibrateCameraEndToEnd);
+    const auto& cmd = options.calibrate_camera_end_to_end;
+    ASSERT_EQ(cmd.camera_ids.size(), 2u);
+    EXPECT_EQ(cmd.camera_ids[1], "cam1");
+    ASSERT_EQ(cmd.topics.size(), 2u);
+    ASSERT_EQ(cmd.camera_to_robots.size(), 2u);
+    EXPECT_DOUBLE_EQ(cmd.camera_to_robots[0].translation_m.x, 0.10);
+    EXPECT_DOUBLE_EQ(cmd.camera_to_robots[1].translation_m.x, -0.10);
+    EXPECT_EQ(cmd.target_id, "apgrid_88");
+    EXPECT_EQ(cmd.output_dir, std::filesystem::path("/tmp/datasets/run"));
+    EXPECT_EQ(cmd.version, "v1");
+    EXPECT_DOUBLE_EQ(cmd.duration_s, 30.0);
+    EXPECT_EQ(cmd.mode, posest::runtime::CalibrationMode::IntrinsicAndImu);
+    EXPECT_EQ(cmd.imu_path, std::filesystem::path("/tmp/imu.yaml"));
+    EXPECT_EQ(cmd.require_imu, posest::runtime::ImuRequirement::Yes);
+    ASSERT_TRUE(cmd.max_reprojection_rms_px.has_value());
+    EXPECT_DOUBLE_EQ(*cmd.max_reprojection_rms_px, 0.8);
+    EXPECT_TRUE(cmd.force);
+    EXPECT_EQ(cmd.docker_image, "kalibr:test");
+    EXPECT_TRUE(cmd.cleanup_dataset);
+}
+
+TEST(DaemonOptions, RejectsCalibrateCameraEndToEndMissingCounts) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera-end-to-end",
+        "--camera-id", "cam0",
+        "--camera-id", "cam1",
+        "--topic", "/posest/cam0/image_raw",  // only one topic for two cameras
+        "--camera-to-robot", "0.0,0.0,0.0,0.0,0.0,0.0",
+        "--camera-to-robot", "0.0,0.0,0.0,0.0,0.0,0.0",
+        "--target-id", "apgrid_88",
+        "--output-dir", "/tmp/run",
+        "--version", "v1",
+        "--duration-s", "10",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args),
+        std::invalid_argument);
+}
+
+TEST(DaemonOptions, RejectsCalibrateCameraEndToEndIntrinsicImuWithoutImuFlag) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera-end-to-end",
+        "--camera-id", "cam0",
+        "--topic", "/posest/cam0/image_raw",
+        "--camera-to-robot", "0.0,0.0,0.0,0.0,0.0,0.0",
+        "--target-id", "apgrid_88",
+        "--output-dir", "/tmp/run",
+        "--version", "v1",
+        "--duration-s", "10",
+        "--mode", "intrinsic+imu",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args),
+        std::invalid_argument);
+}
+
+TEST(DaemonOptions, RejectsCalibrateCameraEndToEndUnknownMode) {
+    const char* args[] = {
+        "posest_daemon",
+        "calibrate-camera-end-to-end",
+        "--camera-id", "cam0",
+        "--topic", "/posest/cam0/image_raw",
+        "--camera-to-robot", "0.0,0.0,0.0,0.0,0.0,0.0",
+        "--target-id", "apgrid_88",
+        "--output-dir", "/tmp/run",
+        "--version", "v1",
+        "--duration-s", "10",
+        "--mode", "intrinsic-only-please",
+    };
+    EXPECT_THROW(
+        posest::runtime::parseDaemonOptions(
+            static_cast<int>(sizeof(args) / sizeof(args[0])), args),
+        std::invalid_argument);
+}
+
 TEST(DaemonOptions, CalibrateCameraAcceptsTargetIdInsteadOfTargetPath) {
     const char* args[] = {
         "posest_daemon",

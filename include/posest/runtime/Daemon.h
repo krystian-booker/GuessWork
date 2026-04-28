@@ -45,6 +45,26 @@ enum class DaemonCommand {
     ImportCalibrationTarget,
     ListKalibrDatasets,
     DeleteKalibrDataset,
+    CalibrateCameraEndToEnd,
+};
+
+// W6: orchestrator mode toggle. Intrinsic runs only kalibr_calibrate_cameras;
+// IntrinsicAndImu additionally chains kalibr_calibrate_imu_camera against
+// the just-recorded dataset.
+enum class CalibrationMode {
+    Intrinsic,
+    IntrinsicAndImu,
+};
+
+// W4: how strictly the recorder requires a working Teensy + IMU stream.
+//   Auto: gate iff a Teensy serial port is configured. Skip when empty.
+//   Yes:  always require Teensy time sync; throw if not established.
+//   No:   intrinsic-only recording. Don't construct TeensyService at all
+//         and accept frames that have no trigger event attached.
+enum class ImuRequirement {
+    Auto,
+    Yes,
+    No,
 };
 
 struct CalibrateCameraOptions {
@@ -102,22 +122,43 @@ struct DeleteKalibrDatasetOptions {
     bool remove_files{false};
 };
 
+// W6: chains record → bag → Kalibr (→ optional camera-IMU) → persist
+// in one CLI invocation. The legacy single-step subcommands stay for power
+// users; this struct mirrors their flag set so the same parser branches
+// can fan into it.
+struct CalibrateCameraEndToEndOptions {
+    // Per-camera (W3 shape, vectors index-aligned).
+    std::vector<std::string> camera_ids;
+    std::vector<std::string> topics;
+    std::vector<Pose3d> camera_to_robots;
+
+    // Recording + Kalibr inputs.
+    std::string target_id;
+    std::filesystem::path output_dir;
+    std::string version;
+    double duration_s{0.0};
+    ImuRequirement require_imu{ImuRequirement::Auto};
+
+    // Mode + IMU-cam inputs. imu_path is required iff mode == IntrinsicAndImu.
+    CalibrationMode mode{CalibrationMode::Intrinsic};
+    std::filesystem::path imu_path;
+
+    // W2 quality gate overrides.
+    bool force{false};
+    std::optional<double> max_reprojection_rms_px;
+
+    // Resolved through resolvedKalibrDockerImage when empty.
+    std::string docker_image;
+
+    // After success, remove the dataset directory + kalibr_datasets row.
+    bool cleanup_dataset{false};
+};
+
 struct ImportFieldLayoutOptions {
     std::string field_id;
     std::string name;
     std::filesystem::path file_path;
     bool activate{false};
-};
-
-// W4: how strictly the recorder requires a working Teensy + IMU stream.
-//   Auto: gate iff a Teensy serial port is configured. Skip when empty.
-//   Yes:  always require Teensy time sync; throw if not established.
-//   No:   intrinsic-only recording. Don't construct TeensyService at all
-//         and accept frames that have no trigger event attached.
-enum class ImuRequirement {
-    Auto,
-    Yes,
-    No,
 };
 
 struct RecordKalibrDatasetOptions {
@@ -164,7 +205,19 @@ struct DaemonOptions {
     ImportCalibrationTargetOptions import_calibration_target;
     ListKalibrDatasetsOptions list_kalibr_datasets;
     DeleteKalibrDatasetOptions delete_kalibr_dataset;
+    CalibrateCameraEndToEndOptions calibrate_camera_end_to_end;
 };
+
+// W6: shell-out injection point. Every Kalibr Docker invocation in the
+// runtime goes through this hook so end-to-end tests can stage Kalibr
+// fixture YAMLs at the path the parser expects, return 0, and skip the
+// real `docker run`. The default impl wraps std::system().
+//
+// Tests must restore via resetSystemImplForTesting() in TearDown to avoid
+// leaking a captured lambda into other test cases.
+using SystemImpl = std::function<int(const char*)>;
+SystemImpl setSystemImplForTesting(SystemImpl impl);
+void resetSystemImplForTesting();
 
 struct DaemonHealth {
     DaemonState state{DaemonState::Created};
@@ -209,6 +262,27 @@ std::string buildCalibrateCameraImuDockerCommand(
     const std::filesystem::path& camchain_path,
     const std::string& docker_image);
 void runConfigCommand(
+    const DaemonOptions& options,
+    config::IConfigStore& config_store,
+    ICameraBackendFactory& camera_factory);
+
+// W6: refactored helpers shared between the legacy CLI dispatch and the
+// end-to-end orchestrator. `runCameraImuCalibration` runs the bag →
+// kalibr_calibrate_imu_camera → parse → gate → persist sequence for a
+// single CalibrateCameraImuOptions; `cleanupKalibrDataset` removes a
+// kalibr_datasets row (and optionally its directory) by id.
+void runCameraImuCalibration(
+    const CalibrateCameraImuOptions& imu_options,
+    config::IConfigStore& config_store);
+void cleanupKalibrDataset(
+    config::IConfigStore& config_store,
+    const std::string& id,
+    bool remove_files);
+
+// W6: end-to-end orchestrator entry point. The DaemonCommand::CalibrateCameraEndToEnd
+// dispatch in runConfigCommand calls straight through to this; the future HTTP
+// layer can call it directly without going through CLI parsing.
+void runCalibrationEndToEnd(
     const DaemonOptions& options,
     config::IConfigStore& config_store,
     ICameraBackendFactory& camera_factory);

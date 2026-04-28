@@ -207,6 +207,7 @@ add_executable(posest_tests
     test/test_teensy_protocol_golden.cpp
     test/test_teensy_service.cpp
     test/test_time_sync_filter.cpp
+    test/test_calibrate_end_to_end.cpp
     test/test_calibration_parsers.cpp
     test/test_calibration_recorder.cpp
     test/test_calibration_target_writer.cpp
