@@ -180,30 +180,61 @@ bool KimeraVioConsumer::drainPendingConfig() {
     // at start(); imu_buffer_capacity sizes the deque consulted by the
     // IMU drainer thread (B); camera_id is stamped on every emitted
     // measurement and changing it would scramble FusionService's
-    // routing; mono_translation_scale_factor only takes effect through
-    // BackendParams.yaml at backend start (Phase 3.2). Each requires a
-    // backend restart and is silently rolled back here for parity with
+    // routing. Each is silently rolled back here for parity with
     // FusionService's structural reversion (FusionService.cpp:762-806).
     const bool structural_diff =
         staged->param_dir != config_.param_dir ||
         staged->imu_buffer_capacity != config_.imu_buffer_capacity ||
-        staged->camera_id != config_.camera_id ||
-        staged->mono_translation_scale_factor !=
-            config_.mono_translation_scale_factor;
+        staged->camera_id != config_.camera_id;
     if (structural_diff) {
         staged->param_dir = config_.param_dir;
         staged->imu_buffer_capacity = config_.imu_buffer_capacity;
         staged->camera_id = config_.camera_id;
-        staged->mono_translation_scale_factor =
-            config_.mono_translation_scale_factor;
         std::lock_guard<std::mutex> g(stats_mu_);
         ++stats_.config_reloads_structural_skipped;
     }
+
+    // mono_translation_scale_factor is live but YAML-driven: Kimera
+    // reads BackendParams.yaml once at backend start, so we cycle the
+    // backend in place to pick up the freshly-repainted YAML. The
+    // daemon's WebService callback emits the new YAML before invoking
+    // applyConfig; if that emit failed, the on-disk YAML still has
+    // the previous value and the cycled backend will read the old
+    // value — operator sees vio_yaml_repaint_last_error.
+    const bool yaml_backend_diff =
+        staged->mono_translation_scale_factor !=
+        config_.mono_translation_scale_factor;
 
     // Live fields. airborne_tracker_ is touched only from this thread
     // (process()) so its setter is safe to call without locking.
     config_ = std::move(*staged);
     airborne_tracker_.setThresholds(config_.airborne);
+
+    if (yaml_backend_diff && backend_) {
+        // Cycle the backend so Kimera re-parses BackendParams.yaml.
+        // Safe without extra locking: tryPushFrame / tryPushImu are
+        // called only from the worker thread (drainImuUpTo runs from
+        // process() too), and drainPendingConfig is at the top of
+        // process() — so the restart is exclusive with every backend
+        // call on this thread. The IMU drainer (B) only writes to
+        // imu_buffer_ and never touches backend_. Reset
+        // last_kimera_pose_ so the new Kimera world frame is treated
+        // as a fresh bootstrap (next backend output becomes the
+        // "first" again — no published measurement until the one
+        // after). Drop buffered IMU samples — they pre-date the new
+        // bootstrap and Kimera's static-window init shouldn't see
+        // them.
+        backend_->stop();
+        backend_->start();
+        last_kimera_pose_.reset();
+        last_kimera_pose_cov_.reset();
+        {
+            std::lock_guard<std::mutex> bg(imu_buffer_mu_);
+            imu_buffer_.clear();
+        }
+        std::lock_guard<std::mutex> sg(stats_mu_);
+        ++stats_.config_reloads_backend_restarted;
+    }
 
     {
         std::lock_guard<std::mutex> g(stats_mu_);

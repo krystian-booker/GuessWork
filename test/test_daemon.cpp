@@ -984,7 +984,10 @@ TEST(DaemonController, VioYamlRepaintFiresOnIntrinsicChange) {
 
 // Phase 3.2 + 3.1: changing mono_translation_scale_factor counts as a
 // Kimera-relevant change (it appears in BackendParams.yaml). The
-// runtime-templated emit lands the new value on disk.
+// runtime-templated emit lands the new value on disk. Unlike the
+// other YAML-driven fields, this one is absorbed by KimeraVioConsumer's
+// in-place backend restart, so vio_yaml_restart_required must NOT be
+// set when it is the only field that differs.
 TEST(DaemonController, VioYamlRepaintFiresOnMonoScaleFactorChange) {
     const auto db_path = tempDbPath("yaml_repaint_scale");
     std::filesystem::remove(db_path);
@@ -1015,7 +1018,9 @@ TEST(DaemonController, VioYamlRepaintFiresOnMonoScaleFactorChange) {
     daemon.webService()->stageConfig(changed);
 
     EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 1u);
-    EXPECT_TRUE(daemon.health().vio_yaml_restart_required);
+    // mono_translation_scale_factor alone does not require a daemon
+    // restart — the consumer cycles its backend in place.
+    EXPECT_FALSE(daemon.health().vio_yaml_restart_required);
 
     std::ifstream in(kimera_dir / "BackendParams.yaml");
     std::stringstream buf;

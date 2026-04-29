@@ -79,12 +79,15 @@ struct KimeraVioConfig {
 
     // Phase 3.2: promoted from static BackendParams.yaml. KimeraParamWriter
     // strips the line out of the embedded template and appends the
-    // runtime value at emit time. Treated as structural by
-    // KimeraVioConsumer::applyConfig (Kimera reads BackendParams.yaml
-    // once at start; live edits require a daemon restart, signalled
-    // via config_reloads_structural_skipped + the YAML repaint
-    // counters in DaemonHealth). Default 0.1 matches the EurocMono
-    // reference; tighten on a textured-platform soak before changing.
+    // runtime value at emit time. Live-editable: when applyConfig
+    // observes a change, KimeraVioConsumer cycles backend->stop()/start()
+    // in place at the top of the next process() so Kimera re-parses
+    // the (already-repainted) BackendParams.yaml. Daemon-side ordering
+    // is load-bearing — repaintKimeraYamlsIfChanged must land the new
+    // YAML on disk *before* applyConfig fires. Each restart bumps
+    // KimeraVioStats::config_reloads_backend_restarted. Default 0.1
+    // matches the EurocMono reference; tighten on a textured-platform
+    // soak before changing.
     double mono_translation_scale_factor{0.1};
 
     AirborneThresholds airborne;

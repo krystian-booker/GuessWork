@@ -80,10 +80,15 @@ public:
     // Stage a new config for the next process() iteration. Safe to call
     // from any thread; the swap happens at the top of process() before
     // any backend interaction. Live fields take effect immediately;
-    // structural fields (param_dir, imu_buffer_capacity, camera_id) are
-    // reverted to the running config and bump
+    // structural fields (param_dir, imu_buffer_capacity, camera_id)
+    // are reverted to the running config and bump
     // KimeraVioStats::config_reloads_structural_skipped — they require
-    // a backend restart to apply. Mirrors FusionService::applyConfig.
+    // a daemon restart to apply. mono_translation_scale_factor is
+    // live but YAML-driven, so a change triggers an in-place backend
+    // stop/start at the top of the next process() and bumps
+    // config_reloads_backend_restarted; the daemon must repaint
+    // BackendParams.yaml before invoking applyConfig. Mirrors
+    // FusionService::applyConfig.
     void applyConfig(KimeraVioConfig new_config);
 
     KimeraVioStats stats() const;

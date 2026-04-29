@@ -490,6 +490,33 @@ bool kimeraYamlsRequireRepaint(const RuntimeConfig& last,
     return false;
 }
 
+// Subset of kimeraYamlsRequireRepaint covering only YAML-driven fields
+// that the in-place backend cycle in KimeraVioConsumer cannot pick up
+// — i.e. fields that genuinely require a daemon restart to take effect.
+// mono_translation_scale_factor is intentionally excluded: when it is
+// the only YAML-affecting change, the consumer's stop/start cycle
+// re-parses BackendParams.yaml and the change goes live without
+// operator intervention. Used by repaintKimeraYamlsIfChanged to decide
+// whether to set vio_yaml_restart_required.
+bool kimeraYamlsRequireDaemonRestart(const RuntimeConfig& last,
+                                     const RuntimeConfig& next) {
+    if (last.vio.enabled != next.vio.enabled) return true;
+    if (!next.vio.enabled) return false;
+    if (last.vio.vio_camera_id != next.vio.vio_camera_id) return true;
+    if (last.kimera_vio.param_dir != next.kimera_vio.param_dir) return true;
+    if (last.fusion.accel_bias_rw_sigma != next.fusion.accel_bias_rw_sigma ||
+        last.fusion.gyro_bias_rw_sigma != next.fusion.gyro_bias_rw_sigma) {
+        return true;
+    }
+    const auto* last_intr = findActiveIntrinsics(last, last.vio.vio_camera_id);
+    const auto* next_intr = findActiveIntrinsics(next, next.vio.vio_camera_id);
+    if (intrinsicsDiffer(last_intr, next_intr)) return true;
+    const auto* last_ci = findActiveCamImu(last, last.vio.vio_camera_id);
+    const auto* next_ci = findActiveCamImu(next, next.vio.vio_camera_id);
+    if (cameraImuDiffers(last_ci, next_ci)) return true;
+    return false;
+}
+
 }  // namespace
 
 DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
@@ -1905,11 +1932,26 @@ void DaemonController::loadAndBuild() {
                 if (fusion_) {
                     fusion_->applyConfig(fusion::buildFusionConfig(cfg));
                 }
+                // Phase 3.1: re-emit Kimera YAMLs when the saved config
+                // changed any field KimeraParamWriter consumes. Order
+                // is load-bearing — must run *before* vio->applyConfig
+                // so the consumer's in-place backend restart picks up
+                // the freshly-written BackendParams.yaml when
+                // mono_translation_scale_factor changed. Daemon-restart-
+                // only fields (intrinsics, ImuParams sigmas, etc.) flag
+                // vio_yaml_restart_required for operator visibility;
+                // failures don't propagate (the running pipeline keeps
+                // serving the previously-emitted YAMLs); only the
+                // last-error string updates.
+                repaintKimeraYamlsIfChanged(cfg);
                 // Kimera-VIO live-edit hook: live fields (airborne
                 // thresholds, covariance scaling) take effect on the
                 // next process() iteration; structural fields
                 // (param_dir, imu_buffer_capacity, camera_id) are
-                // reverted by the consumer with a counter bump.
+                // reverted by the consumer with a counter bump;
+                // mono_translation_scale_factor triggers an in-place
+                // backend stop/start so Kimera re-reads the YAML
+                // emitted just above.
                 if (graph_) {
                     for (const auto& pipeline : graph_->pipelines()) {
                         if (pipeline && pipeline->type() == "vio") {
@@ -1922,15 +1964,6 @@ void DaemonController::loadAndBuild() {
                         }
                     }
                 }
-                // Phase 3.1: re-emit Kimera YAMLs when the saved config
-                // changed any field KimeraParamWriter consumes. Kimera
-                // reads YAMLs once at backend start, so the change only
-                // takes effect on the next daemon restart — surfaced
-                // via vio_yaml_restart_required for operator visibility.
-                // Failures don't propagate (the running pipeline keeps
-                // serving the previously-emitted YAMLs); only the
-                // last-error string updates.
-                repaintKimeraYamlsIfChanged(cfg);
             });
         graph_ = std::make_unique<RuntimeGraph>(
             config_, camera_factory_, pipeline_factory_, *measurement_bus_);
@@ -2111,6 +2144,13 @@ void DaemonController::repaintKimeraYamlsIfChanged(const RuntimeConfig& cfg) {
         return;
     }
 
+    // Capture the previous emitted snapshot before mutating it so
+    // restart_required is decided against the actual delta the
+    // operator just applied. Without this snapshot, a successful
+    // emit followed by another save would test the new snapshot
+    // against itself.
+    const RuntimeConfig previous = last_emitted_yaml_config_;
+
     std::string error_capture;
     bool ok = false;
     try {
@@ -2126,7 +2166,16 @@ void DaemonController::repaintKimeraYamlsIfChanged(const RuntimeConfig& cfg) {
     std::lock_guard<std::mutex> hg(mu_);
     if (ok) {
         ++health_.vio_yaml_repaint_count;
-        health_.vio_yaml_restart_required = true;
+        // Only set restart_required for fields the consumer's in-place
+        // backend cycle can't pick up. mono_translation_scale_factor
+        // changes are absorbed by the consumer (see
+        // KimeraVioConsumer::drainPendingConfig); intrinsics, IMU bias
+        // sigmas, camera_id, etc. still require a daemon restart. Once
+        // true, stays true until the next daemon boot — operator
+        // visibility into stale state across multiple saves.
+        if (kimeraYamlsRequireDaemonRestart(previous, cfg)) {
+            health_.vio_yaml_restart_required = true;
+        }
         health_.vio_yaml_repaint_last_error.clear();
     } else {
         health_.vio_yaml_repaint_last_error = std::move(error_capture);

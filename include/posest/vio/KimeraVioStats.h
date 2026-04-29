@@ -41,9 +41,15 @@ struct KimeraVioStats {
     // Live-config bookkeeping. Mirrors FusionService's
     // config_reloads_applied / config_reloads_structural_skipped split
     // so a website save that touches a structural field is observable
-    // instead of silently no-op.
+    // instead of silently no-op. config_reloads_backend_restarted
+    // counts in-place backend stop/start cycles triggered when the
+    // YAML-driven mono_translation_scale_factor changed — Kimera reads
+    // BackendParams.yaml once at backend start, so the consumer cycles
+    // it to pick up the freshly-emitted YAML without needing a daemon
+    // restart.
     std::uint64_t config_reloads_applied{0};
     std::uint64_t config_reloads_structural_skipped{0};
+    std::uint64_t config_reloads_backend_restarted{0};
 
     // Phase 2 carpet-scenario telemetry. Both counters are zero unless
     // KimeraVioConfig::preprocess_clahe is on. frames_clahe_applied

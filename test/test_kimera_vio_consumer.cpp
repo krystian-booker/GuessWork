@@ -741,10 +741,16 @@ TEST(KimeraVioConsumer, MissingToFSampleSurfacesAsMissingCount) {
     consumer->stop();
 }
 
-// Phase 3.2: mono_translation_scale_factor is structural — Kimera reads
-// it once from BackendParams.yaml at backend start, so a live edit
-// reverts with the structural-skipped counter bump (mirrors param_dir).
-TEST(KimeraVioConsumer, ApplyConfigRevertsMonoTranslationScaleFactor) {
+// Phase 3.2: mono_translation_scale_factor is YAML-driven but live —
+// the consumer cycles backend->stop()/start() in place when it changes
+// so Kimera re-parses the (already-repainted) BackendParams.yaml. The
+// daemon's WebService callback emits the new YAML before invoking
+// applyConfig; this unit test substitutes FakeVioBackend, so we
+// observe the cycle via the config_reloads_backend_restarted counter
+// and the post-restart "first frame" skip behaviour (Kimera's world
+// frame resets after a stop/start, so the first output after restart
+// has no prior pose to delta against).
+TEST(KimeraVioConsumer, ApplyConfigRestartsBackendOnMonoTranslationScaleFactorChange) {
     posest::MeasurementBus imu_bus(64);
     posest::MeasurementBus out_bus(64);
 
@@ -756,19 +762,37 @@ TEST(KimeraVioConsumer, ApplyConfigRevertsMonoTranslationScaleFactor) {
         "vio", imu_bus, out_bus, &identityConverter,
         std::move(backend), cfg);
     consumer.start();
+
+    // Frame 0 + 1 establish prior pose and produce one published
+    // measurement (the second frame's delta against the first).
     deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto pre = drainVio(out_bus, 1);
+    ASSERT_EQ(pre.size(), 1u);
 
     posest::vio::KimeraVioConfig updated = cfg;
-    updated.mono_translation_scale_factor = 0.5;  // structural — reverted
+    updated.mono_translation_scale_factor = 0.5;
     consumer.applyConfig(updated);
 
-    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
-    auto got = drainVio(out_bus, 1);
-    ASSERT_EQ(got.size(), 1u);
+    // Frame 2 triggers drainPendingConfig which performs the in-place
+    // restart. last_kimera_pose_ resets, so this frame is the new
+    // "first" — pushed to backend, no measurement published.
+    deliverPaced(consumer, makeFrame(3'000, 2, 0.05));
+    auto restart_first = drainVio(out_bus, 1, 50ms);
+    EXPECT_EQ(restart_first.size(), 0u);
+
+    // Frame 3 produces the first post-restart published measurement.
+    deliverPaced(consumer, makeFrame(4'000, 3, 0.05));
+    auto post = drainVio(out_bus, 1);
+    ASSERT_EQ(post.size(), 1u);
 
     auto s = consumer.stats();
     EXPECT_EQ(s.config_reloads_applied, 1u);
-    EXPECT_EQ(s.config_reloads_structural_skipped, 1u);
+    EXPECT_EQ(s.config_reloads_structural_skipped, 0u);
+    EXPECT_EQ(s.config_reloads_backend_restarted, 1u);
+    // The restart counts an extra outputs_skipped_first beyond the
+    // initial bootstrap skip.
+    EXPECT_GE(s.outputs_skipped_first, 2u);
 
     consumer.stop();
 }

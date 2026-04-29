@@ -245,9 +245,12 @@ struct DaemonHealth {
     // successful emitKimeraParamYamls calls fired by the WebService
     // save callback (the initial loadAndBuild emit does NOT count —
     // only post-startup repaints). vio_yaml_restart_required becomes
-    // true on the first successful repaint and stays true: Kimera
-    // reads YAMLs once at backend start, so any post-start repaint
-    // requires a daemon restart to actually take effect.
+    // true on the first successful repaint that touched a field the
+    // consumer's in-place backend cycle cannot absorb (intrinsics,
+    // ImuParams sigmas, vio_camera_id, etc.) and stays true thereafter.
+    // mono_translation_scale_factor changes do NOT set this flag —
+    // KimeraVioConsumer cycles backend->stop()/start() on the next
+    // process() iteration to pick up the freshly-emitted YAML.
     // vio_yaml_repaint_last_error is empty when the last attempt
     // succeeded; populated with std::exception::what() on failure
     // (the running pipeline keeps using the previously-emitted YAMLs
