@@ -59,6 +59,7 @@ bool FakeVioBackend::tryPushFrame(std::uint64_t teensy_time_us,
 
     out.tracking_ok = this_index > config_.tracking_ok_after_n_frames;
     out.backend_status = out.tracking_ok ? "fake_ok" : "fake_warmup";
+    out.landmark_count = config_.landmark_count;
 
     if (callback_) {
         callback_(out);

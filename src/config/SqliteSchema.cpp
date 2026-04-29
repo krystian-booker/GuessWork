@@ -546,6 +546,46 @@ COMMIT;
 )sql";
 }
 
+const char* migration16Sql() {
+    // Phase 2 carpet-scenario tunables on kimera_vio_config:
+    //   - preprocess_clahe: gate for CLAHE pre-processing in
+    //     KimeraVioConsumer::process. Off by default — CLAHE on flat
+    //     IR-illuminated frames can amplify FPN/read-noise enough that
+    //     GFTT locks onto phantom features that survive optimization.
+    //     The operator turns this on after observing landmark counts
+    //     under the floor (see landmark_count_floor below).
+    //   - clahe_clip_limit / clahe_tile_grid_size: cv::createCLAHE
+    //     parameters; conservative defaults (2.0, 16x16). Lower clip
+    //     limit and larger tile size both bias toward less aggressive
+    //     enhancement.
+    //   - clahe_min_variance_laplacian: floor on the input-frame
+    //     variance-of-Laplacian metric. Frames below this skip CLAHE
+    //     even when the gate is on (likely featureless / blurry, where
+    //     enhancement just amplifies noise). Default 0.0 == no gate;
+    //     tune from observed values once CLAHE is enabled.
+    //   - landmark_count_floor: floor under which Kimera's reported
+    //     landmark count counts as "below floor" in the
+    //     outputs_below_landmark_floor counter. Used by the operator
+    //     to spot phantom-feature regimes after enabling CLAHE.
+    return R"sql(
+BEGIN;
+
+ALTER TABLE kimera_vio_config
+    ADD COLUMN preprocess_clahe INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kimera_vio_config
+    ADD COLUMN clahe_clip_limit REAL NOT NULL DEFAULT 2.0;
+ALTER TABLE kimera_vio_config
+    ADD COLUMN clahe_tile_grid_size INTEGER NOT NULL DEFAULT 16;
+ALTER TABLE kimera_vio_config
+    ADD COLUMN clahe_min_variance_laplacian REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE kimera_vio_config
+    ADD COLUMN landmark_count_floor INTEGER NOT NULL DEFAULT 8;
+
+PRAGMA user_version = 16;
+COMMIT;
+)sql";
+}
+
 const char* migration15Sql() {
     // F-5: ToF unary z-prior fields (fusion_config) plus the grounded-
     // distance calibration baseline (vio_config). Defaults match the
@@ -606,7 +646,7 @@ COMMIT;
 }  // namespace
 
 int currentSchemaVersion() {
-    return 15;
+    return 16;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -677,6 +717,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 14) {
         exec(db, migration15Sql());
+        migrated_version = 15;
+    }
+    if (migrated_version == 15) {
+        exec(db, migration16Sql());
     }
 }
 

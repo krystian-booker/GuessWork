@@ -984,6 +984,16 @@ std::string healthToJson(const DaemonHealth& health) {
             {"config_reloads_applied", v.config_reloads_applied},
             {"config_reloads_structural_skipped",
              v.config_reloads_structural_skipped},
+            // Phase 2 telemetry. CLAHE counters stay zero unless
+            // preprocess_clahe is on; landmark counters are zero until
+            // Kimera produces an output.
+            {"frames_clahe_applied", v.frames_clahe_applied},
+            {"frames_clahe_skipped_low_texture",
+             v.frames_clahe_skipped_low_texture},
+            {"last_landmark_count", v.last_landmark_count},
+            {"landmark_count_avg", v.landmark_count_avg},
+            {"outputs_below_landmark_floor",
+             v.outputs_below_landmark_floor},
         };
         if (v.last_output_age_ms.has_value()) {
             j["last_output_age_ms"] = *v.last_output_age_ms;

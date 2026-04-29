@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "posest/vio/AirborneCovariance.h"
@@ -39,6 +40,42 @@ struct KimeraVioConfig {
     // (FusionService treats camera_id as a routing tag; mismatched IDs
     // will silently route the measurement to the wrong factor chain).
     std::string camera_id{"vio"};
+
+    // Mirrored from runtime::VioConfig::ir_led_enabled by
+    // buildKimeraVioConfig so the consumer can gate CLAHE on it without
+    // taking a dependency on the full RuntimeConfig. Without IR
+    // illumination over a downward-facing carpet camera the frame is
+    // near-black and CLAHE would amplify sensor noise rather than
+    // enhance any real structure.
+    bool ir_led_enabled{true};
+
+    // Phase 2: optional CLAHE preprocessing on the grayscale frame
+    // before it reaches Kimera's frontend. Off by default — turning it
+    // on without a sane landmark-count floor (see KimeraVioStats) can
+    // produce phantom tracks that look temporally stable because they
+    // are sensor FPN, not scene structure. See KimeraVioConsumer::process
+    // and migration16Sql for the full rationale.
+    bool preprocess_clahe{false};
+    // cv::createCLAHE parameters. Conservative defaults: a low clip
+    // limit damps the local contrast amplification, a large tile size
+    // (16x16) keeps the per-tile histogram tall enough that CLAHE only
+    // boosts genuine local maxima.
+    double clahe_clip_limit{2.0};
+    std::int32_t clahe_tile_grid_size{16};
+    // Variance-of-Laplacian floor on the input frame. When the metric
+    // sits below this, CLAHE is skipped for the frame: the image is
+    // either blurry, saturated, or featureless and CLAHE would only
+    // amplify noise. Default 0.0 disables the gate (CLAHE always runs
+    // when preprocess_clahe is on); calibrate from observed metric
+    // values once CLAHE is in use.
+    double clahe_min_variance_laplacian{0.0};
+
+    // Phase 2: landmark-count floor used by onBackendOutput to bump
+    // KimeraVioStats::outputs_below_landmark_floor. Independent of the
+    // tracking_ok heuristic in KimeraBackend (which uses a fixed
+    // hardcoded minimum); this is an observability counter for the
+    // operator, not a hard reject.
+    std::int32_t landmark_count_floor{8};
 
     AirborneThresholds airborne;
 

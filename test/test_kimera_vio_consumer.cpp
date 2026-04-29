@@ -385,6 +385,161 @@ TEST(KimeraVioConsumer, ApplyConfigRevertsStructuralFields) {
 #include "posest/pipelines/PipelineStats.h"
 #include "posest/runtime/IVisionPipeline.h"
 
+// CLAHE preprocessing is off by default — the consumer must not call any
+// OpenCV image processing and the new counters stay at zero. This pins
+// the default-behaviour contract: turning Phase 2 on must be explicit.
+TEST(KimeraVioConsumer, ClaheOffByDefaultLeavesCountersAtZero) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), {});
+    consumer.start();
+
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.frames_clahe_applied, 0u);
+    EXPECT_EQ(s.frames_clahe_skipped_low_texture, 0u);
+
+    consumer.stop();
+}
+
+// preprocess_clahe + ir_led_enabled both on, no variance gate: every
+// frame goes through CLAHE.
+TEST(KimeraVioConsumer, ClaheAppliedWhenAllGatesOn) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.preprocess_clahe = true;
+    cfg.ir_led_enabled = true;
+    cfg.clahe_min_variance_laplacian = 0.0;  // gate disabled
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.frames_clahe_applied, 2u);
+    EXPECT_EQ(s.frames_clahe_skipped_low_texture, 0u);
+
+    consumer.stop();
+}
+
+// preprocess_clahe is on but ir_led_enabled is false → CLAHE skipped
+// entirely. The counters stay at zero (skip is "not gated", not "gated
+// off by texture") because the IR check short-circuits before CLAHE
+// even considers the frame.
+TEST(KimeraVioConsumer, ClaheSkippedWhenIrLedDisabled) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.preprocess_clahe = true;
+    cfg.ir_led_enabled = false;  // gate off
+    cfg.clahe_min_variance_laplacian = 0.0;
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.frames_clahe_applied, 0u);
+    EXPECT_EQ(s.frames_clahe_skipped_low_texture, 0u);
+
+    consumer.stop();
+}
+
+// makeFrame produces an all-zeros 64x64 image. variance-of-Laplacian on
+// a uniform image is exactly 0, so any positive floor suppresses CLAHE
+// and bumps frames_clahe_skipped_low_texture. A textured frame would
+// pass the same gate; the test exercises the suppression path.
+TEST(KimeraVioConsumer, ClaheTextureGateSuppressesFlatFrames) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.preprocess_clahe = true;
+    cfg.ir_led_enabled = true;
+    cfg.clahe_min_variance_laplacian = 1.0;  // any positive floor works
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.frames_clahe_applied, 0u);
+    EXPECT_EQ(s.frames_clahe_skipped_low_texture, 2u);
+
+    consumer.stop();
+}
+
+// Backend's landmark_count rides through to the consumer's stats and
+// the EMA seeds from the first sample (no zero-drift bias). The default
+// FakeVioBackend reports 20 landmarks per output, well above the
+// default landmark_count_floor of 8, so the floor counter stays put.
+TEST(KimeraVioConsumer, LandmarkCountTelemetryAndFloorCounter) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.landmark_count_floor = 8;
+
+    posest::vio::FakeVioBackend::Config bcfg;
+    bcfg.landmark_count = 4;  // Below floor → counter ticks.
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>(bcfg);
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+
+    // Three frames → first is skipped (no T_prev), the other two
+    // publish and increment outputs_below_landmark_floor.
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    deliverPaced(consumer, makeFrame(3'000, 2, 0.05));
+    auto got = drainVio(out_bus, 2);
+    ASSERT_EQ(got.size(), 2u);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.outputs_published, 2u);
+    EXPECT_EQ(s.last_landmark_count, 4);
+    // EMA seeds from the first sample, then an alpha=0.1 update; with
+    // a constant 4 input the average stays at 4.
+    EXPECT_NEAR(s.landmark_count_avg, 4.0, 1e-9);
+    EXPECT_EQ(s.outputs_below_landmark_floor, 2u);
+
+    consumer.stop();
+}
+
 // pipelineStats() snapshots the consumer's KimeraVioStats and stamps
 // pipeline_id from ConsumerBase::id(). last_output_age_ms is the
 // watchdog signal: nullopt before the first publish, set afterwards.

@@ -42,6 +42,14 @@ struct VioBackendOutput {
     // gate locally avoids enqueueing dead measurements.
     bool tracking_ok{false};
 
+    // Number of landmarks Kimera held in its smoother for this output.
+    // Phase 2 telemetry signal: see KimeraVioStats::landmark_count_avg
+    // and outputs_below_landmark_floor for the operator-facing
+    // observability surface. KimeraBackend populates this from
+    // BackendOutput::landmark_count_; FakeVioBackend leaves it at 0
+    // unless a test wires it explicitly.
+    std::int32_t landmark_count{0};
+
     // Free-form status string for telemetry; mirrors
     // VioMeasurement::backend_status. Optional.
     std::string backend_status;

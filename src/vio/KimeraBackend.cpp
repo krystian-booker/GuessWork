@@ -232,6 +232,8 @@ private:
             static_cast<std::uint64_t>(kout.timestamp_) / 1000ULL;
         out.world_T_body = kout.W_State_Blkf_.pose_;
 
+        out.landmark_count = static_cast<std::int32_t>(kout.landmark_count_);
+
         const auto& C = kout.state_covariance_lkf_;
         // Defensive: state_covariance_lkf_ is dynamically sized, and
         // very early Kimera outputs (pre-initialization) can be empty.

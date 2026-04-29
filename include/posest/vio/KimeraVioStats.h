@@ -37,6 +37,30 @@ struct KimeraVioStats {
     std::uint64_t config_reloads_applied{0};
     std::uint64_t config_reloads_structural_skipped{0};
 
+    // Phase 2 carpet-scenario telemetry. Both counters are zero unless
+    // KimeraVioConfig::preprocess_clahe is on. frames_clahe_applied
+    // increments per frame that actually went through cv::CLAHE;
+    // frames_clahe_skipped_low_texture increments when the variance-of
+    // -Laplacian gate suppressed the application (image too flat / too
+    // noisy for CLAHE to help). The ratio is the operator's signal for
+    // tuning clahe_min_variance_laplacian.
+    std::uint64_t frames_clahe_applied{0};
+    std::uint64_t frames_clahe_skipped_low_texture{0};
+
+    // Phase 2 backend-output telemetry. last_landmark_count is the raw
+    // value from Kimera's most recent BackendOutput; landmark_count_avg
+    // is an exponential moving average over the same series (alpha 0.1,
+    // ~10-frame smoothing) so the operator gets a steadier signal than
+    // the per-frame value. outputs_below_landmark_floor counts outputs
+    // whose landmark_count was strictly less than
+    // KimeraVioConfig::landmark_count_floor — independent of Kimera's
+    // own tracking_ok heuristic, this is the metric that catches the
+    // CLAHE-amplified-FPN regime (lots of landmarks reported but they
+    // die in optimization rather than survive).
+    std::int32_t last_landmark_count{0};
+    double landmark_count_avg{0.0};
+    std::uint64_t outputs_below_landmark_floor{0};
+
     // Milliseconds since the last published VioMeasurement, computed at
     // snapshot time relative to steady_clock::now(). nullopt before the
     // first output is published. The watchdog signal that catches a

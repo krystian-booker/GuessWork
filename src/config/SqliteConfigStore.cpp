@@ -755,7 +755,9 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             "SELECT param_dir, airborne_above_m, airborne_below_m, "
             "airborne_settle_ms, inflation_factor, inflation_cap, "
             "covariance_strategy, covariance_scale_alpha, "
-            "imu_buffer_capacity, airborne_lookup_capacity "
+            "imu_buffer_capacity, airborne_lookup_capacity, "
+            "preprocess_clahe, clahe_clip_limit, clahe_tile_grid_size, "
+            "clahe_min_variance_laplacian, landmark_count_floor "
             "FROM kimera_vio_config WHERE id = 1");
         if (stmt.stepRow()) {
             config.kimera_vio.param_dir = stmt.columnText(0);
@@ -779,6 +781,14 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             config.kimera_vio.airborne_lookup_capacity =
                 static_cast<std::size_t>(checkedUint32(
                     stmt.columnInt64(9), "airborne_lookup_capacity"));
+            config.kimera_vio.preprocess_clahe = stmt.columnInt64(10) != 0;
+            config.kimera_vio.clahe_clip_limit = stmt.columnDouble(11);
+            config.kimera_vio.clahe_tile_grid_size =
+                static_cast<std::int32_t>(stmt.columnInt64(12));
+            config.kimera_vio.clahe_min_variance_laplacian =
+                stmt.columnDouble(13);
+            config.kimera_vio.landmark_count_floor =
+                static_cast<std::int32_t>(stmt.columnInt64(14));
         }
     }
 
@@ -1281,8 +1291,10 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "(id, param_dir, airborne_above_m, airborne_below_m, "
             "airborne_settle_ms, inflation_factor, inflation_cap, "
             "covariance_strategy, covariance_scale_alpha, "
-            "imu_buffer_capacity, airborne_lookup_capacity) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "imu_buffer_capacity, airborne_lookup_capacity, "
+            "preprocess_clahe, clahe_clip_limit, clahe_tile_grid_size, "
+            "clahe_min_variance_laplacian, landmark_count_floor) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, config.kimera_vio.param_dir);
         insert.bindDouble(2, config.kimera_vio.airborne.above_m);
         insert.bindDouble(3, config.kimera_vio.airborne.below_m);
@@ -1301,6 +1313,14 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
         insert.bindInt64(10,
             static_cast<sqlite3_int64>(
                 config.kimera_vio.airborne_lookup_capacity));
+        insert.bindInt(11, config.kimera_vio.preprocess_clahe ? 1 : 0);
+        insert.bindDouble(12, config.kimera_vio.clahe_clip_limit);
+        insert.bindInt64(13,
+            static_cast<sqlite3_int64>(config.kimera_vio.clahe_tile_grid_size));
+        insert.bindDouble(14,
+            config.kimera_vio.clahe_min_variance_laplacian);
+        insert.bindInt64(15,
+            static_cast<sqlite3_int64>(config.kimera_vio.landmark_count_floor));
         insert.stepDone();
     }
 

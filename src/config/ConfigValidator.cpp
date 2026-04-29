@@ -470,6 +470,25 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
     require(config.kimera_vio.airborne_lookup_capacity >= 8 &&
                 config.kimera_vio.airborne_lookup_capacity <= 65536,
             "kimera_vio airborne_lookup_capacity must be in [8, 65536]");
+    // Phase 2 carpet-scenario tunables. CLAHE clip limit caps at 8.0 — the
+    // OpenCV default ceiling beyond which contrast amplification is
+    // routinely pathological even on well-textured frames; tile grid is
+    // bounded below at 2 (CLAHE is a no-op at 1) and above at 64 (any
+    // larger and the per-tile histogram is small enough to be dominated
+    // by counting noise on a 640x480 frame).
+    require(isFinite(config.kimera_vio.clahe_clip_limit) &&
+                config.kimera_vio.clahe_clip_limit > 0.0 &&
+                config.kimera_vio.clahe_clip_limit <= 8.0,
+            "kimera_vio clahe_clip_limit must be in (0, 8]");
+    require(config.kimera_vio.clahe_tile_grid_size >= 2 &&
+                config.kimera_vio.clahe_tile_grid_size <= 64,
+            "kimera_vio clahe_tile_grid_size must be in [2, 64]");
+    require(isFinite(config.kimera_vio.clahe_min_variance_laplacian) &&
+                config.kimera_vio.clahe_min_variance_laplacian >= 0.0,
+            "kimera_vio clahe_min_variance_laplacian must be finite and "
+            ">= 0 (0 disables the gate)");
+    require(config.kimera_vio.landmark_count_floor >= 0,
+            "kimera_vio landmark_count_floor must be >= 0");
 
     // GTSAM fusion-graph tunables. Bounds are deliberately loose where the
     // graph itself will gracefully degrade and tight where a bad value would

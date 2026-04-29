@@ -1408,6 +1408,41 @@ TEST(ConfigValidator, RejectsFusionHuberKNonPositive) {
     EXPECT_THROW(posest::config::validateRuntimeConfig(config), std::invalid_argument);
 }
 
+// Phase 2: validator coverage on the new kimera_vio_config columns.
+TEST(ConfigValidator, RejectsKimeraClaheClipLimitOutOfRange) {
+    auto config = makeValidConfig();
+    config.kimera_vio.clahe_clip_limit = 0.0;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+    config.kimera_vio.clahe_clip_limit = 12.0;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsKimeraClaheTileGridOutOfRange) {
+    auto config = makeValidConfig();
+    config.kimera_vio.clahe_tile_grid_size = 1;  // CLAHE is a no-op at 1
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+    config.kimera_vio.clahe_tile_grid_size = 128;  // > 64 cap
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsKimeraClaheMinVarianceNegative) {
+    auto config = makeValidConfig();
+    config.kimera_vio.clahe_min_variance_laplacian = -0.01;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
+TEST(ConfigValidator, RejectsKimeraLandmarkFloorNegative) {
+    auto config = makeValidConfig();
+    config.kimera_vio.landmark_count_floor = -1;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
 TEST(ConfigValidator, RejectsFusionMaxKeyframeDtOutOfRange) {
     auto config = makeValidConfig();
     config.fusion.max_keyframe_dt_seconds = 0.001;  // too small
@@ -1467,6 +1502,13 @@ TEST(SqliteConfigStore, KimeraVioConfigDefaultsForFreshDatabase) {
     EXPECT_DOUBLE_EQ(loaded.kimera_vio.covariance_scale_alpha, 0.8);
     EXPECT_EQ(loaded.kimera_vio.imu_buffer_capacity, 1024u);
     EXPECT_EQ(loaded.kimera_vio.airborne_lookup_capacity, 64u);
+    // Phase 2 / migration 16 defaults. CLAHE off, conservative knobs,
+    // floor of 8 landmarks (matches the consumer's compile-time default).
+    EXPECT_FALSE(loaded.kimera_vio.preprocess_clahe);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.clahe_clip_limit, 2.0);
+    EXPECT_EQ(loaded.kimera_vio.clahe_tile_grid_size, 16);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.clahe_min_variance_laplacian, 0.0);
+    EXPECT_EQ(loaded.kimera_vio.landmark_count_floor, 8);
 
     std::filesystem::remove(path);
 }
@@ -1491,6 +1533,11 @@ TEST(SqliteConfigStore, KimeraVioConfigRoundTripsAndReopens) {
     config.kimera_vio.covariance_scale_alpha = 0.6;
     config.kimera_vio.imu_buffer_capacity = 2048;
     config.kimera_vio.airborne_lookup_capacity = 96;
+    config.kimera_vio.preprocess_clahe = true;
+    config.kimera_vio.clahe_clip_limit = 3.5;
+    config.kimera_vio.clahe_tile_grid_size = 8;
+    config.kimera_vio.clahe_min_variance_laplacian = 12.5;
+    config.kimera_vio.landmark_count_floor = 12;
 
     {
         posest::config::SqliteConfigStore store(path);
@@ -1514,6 +1561,11 @@ TEST(SqliteConfigStore, KimeraVioConfigRoundTripsAndReopens) {
     EXPECT_DOUBLE_EQ(loaded.kimera_vio.covariance_scale_alpha, 0.6);
     EXPECT_EQ(loaded.kimera_vio.imu_buffer_capacity, 2048u);
     EXPECT_EQ(loaded.kimera_vio.airborne_lookup_capacity, 96u);
+    EXPECT_TRUE(loaded.kimera_vio.preprocess_clahe);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.clahe_clip_limit, 3.5);
+    EXPECT_EQ(loaded.kimera_vio.clahe_tile_grid_size, 8);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.clahe_min_variance_laplacian, 12.5);
+    EXPECT_EQ(loaded.kimera_vio.landmark_count_floor, 12);
 
     std::filesystem::remove(path);
 }

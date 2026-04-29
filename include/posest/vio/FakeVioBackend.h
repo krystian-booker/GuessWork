@@ -46,6 +46,13 @@ public:
         // frame index to simulate backpressure and exercise the
         // consumer's drop counter.
         std::uint64_t fail_push_on_frame{0};
+
+        // Synthetic landmark count stamped onto every emitted output.
+        // Default 20 sits above the consumer's default
+        // landmark_count_floor (8) so existing tests don't see the
+        // outputs_below_landmark_floor counter tick on every output.
+        // Tests targeting the floor counter set this explicitly.
+        std::int32_t landmark_count{20};
     };
 
     explicit FakeVioBackend(Config config = {});

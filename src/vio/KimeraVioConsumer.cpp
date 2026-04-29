@@ -6,12 +6,52 @@
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
+#include <opencv2/imgproc.hpp>
 
 #include "posest/MeasurementBus.h"
 
 namespace posest::vio {
 
 namespace {
+
+// Returns true if the input frame's variance-of-Laplacian sits at or
+// above `floor`. Cheap proxy for "is there enough scene structure here
+// for CLAHE to enhance, or just sensor noise to amplify". Computed on a
+// 4×-downsampled grayscale copy to keep the cost out of the hot path
+// (~0.3 ms at 640x480 grayscale on a 12th-gen Core). When floor == 0
+// the gate is disabled and the function short-circuits to true.
+bool varianceOfLaplacianAtLeast(const cv::Mat& gray, double floor) {
+    if (floor <= 0.0) return true;
+    cv::Mat down;
+    cv::pyrDown(gray, down);
+    cv::Mat lap;
+    cv::Laplacian(down, lap, CV_64F);
+    cv::Scalar mean;
+    cv::Scalar stddev;
+    cv::meanStdDev(lap, mean, stddev);
+    const double variance = stddev[0] * stddev[0];
+    return variance >= floor;
+}
+
+// Apply CLAHE to a grayscale frame, returning the enhanced result. The
+// input is always cloned (or converted from BGR), never modified in
+// place, because the upstream Frame::image is shared via shared_ptr and
+// other consumers may still be reading it.
+cv::Mat applyClahe(const cv::Mat& image,
+                   double clip_limit,
+                   int tile_grid) {
+    cv::Mat gray;
+    if (image.channels() == 1) {
+        gray = image;
+    } else {
+        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    }
+    auto clahe = cv::createCLAHE(clip_limit,
+                                 cv::Size(tile_grid, tile_grid));
+    cv::Mat enhanced;
+    clahe->apply(gray, enhanced);
+    return enhanced;
+}
 
 Pose3d toPose3d(const gtsam::Pose3& p) {
     // Mirrors FusionService::toGtsamPose (FusionService.cpp:40): RzRyRx
@@ -196,7 +236,39 @@ void KimeraVioConsumer::process(const Frame& frame) {
     recordAirborneState(frame_t_us, state);
     drainImuUpTo(frame_t_us);
 
-    const bool ok = backend_->tryPushFrame(frame_t_us, frame.image);
+    // Optional CLAHE preprocessing. Gated on three conditions, in
+    // increasing cost order so we short-circuit cheaply:
+    //   1. preprocess_clahe must be on (operator opt-in).
+    //   2. ir_led_enabled must be on — without IR illumination the
+    //      carpet frame is near-black and CLAHE only amplifies sensor
+    //      noise; this mirror lives on KimeraVioConfig so the consumer
+    //      doesn't take a dependency on the full RuntimeConfig.
+    //   3. variance-of-Laplacian on the input must clear the floor — a
+    //      cheap "is there real scene content here, or just noise".
+    //      Default floor is 0.0 (gate disabled).
+    // Off path: pass frame.image through unchanged. Note that
+    // KimeraBackend::tryPushFrame already does BGR→Gray conversion, so
+    // when CLAHE is off we leave that work to the backend.
+    cv::Mat to_push = frame.image;
+    if (config_.preprocess_clahe && config_.ir_led_enabled) {
+        cv::Mat gray_input = frame.image;
+        if (frame.image.channels() != 1) {
+            cv::cvtColor(frame.image, gray_input, cv::COLOR_BGR2GRAY);
+        }
+        if (varianceOfLaplacianAtLeast(
+                gray_input, config_.clahe_min_variance_laplacian)) {
+            to_push = applyClahe(gray_input,
+                                 config_.clahe_clip_limit,
+                                 config_.clahe_tile_grid_size);
+            std::lock_guard<std::mutex> g(stats_mu_);
+            ++stats_.frames_clahe_applied;
+        } else {
+            std::lock_guard<std::mutex> g(stats_mu_);
+            ++stats_.frames_clahe_skipped_low_texture;
+        }
+    }
+
+    const bool ok = backend_->tryPushFrame(frame_t_us, to_push);
     std::lock_guard<std::mutex> g(stats_mu_);
     if (ok) {
         ++stats_.frames_pushed;
@@ -363,6 +435,24 @@ void KimeraVioConsumer::onBackendOutput(const VioBackendOutput& out) {
     std::lock_guard<std::mutex> g(stats_mu_);
     ++stats_.outputs_published;
     last_output_at_ = std::chrono::steady_clock::now();
+
+    // Phase 2: landmark-count telemetry. EMA alpha = 0.1 (~10-frame
+    // smoothing) is tight enough to react within a second at 10 Hz
+    // output rate but loose enough to suppress per-frame jitter. The
+    // first sample seeds the average outright so the displayed value
+    // doesn't drift up from zero for the first ~30 frames.
+    stats_.last_landmark_count = out.landmark_count;
+    constexpr double kAlpha = 0.1;
+    if (stats_.outputs_published == 1) {
+        stats_.landmark_count_avg = static_cast<double>(out.landmark_count);
+    } else {
+        stats_.landmark_count_avg =
+            kAlpha * static_cast<double>(out.landmark_count) +
+            (1.0 - kAlpha) * stats_.landmark_count_avg;
+    }
+    if (out.landmark_count < config_.landmark_count_floor) {
+        ++stats_.outputs_below_landmark_floor;
+    }
 }
 
 }  // namespace posest::vio
