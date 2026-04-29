@@ -30,6 +30,14 @@ struct KimeraVioStats {
     std::uint64_t outputs_skipped_no_tracking{0};
     std::uint64_t outputs_inflated_airborne{0};
     std::uint64_t ground_distance_missing{0};
+    // Outputs whose published VioMeasurement carried a ToF
+    // ground_distance_m value (i.e. the Frame had a ToF reading and the
+    // teensy_time_us snapshot survived eviction). Compared against
+    // outputs_published this is the operator's signal that the camera↔
+    // ToF time alignment is reaching downstream factor consumers — if
+    // outputs_published rises but this stays at zero, the ToFSampleCache
+    // wiring is broken upstream of KimeraVioConsumer.
+    std::uint64_t outputs_with_ground_distance{0};
     // Live-config bookkeeping. Mirrors FusionService's
     // config_reloads_applied / config_reloads_structural_skipped split
     // so a website save that touches a structural field is observable

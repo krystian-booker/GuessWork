@@ -67,6 +67,16 @@ struct VioMeasurement {
     std::array<double, 36> covariance{};
     bool tracking_ok{false};
     std::string backend_status;
+    // Time-aligned ToF distance (camera-to-ground) for the frame this
+    // measurement closes against. Stamped by KimeraVioConsumer from
+    // Frame::ground_distance_m at frame-push time, retrieved in the
+    // backend output callback via the same teensy_time → snapshot lookup
+    // that recovers the airborne state. Empty when ToF was unavailable
+    // for that frame (cache miss, range_status != 0, or the lookup
+    // entry got evicted under backlog). Downstream consumers can use
+    // it as a metric anchor for monocular scale recovery without
+    // re-querying the ToF cache on a different time cursor.
+    std::optional<double> ground_distance_m;
 };
 
 struct ImuSample {

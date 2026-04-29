@@ -383,7 +383,7 @@ CREATE TABLE IF NOT EXISTS fusion_config (
     gravity_local_x REAL NOT NULL DEFAULT 0.0,
     gravity_local_y REAL NOT NULL DEFAULT 0.0,
     gravity_local_z REAL NOT NULL DEFAULT 9.80665,
-    enable_vio INTEGER NOT NULL DEFAULT 0,
+    enable_vio INTEGER NOT NULL DEFAULT 1,
     vio_sigma_rx REAL NOT NULL DEFAULT 0.05,
     vio_sigma_ry REAL NOT NULL DEFAULT 0.05,
     vio_sigma_rz REAL NOT NULL DEFAULT 0.05,
@@ -546,6 +546,25 @@ COMMIT;
 )sql";
 }
 
+const char* migration18Sql() {
+    // Flip the two fusion gates (enable_vio, enable_tof_z_prior) on for
+    // existing rows. New rows pick up DEFAULT 1 from the migrated CREATE
+    // TABLE / ADD COLUMN, but ALTER COLUMN DEFAULT only affects future
+    // inserts — single-row config tables that were already populated under
+    // the old DEFAULT 0 stay at 0 unless explicitly UPDATEd here. The
+    // platform's mono+ToF stack is sized to feed both factors into GTSAM,
+    // and shipping with them off silently dropped the only metric body-z
+    // anchor (ToF prior) and the entire VIO factor chain.
+    return R"sql(
+BEGIN;
+
+UPDATE fusion_config SET enable_vio = 1, enable_tof_z_prior = 1 WHERE id = 1;
+
+PRAGMA user_version = 18;
+COMMIT;
+)sql";
+}
+
 const char* migration17Sql() {
     // Phase 3.2: promote mono_translation_scale_factor from a static
     // line in BackendParams.yaml to a runtime-tunable column on
@@ -615,7 +634,7 @@ const char* migration15Sql() {
 BEGIN;
 
 ALTER TABLE fusion_config
-    ADD COLUMN enable_tof_z_prior INTEGER NOT NULL DEFAULT 0;
+    ADD COLUMN enable_tof_z_prior INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE fusion_config
     ADD COLUMN tof_z_prior_sigma_m REAL NOT NULL DEFAULT 0.02;
 ALTER TABLE fusion_config
@@ -665,7 +684,7 @@ COMMIT;
 }  // namespace
 
 int currentSchemaVersion() {
-    return 17;
+    return 18;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -744,6 +763,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 16) {
         exec(db, migration17Sql());
+        migrated_version = 17;
+    }
+    if (migrated_version == 17) {
+        exec(db, migration18Sql());
     }
 }
 

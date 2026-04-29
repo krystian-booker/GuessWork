@@ -100,12 +100,23 @@ private:
     // under no lock — acquires `imu_buffer_mu_` internally.
     void drainImuUpTo(std::uint64_t frame_teensy_us);
 
-    // Record the airborne state for `teensy_time_us` so the (potentially
-    // late-arriving) backend callback can recover it. Trims the buffer
-    // to `airborne_lookup_capacity_`.
-    void recordAirborneState(std::uint64_t teensy_time_us,
-                             AirborneState state);
-    AirborneState lookupAirborneState(std::uint64_t teensy_time_us) const;
+    // Snapshot of per-frame ToF + airborne signals, recorded from the
+    // frame worker (thread A) and read from the backend output callback
+    // (Kimera's thread). Both pieces are needed in the callback —
+    // airborne state to drive covariance inflation, and ground_distance_m
+    // to stamp onto the published VioMeasurement so downstream factor
+    // graphs have a metric anchor for monocular scale.
+    struct FrameSnapshot {
+        AirborneState state{AirborneState::kGrounded};
+        std::optional<double> ground_distance_m;
+    };
+
+    // Record the per-frame snapshot for `teensy_time_us` so the
+    // (potentially late-arriving) backend callback can recover it.
+    // Trims the buffer to `airborne_lookup_capacity_`.
+    void recordFrameSnapshot(std::uint64_t teensy_time_us,
+                             FrameSnapshot snapshot);
+    FrameSnapshot lookupFrameSnapshot(std::uint64_t teensy_time_us) const;
 
     // Drain any staged config (set by applyConfig) and merge live fields
     // into config_. Called from the frame worker (thread A) before
@@ -126,12 +137,14 @@ private:
     mutable std::mutex imu_buffer_mu_;
     std::deque<ImuSample> imu_buffer_;
 
-    // Airborne state at frame-push time, keyed by teensy_time_us. Read
-    // from the backend output callback (any thread); written from the
-    // frame worker (thread A). Mutex is fine — both sides do trivial
-    // work under it.
+    // Per-frame snapshot at frame-push time, keyed by teensy_time_us.
+    // Read from the backend output callback (any thread); written from
+    // the frame worker (thread A). Mutex is fine — both sides do
+    // trivial work under it. Carries both the AirborneState used for
+    // covariance inflation and the ground_distance_m stamped onto the
+    // emitted VioMeasurement.
     mutable std::mutex airborne_lookup_mu_;
-    std::deque<std::pair<std::uint64_t, AirborneState>> airborne_lookup_;
+    std::deque<std::pair<std::uint64_t, FrameSnapshot>> airborne_lookup_;
 
     // Owned by the backend callback; never observed elsewhere. No lock.
     std::optional<gtsam::Pose3> last_kimera_pose_;

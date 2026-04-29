@@ -515,9 +515,11 @@ TEST(FusionService, SkipsVioMeasurementWhenTrackingNotOk) {
 
 TEST(FusionService, SkipsVioMeasurementWhenDisabledByConfig) {
     posest::MeasurementBus bus(8);
-    // enable_vio left at default (false) — the dispatch path must bail out
-    // before incrementing the no-tracking counter.
-    posest::fusion::FusionService fusion(bus);
+    // Explicit opt-out from the default-on enable_vio gate. The dispatch
+    // path must bail out before incrementing the no-tracking counter.
+    posest::fusion::FusionConfig cfg;
+    cfg.enable_vio = false;
+    posest::fusion::FusionService fusion(bus, cfg);
     fusion.start();
 
     const auto t0 = std::chrono::steady_clock::now();

@@ -673,7 +673,7 @@ TEST(KimeraVioConsumer, ProducerToFCacheReachesAirborneTracker) {
     // Wait for the consumer's frame worker to drain its mailbox. We
     // observe via stats() rather than the FakeVioBackend's framePushCount
     // because the consumer increments frames_pushed only after the
-    // ground_distance_m → AirborneTracker → recordAirborneState chain
+    // ground_distance_m → AirborneTracker → recordFrameSnapshot chain
     // has run, which is exactly what this test asserts.
     EXPECT_TRUE(waitFor([&] {
         return consumer->stats().frames_pushed >= 1u;
@@ -769,6 +769,74 @@ TEST(KimeraVioConsumer, ApplyConfigRevertsMonoTranslationScaleFactor) {
     auto s = consumer.stats();
     EXPECT_EQ(s.config_reloads_applied, 1u);
     EXPECT_EQ(s.config_reloads_structural_skipped, 1u);
+
+    consumer.stop();
+}
+
+// ToF round-trip: Frame::ground_distance_m must propagate onto the
+// emitted VioMeasurement via the snapshot lookup, so downstream factor
+// graphs have a metric anchor for monocular scale recovery without
+// re-querying the ToF cache on a different time cursor. The
+// outputs_with_ground_distance counter is the operator's signal that
+// the camera↔ToF time alignment reaches the output sink.
+TEST(KimeraVioConsumer, GroundDistancePropagatesToVioMeasurement) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), {});
+    consumer.start();
+
+    // Two grounded frames at nominal carpet-mount distance — well below
+    // the 0.15 m airborne threshold so neither covariance inflation nor
+    // a missing-count bump are at play. Frame 0 sets last_kimera_pose
+    // (no publish); frame 1 publishes a delta against frame 0 and the
+    // VioMeasurement must carry frame 1's ground_distance_m.
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.10));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.12));
+
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+    ASSERT_TRUE(got[0].ground_distance_m.has_value());
+    EXPECT_NEAR(*got[0].ground_distance_m, 0.12, 1e-9);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.outputs_published, 1u);
+    EXPECT_EQ(s.outputs_with_ground_distance, 1u);
+
+    consumer.stop();
+}
+
+// Counterpart: when the source Frame has no ToF reading, the emitted
+// VioMeasurement carries an empty ground_distance_m and the
+// outputs_with_ground_distance counter does NOT increment. Pins the
+// no-ToF path so a regression that always stamps "0.0" instead of
+// nullopt is caught — downstream code distinguishes "ToF says zero"
+// from "ToF unavailable".
+TEST(KimeraVioConsumer, MissingGroundDistanceLeavesVioMeasurementEmpty) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), {});
+    consumer.start();
+
+    // makeFrame's third arg threads through to Frame::ground_distance_m;
+    // pass std::nullopt to simulate a ToFSampleCache miss for both frames.
+    deliverPaced(consumer, makeFrame(1'000, 0, std::nullopt));
+    deliverPaced(consumer, makeFrame(2'000, 1, std::nullopt));
+
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+    EXPECT_FALSE(got[0].ground_distance_m.has_value());
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.outputs_published, 1u);
+    EXPECT_EQ(s.outputs_with_ground_distance, 0u);
 
     consumer.stop();
 }

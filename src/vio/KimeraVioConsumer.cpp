@@ -238,7 +238,7 @@ void KimeraVioConsumer::process(const Frame& frame) {
     }
     const std::uint64_t frame_t_us = *frame.teensy_time_us;
 
-    recordAirborneState(frame_t_us, state);
+    recordFrameSnapshot(frame_t_us, {state, frame.ground_distance_m});
     drainImuUpTo(frame_t_us);
 
     // Optional CLAHE preprocessing. Gated on three conditions, in
@@ -341,17 +341,17 @@ void KimeraVioConsumer::drainImuUpTo(std::uint64_t frame_teensy_us) {
     }
 }
 
-void KimeraVioConsumer::recordAirborneState(std::uint64_t teensy_time_us,
-                                            AirborneState state) {
+void KimeraVioConsumer::recordFrameSnapshot(std::uint64_t teensy_time_us,
+                                            FrameSnapshot snapshot) {
     std::lock_guard<std::mutex> g(airborne_lookup_mu_);
-    airborne_lookup_.emplace_back(teensy_time_us, state);
+    airborne_lookup_.emplace_back(teensy_time_us, snapshot);
     while (airborne_lookup_.size() > config_.airborne_lookup_capacity) {
         airborne_lookup_.pop_front();
     }
 }
 
-AirborneState KimeraVioConsumer::lookupAirborneState(
-    std::uint64_t teensy_time_us) const {
+KimeraVioConsumer::FrameSnapshot
+KimeraVioConsumer::lookupFrameSnapshot(std::uint64_t teensy_time_us) const {
     std::lock_guard<std::mutex> g(airborne_lookup_mu_);
     for (const auto& [t, s] : airborne_lookup_) {
         if (t == teensy_time_us) {
@@ -359,10 +359,12 @@ AirborneState KimeraVioConsumer::lookupAirborneState(
         }
     }
     // Fallback: if the entry was evicted (consumer fell badly behind)
-    // assume grounded. The alternative — assume airborne — would
+    // assume grounded with no ToF reading. Assuming airborne would
     // permanently mute VIO under heavy backlog and is the worse
-    // failure mode.
-    return AirborneState::kGrounded;
+    // failure mode; surfacing nullopt for ground_distance_m lets
+    // downstream consumers see the cache miss explicitly rather than
+    // act on a stale value.
+    return FrameSnapshot{AirborneState::kGrounded, std::nullopt};
 }
 
 void KimeraVioConsumer::onBackendOutput(const VioBackendOutput& out) {
@@ -414,10 +416,10 @@ void KimeraVioConsumer::onBackendOutput(const VioBackendOutput& out) {
 
     auto cov_array = toRowMajor(rel_cov);
 
-    const AirborneState state = lookupAirborneState(out.teensy_time_us);
-    if (state != AirborneState::kGrounded) {
+    const FrameSnapshot snapshot = lookupFrameSnapshot(out.teensy_time_us);
+    if (snapshot.state != AirborneState::kGrounded) {
         cov_array =
-            inflate(cov_array, state, config_.inflation_factor,
+            inflate(cov_array, snapshot.state, config_.inflation_factor,
                     config_.inflation_cap);
         std::lock_guard<std::mutex> g(stats_mu_);
         ++stats_.outputs_inflated_airborne;
@@ -431,6 +433,17 @@ void KimeraVioConsumer::onBackendOutput(const VioBackendOutput& out) {
     m.covariance = cov_array;
     m.tracking_ok = true;
     m.backend_status = out.backend_status;
+    // ToF range stamped at frame-push time. Empty when the snapshot was
+    // evicted under backlog or the frame had no ToF reading at all
+    // (tof_cache miss). Bumps the scale-anchor counter so an operator
+    // can confirm the camera↔ToF time alignment is reaching the output
+    // — a chronically-empty value with healthy frames_pushed indicates
+    // the ToFSampleCache wiring is broken upstream.
+    m.ground_distance_m = snapshot.ground_distance_m;
+    if (snapshot.ground_distance_m.has_value()) {
+        std::lock_guard<std::mutex> g(stats_mu_);
+        ++stats_.outputs_with_ground_distance;
+    }
 
     output_sink_.publish(std::move(m));
 

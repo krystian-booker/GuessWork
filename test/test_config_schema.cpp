@@ -1367,7 +1367,10 @@ TEST(SqliteConfigStore, FusionConfigDefaultsForFreshDatabase) {
     posest::config::SqliteConfigStore store(path);
     const auto loaded = store.loadRuntimeConfig();
     EXPECT_FALSE(loaded.fusion.enable_imu_preintegration);
-    EXPECT_FALSE(loaded.fusion.enable_vio);
+    // Migration 18 flips enable_vio default on for fresh DBs (and UPDATEs
+    // existing rows) so the platform's mono+IMU stack actually feeds the
+    // factor graph without a per-deployment opt-in.
+    EXPECT_TRUE(loaded.fusion.enable_vio);
     EXPECT_DOUBLE_EQ(loaded.fusion.huber_k, 1.5);
     EXPECT_DOUBLE_EQ(loaded.fusion.shock_threshold_mps2, 50.0);
     EXPECT_DOUBLE_EQ(loaded.fusion.freefall_threshold_mps2, 3.0);
@@ -1637,7 +1640,11 @@ TEST(SqliteConfigStore, TofZPriorDefaultsForFreshDatabase) {
 
     posest::config::SqliteConfigStore reopened(path);
     const auto loaded = reopened.loadRuntimeConfig();
-    EXPECT_FALSE(loaded.fusion.enable_tof_z_prior);
+    // Migration 18 flips enable_tof_z_prior on by default — the platform
+    // ships with a downward-facing ToF and the prior is the only direct
+    // metric body-z anchor; per-sample range_status / freshness gates still
+    // drop bad readings.
+    EXPECT_TRUE(loaded.fusion.enable_tof_z_prior);
     EXPECT_DOUBLE_EQ(loaded.fusion.tof_z_prior_sigma_m, 0.02);
     EXPECT_DOUBLE_EQ(loaded.fusion.tof_z_prior_max_age_s, 0.05);
     EXPECT_DOUBLE_EQ(loaded.vio.tof_grounded_distance_m, 0.10);

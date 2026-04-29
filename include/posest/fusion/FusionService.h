@@ -154,11 +154,14 @@ struct FusionConfig {
     // shock-magnitude test. Override for tilted IMU mounts.
     Vec3 gravity_local_mps2{0.0, 0.0, 9.80665};
 
-    // VioMeasurement → BetweenFactor<Pose3> ingestion. Disabled by default so
-    // existing deployments keep their current chassis-only behaviour. When
-    // the placeholder VIO pipeline is the only publisher, the per-sample
-    // tracking_ok=false gate also short-circuits this path.
-    bool enable_vio{false};
+    // VioMeasurement → BetweenFactor<Pose3> ingestion. On by default — the
+    // platform's mono camera + IMU + ToF stack is sized to feed Kimera, and
+    // shipping with this off silently dropped VIO output before it reached
+    // the graph. Operators who deliberately want chassis-only fusion (e.g.
+    // during a regression bisect) can flip the column to 0 in the DB; the
+    // per-sample tracking_ok=false gate continues to short-circuit
+    // placeholder publishers.
+    bool enable_vio{true};
     // Fallback sigmas applied when a VioMeasurement arrives with a non-PD or
     // all-zero covariance. Order matches Pose3 tangent: [rx, ry, rz, tx, ty, tz].
     std::array<double, 6> vio_default_sigmas{0.05, 0.05, 0.05, 0.02, 0.02, 0.02};
@@ -203,8 +206,12 @@ struct FusionConfig {
     // expected-range band on RuntimeConfig::vio. tof_grounded_distance_m
     // is the calibration baseline used to convert distance to body-z; it
     // mirrors VioConfig::tof_grounded_distance_m so the live-edit path can
-    // hand both into the backend.
-    bool enable_tof_z_prior{false};
+    // hand both into the backend. On by default — the platform ships with
+    // a downward-facing ToF beside the mono camera and the prior is the
+    // only direct metric anchor for body-z. Per-sample range_status and
+    // freshness gates still drop bad readings; a misconfigured ToF surfaces
+    // via the four tof_z_priors_skipped_* counters.
+    bool enable_tof_z_prior{true};
     double tof_z_prior_sigma_m{0.02};
     double tof_z_prior_max_age_s{0.05};
     double tof_grounded_distance_m{0.10};
