@@ -244,6 +244,37 @@ TEST(KimeraParamWriter, ImuParamsCarriesRandomWalkFromFusionConfig) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(KimeraParamWriter, ImuParamsDoesNotLeakPersistedBiasMean) {
+    // FusionConfig::persisted_bias drives FusionService's own ImuFactor
+    // chain but cannot be threaded through Kimera's YAML — Kimera's
+    // ImuParams parser accepts no bias-mean key, and the only runtime
+    // pathway (VioBackend::initStateAndSetPriors) is fed by
+    // InitializationFromImu, not by us. This test pins the current
+    // behaviour: if a future commit starts emitting bias-mean keys, the
+    // assertion will catch it (forcing a re-evaluation rather than a
+    // silent no-op when Kimera ignores the unknown keys). See the
+    // explanatory comment in KimeraParamWriter::buildImuParamsYaml.
+    const auto dir = tempDir("no_bias_leak");
+    auto cfg = makeVioReadyConfig();
+    cfg.fusion.persisted_bias = {0.123, 0.456, 0.789, 0.012, 0.034, 0.056};
+
+    posest::vio::emitKimeraParamYamls(cfg, dir);
+    const auto imu_yaml = readWhole(dir / "ImuParams.yaml");
+
+    EXPECT_EQ(imu_yaml.find("accelerometer_bias"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("gyroscope_bias"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("imu_bias_init_a"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("imu_bias_init_g"), std::string::npos);
+    // None of the persisted_bias values should appear verbatim either —
+    // the values above were chosen to be distinctive and not equal to
+    // any other field's default.
+    EXPECT_EQ(imu_yaml.find("0.123"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("0.456"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("0.789"), std::string::npos);
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST(KimeraParamWriter, CreatesParamDirIfMissing) {
     const auto parent = tempDir("create_parent");
     const auto child = parent / "nested" / "kimera";

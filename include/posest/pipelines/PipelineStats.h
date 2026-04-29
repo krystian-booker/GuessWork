@@ -4,6 +4,8 @@
 #include <string>
 #include <variant>
 
+#include "posest/vio/KimeraVioStats.h"
+
 namespace posest::pipelines {
 
 // Per-pipeline runtime counters. Mirrors the `FusionStats` shape: a small
@@ -31,6 +33,7 @@ struct AprilTagPipelineStats {
 // Default-constructed monostate means "this pipeline has no telemetry to
 // report" — placeholder pipelines, future Charuco/Aruco/etc. without
 // dedicated counters yet.
-using PipelineStatsValue = std::variant<std::monostate, AprilTagPipelineStats>;
+using PipelineStatsValue =
+    std::variant<std::monostate, AprilTagPipelineStats, vio::KimeraVioStats>;
 
 }  // namespace posest::pipelines

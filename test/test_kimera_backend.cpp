@@ -31,6 +31,8 @@
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
 
+#include <kimera-vio/pipeline/Pipeline-definitions.h>
+
 #include "posest/runtime/RuntimeConfig.h"
 #include "posest/vio/IVioBackend.h"
 #include "posest/vio/KimeraParamWriter.h"
@@ -138,6 +140,26 @@ TEST_F(KimeraBackendSmokeFixture, ConstructsAndShutsDownCleanly) {
     backend->stop();
     // Idempotent: a second stop is a no-op.
     backend->stop();
+}
+
+// Parser-roundtrip gate: hand the YAMLs we just emitted to Kimera's own
+// VioParams ctor and assert no fatal. Kimera's parser is CHECK_FATAL on
+// every missing key (Pipeline-definitions.cpp:109-185, ImuFrontendParams.cpp,
+// VioBackendParams::parseYAML, FrontendParams::parseYAML), so a parse that
+// returns at all proves the emitted file set is structurally valid against
+// the installed Kimera version. This is the gate that catches Kimera
+// renaming a key under us between releases.
+TEST_F(KimeraBackendSmokeFixture, EmittedYamlsParseUnderInstalledKimera) {
+    // The fixture's SetUp already ran emitKimeraParamYamls into param_dir_.
+    // Constructing VioParams reads PipelineParams.yaml first, then dispatches
+    // to the frontend/backend/imu/lcd/display parsers based on the selected
+    // types. We do NOT spin a pipeline — VioParams ctor is enough to surface
+    // any parser drift.
+    EXPECT_NO_FATAL_FAILURE({
+        VIO::VioParams params(param_dir_.string());
+        // Sanity: the writer emits exactly one camera (LeftCameraParams.yaml).
+        EXPECT_EQ(params.camera_params_.size(), 1u);
+    });
 }
 
 TEST_F(KimeraBackendSmokeFixture, PushesRejectedBeforeStartAcceptedAfter) {

@@ -963,6 +963,37 @@ std::string healthToJson(const DaemonHealth& health) {
          health.fusion.slip_disagreement_inflations},
     };
 
+    // Per-VIO-pipeline telemetry. last_output_age_ms is the watchdog
+    // signal: a missing value means VIO has not yet emitted; a value that
+    // grows without bound means autoinit or the spin thread has stalled.
+    nlohmann::json vio_array = nlohmann::json::array();
+    for (const auto& v : health.vio_pipelines) {
+        nlohmann::json j = {
+            {"pipeline_id", v.pipeline_id},
+            {"frames_pushed", v.frames_pushed},
+            {"frames_dropped_backpressure", v.frames_dropped_backpressure},
+            {"imu_pushed", v.imu_pushed},
+            {"imu_dropped_backpressure", v.imu_dropped_backpressure},
+            {"imu_buffer_overflow", v.imu_buffer_overflow},
+            {"outputs_received", v.outputs_received},
+            {"outputs_published", v.outputs_published},
+            {"outputs_skipped_first", v.outputs_skipped_first},
+            {"outputs_skipped_no_tracking", v.outputs_skipped_no_tracking},
+            {"outputs_inflated_airborne", v.outputs_inflated_airborne},
+            {"ground_distance_missing", v.ground_distance_missing},
+            {"config_reloads_applied", v.config_reloads_applied},
+            {"config_reloads_structural_skipped",
+             v.config_reloads_structural_skipped},
+        };
+        if (v.last_output_age_ms.has_value()) {
+            j["last_output_age_ms"] = *v.last_output_age_ms;
+        } else {
+            j["last_output_age_ms"] = nullptr;
+        }
+        vio_array.push_back(std::move(j));
+    }
+    out["vio_pipelines"] = std::move(vio_array);
+
     return out.dump();
 }
 
@@ -1726,7 +1757,11 @@ void DaemonController::loadAndBuild() {
         imu_tee_->addRoute<ToFSample>(measurement_bus_.get());
         imu_tee_->addRoute<ChassisSpeedsSample>(measurement_bus_.get());
         imu_tee_->addRoute<AprilTagObservation>(measurement_bus_.get());
-        imu_tee_->addRoute<VioMeasurement>(measurement_bus_.get());
+        // VioMeasurement intentionally has no tee route: KimeraVioConsumer
+        // is constructed with measurement_bus_ as its output_sink_ and
+        // publishes directly. Only TeensyService writes into imu_tee_,
+        // and it never constructs VioMeasurement, so a route here would
+        // only conflate IMU fan-out with VIO routing.
 
         teensy_ = std::make_shared<teensy::TeensyService>(
             config_.teensy, config_.camera_triggers,
@@ -1887,6 +1922,7 @@ DaemonHealth DaemonController::health() const {
 void DaemonController::refreshHealth() {
     std::vector<CameraLiveStats> camera_stats;
     std::vector<pipelines::AprilTagPipelineStats> apriltag_stats;
+    std::vector<vio::KimeraVioStats> vio_stats;
     if (graph_) {
         const auto camera_producers = graph_->cameraProducers();
         camera_stats.reserve(camera_producers.size());
@@ -1900,6 +1936,9 @@ void DaemonController::refreshHealth() {
             if (const auto* tag_stats =
                     std::get_if<pipelines::AprilTagPipelineStats>(&value)) {
                 apriltag_stats.push_back(*tag_stats);
+            } else if (const auto* v =
+                           std::get_if<vio::KimeraVioStats>(&value)) {
+                vio_stats.push_back(*v);
             }
         }
     }
@@ -1924,6 +1963,7 @@ void DaemonController::refreshHealth() {
     }
     health_.cameras = std::move(camera_stats);
     health_.apriltag_pipelines = std::move(apriltag_stats);
+    health_.vio_pipelines = std::move(vio_stats);
 }
 
 void DaemonController::markFailed(const std::string& error) {

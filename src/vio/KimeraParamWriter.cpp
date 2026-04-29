@@ -243,6 +243,19 @@ std::string buildImuParamsYaml(const runtime::RuntimeConfig& cfg) {
         << cfg.fusion.accel_bias_rw_sigma << '\n';
     out << "gyroscope_random_walk: " << std::setprecision(17)
         << cfg.fusion.gyro_bias_rw_sigma << '\n';
+    // FusionConfig::persisted_bias is intentionally NOT threaded through
+    // this YAML. Kimera's ImuParams::parseYAML accepts no bias-mean key
+    // (Kimera-VIO/src/imu-frontend/ImuFrontendParams.cpp:58-77 reads only
+    // imu_bias_init_sigma, which is misleadingly named — it sets
+    // PreintegrationParams::biasAccOmegaInt, not a prior on the bias
+    // mean: see Kimera-VIO/src/imu-frontend/ImuFrontend.cpp:113). The
+    // bias-mean prior lives on the backend (initialAccBiasSigma /
+    // initialGyroBiasSigma in BackendParams.yaml), and the *mean* itself
+    // is supplied at runtime by InitializationFromImu's static-window
+    // estimate — there is no public Pipeline API to inject it from
+    // outside. Bridging persisted_bias would require an upstream Kimera
+    // change or a fork. FusionService's own ImuFactor chain still uses
+    // persisted_bias correctly; only Kimera re-converges per boot.
     // T_BS: IMU sensor pose in body frame. Kimera assumes the IMU IS
     // the body — its ImuParams parser CHECK_FATAL aborts unless this
     // is identity (ImuFrontendParams.cpp:50). Anything off-identity

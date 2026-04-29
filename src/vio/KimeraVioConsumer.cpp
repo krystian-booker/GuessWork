@@ -101,7 +101,18 @@ KimeraVioStats KimeraVioConsumer::stats() const {
     std::lock_guard<std::mutex> g(stats_mu_);
     KimeraVioStats s = stats_;
     s.ground_distance_missing = airborne_tracker_.missingCount();
+    if (last_output_at_.has_value()) {
+        const auto age = std::chrono::steady_clock::now() - *last_output_at_;
+        s.last_output_age_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
+    }
     return s;
+}
+
+pipelines::PipelineStatsValue KimeraVioConsumer::pipelineStats() const {
+    KimeraVioStats s = stats();
+    s.pipeline_id = id();
+    return pipelines::PipelineStatsValue{std::move(s)};
 }
 
 void KimeraVioConsumer::applyConfig(KimeraVioConfig new_config) {
@@ -351,6 +362,7 @@ void KimeraVioConsumer::onBackendOutput(const VioBackendOutput& out) {
 
     std::lock_guard<std::mutex> g(stats_mu_);
     ++stats_.outputs_published;
+    last_output_at_ = std::chrono::steady_clock::now();
 }
 
 }  // namespace posest::vio

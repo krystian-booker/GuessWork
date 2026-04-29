@@ -5,10 +5,13 @@
 #include <gtest/gtest.h>
 #include <opencv2/core.hpp>
 
+#include "posest/CameraTriggerCache.h"
 #include "posest/Frame.h"
 #include "posest/MeasurementBus.h"
 #include "posest/MeasurementTypes.h"
+#include "posest/ProducerBase.h"
 #include "posest/Timestamp.h"
+#include "posest/ToFSampleCache.h"
 #include "posest/vio/FakeVioBackend.h"
 #include "posest/vio/KimeraVioConfig.h"
 #include "posest/vio/KimeraVioConsumer.h"
@@ -377,6 +380,210 @@ TEST(KimeraVioConsumer, ApplyConfigRevertsStructuralFields) {
     EXPECT_EQ(s.config_reloads_structural_skipped, 1u);
 
     consumer.stop();
+}
+
+#include "posest/pipelines/PipelineStats.h"
+#include "posest/runtime/IVisionPipeline.h"
+
+// pipelineStats() snapshots the consumer's KimeraVioStats and stamps
+// pipeline_id from ConsumerBase::id(). last_output_age_ms is the
+// watchdog signal: nullopt before the first publish, set afterwards.
+// Surfaced via DaemonHealth::vio_pipelines once wired in Daemon.cpp.
+TEST(KimeraVioConsumer, PipelineStatsSurfacesKimeraVioVariantAndStaleness) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio_pipeline_stats_test", imu_bus, out_bus,
+        &identityConverter, std::move(backend), {});
+
+    // Before any output: variant alternative is KimeraVioStats but
+    // last_output_age_ms is empty.
+    {
+        const auto v = consumer.pipelineStats();
+        const auto* s = std::get_if<posest::vio::KimeraVioStats>(&v);
+        ASSERT_NE(s, nullptr);
+        EXPECT_EQ(s->pipeline_id, "vio_pipeline_stats_test");
+        EXPECT_FALSE(s->last_output_age_ms.has_value());
+    }
+
+    consumer.start();
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+
+    // After a publish: last_output_age_ms is set and small.
+    {
+        const auto v = consumer.pipelineStats();
+        const auto* s = std::get_if<posest::vio::KimeraVioStats>(&v);
+        ASSERT_NE(s, nullptr);
+        ASSERT_TRUE(s->last_output_age_ms.has_value());
+        EXPECT_GE(*s->last_output_age_ms, 0);
+        // 1 second is huge for a polling-only test on a quiet machine
+        // and tight enough to catch a clock-domain regression.
+        EXPECT_LT(*s->last_output_age_ms, 1000);
+        EXPECT_EQ(s->outputs_published, 1u);
+    }
+
+    consumer.stop();
+}
+
+// One-shot test producer: emits exactly one frame at a caller-supplied
+// capture_time, then returns false to signal EndOfStream. Defined inline
+// because the existing MockProducer paces itself with sleep_until and
+// can't guarantee a single-frame run that aligns with a pre-armed
+// CameraTriggerCache entry within the 50 ms match window.
+class OneShotProducer : public posest::ProducerBase {
+public:
+    OneShotProducer(std::string id, std::chrono::steady_clock::time_point t)
+        : posest::ProducerBase(std::move(id)), capture_time_(t) {}
+    ~OneShotProducer() override { stop(); }
+
+protected:
+    bool captureOne(
+        cv::Mat& out,
+        std::optional<std::chrono::steady_clock::time_point>& ts) override {
+        if (emitted_) {
+            return false;  // EndOfStream — runLoop joins and exits cleanly.
+        }
+        out = cv::Mat::zeros(64, 64, CV_8UC1);
+        ts = capture_time_;
+        emitted_ = true;
+        return true;
+    }
+
+private:
+    std::chrono::steady_clock::time_point capture_time_;
+    bool emitted_{false};
+};
+
+// Pin number is arbitrary — the test owns the pin↔camera mapping and
+// only one camera is involved.
+constexpr std::int32_t kTestTeensyPin = 17;
+constexpr std::uint32_t kTestTriggerSequence = 42;
+constexpr std::uint64_t kTestTeensyTimeUs = 7'654'321;
+
+// End-to-end coverage of ProducerBase's trigger+ToF cache join into
+// Frame::ground_distance_m and the consumer's airborne_tracker. This is
+// the integration glue that the daemon depends on (Daemon.cpp wires
+// CameraProducer::setToFSampleCache + setTriggerCache) but no other test
+// exercises top-to-bottom — test_tof_sample_cache.cpp is isolated and
+// the rest of test_kimera_vio_consumer.cpp injects ground_distance_m
+// synthetically into Frame.
+TEST(KimeraVioConsumer, ProducerToFCacheReachesAirborneTracker) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    auto consumer = std::make_shared<posest::vio::KimeraVioConsumer>(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), posest::vio::KimeraVioConfig{});
+
+    // Pre-arm both caches with matching entries: a trigger pulse at
+    // capture_time t0 (the producer emits one frame at this exact instant),
+    // and a ToF reading carrying the same trigger_sequence at an airborne
+    // distance so the AirborneTracker's state machine has something
+    // observable to react to.
+    const auto t0 = std::chrono::steady_clock::now();
+
+    auto trigger_cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{kTestTeensyPin,
+                                                       "downward"}});
+    posest::CameraTriggerEvent ev{};
+    ev.timestamp = t0;
+    ev.teensy_time_us = kTestTeensyTimeUs;
+    ev.pin = kTestTeensyPin;
+    ev.trigger_sequence = kTestTriggerSequence;
+    ev.status_flags = 0;  // Synced — recordEvent gates on this.
+    trigger_cache->recordEvent(ev);
+
+    auto tof_cache = std::make_shared<posest::ToFSampleCache>("downward");
+    posest::ToFSample sample{};
+    sample.timestamp = t0;
+    sample.teensy_time_us = kTestTeensyTimeUs;
+    sample.trigger_sequence = kTestTriggerSequence;
+    sample.distance_m = 0.30;  // Above 0.15 m default → airborne.
+    tof_cache->recordSample(sample);
+
+    OneShotProducer producer("downward", t0);
+    producer.setTriggerCache(trigger_cache);
+    producer.setToFSampleCache(tof_cache);
+    producer.addConsumer(consumer);
+
+    consumer->start();
+    ASSERT_EQ(producer.start(), posest::ProducerState::Running);
+
+    // Wait for the consumer's frame worker to drain its mailbox. We
+    // observe via stats() rather than the FakeVioBackend's framePushCount
+    // because the consumer increments frames_pushed only after the
+    // ground_distance_m → AirborneTracker → recordAirborneState chain
+    // has run, which is exactly what this test asserts.
+    EXPECT_TRUE(waitFor([&] {
+        return consumer->stats().frames_pushed >= 1u;
+    }));
+
+    auto s = consumer->stats();
+    EXPECT_EQ(s.frames_pushed, 1u);
+    // The cache hit is the load-bearing assertion: ground_distance_missing
+    // counts AirborneTracker::update(nullopt) calls. Zero proves the
+    // ToF cache lookup in ProducerBase::runLoop succeeded and the value
+    // reached the consumer's airborne tracker on this frame.
+    EXPECT_EQ(s.ground_distance_missing, 0u);
+
+    producer.stop();
+    consumer->stop();
+}
+
+// Counterpart: when no ToF sample is recorded for the active
+// trigger_sequence, ProducerBase emits a frame with ground_distance_m
+// unset and the AirborneTracker's missingCount() bumps. This confirms
+// the missing-distance path is wired symmetrically — a misconfigured
+// ToFSampleCache is observable from outside via stats().
+TEST(KimeraVioConsumer, MissingToFSampleSurfacesAsMissingCount) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    auto consumer = std::make_shared<posest::vio::KimeraVioConsumer>(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), posest::vio::KimeraVioConfig{});
+
+    const auto t0 = std::chrono::steady_clock::now();
+
+    auto trigger_cache = std::make_shared<posest::CameraTriggerCache>(
+        std::unordered_map<std::int32_t, std::string>{{kTestTeensyPin,
+                                                       "downward"}});
+    posest::CameraTriggerEvent ev{};
+    ev.timestamp = t0;
+    ev.teensy_time_us = kTestTeensyTimeUs;
+    ev.pin = kTestTeensyPin;
+    ev.trigger_sequence = kTestTriggerSequence;
+    ev.status_flags = 0;
+    trigger_cache->recordEvent(ev);
+
+    // ToF cache is constructed but no sample recorded — the lookup misses.
+    auto tof_cache = std::make_shared<posest::ToFSampleCache>("downward");
+
+    OneShotProducer producer("downward", t0);
+    producer.setTriggerCache(trigger_cache);
+    producer.setToFSampleCache(tof_cache);
+    producer.addConsumer(consumer);
+
+    consumer->start();
+    ASSERT_EQ(producer.start(), posest::ProducerState::Running);
+
+    EXPECT_TRUE(waitFor([&] {
+        return consumer->stats().frames_pushed >= 1u;
+    }));
+
+    auto s = consumer->stats();
+    EXPECT_EQ(s.frames_pushed, 1u);
+    EXPECT_GE(s.ground_distance_missing, 1u);
+
+    producer.stop();
+    consumer->stop();
 }
 
 // Frames without a Teensy timestamp can't be aligned to IMU and must

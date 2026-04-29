@@ -18,6 +18,7 @@
 #include "posest/vio/AirborneCovariance.h"
 #include "posest/vio/IVioBackend.h"
 #include "posest/vio/KimeraVioConfig.h"
+#include "posest/vio/KimeraVioStats.h"
 
 namespace posest::vio {
 
@@ -30,25 +31,9 @@ namespace posest::vio {
 using TeensyTimeConverter =
     std::function<Timestamp(std::uint64_t teensy_time_us, Timestamp fallback)>;
 
-struct KimeraVioStats {
-    std::uint64_t frames_pushed{0};
-    std::uint64_t frames_dropped_backpressure{0};
-    std::uint64_t imu_pushed{0};
-    std::uint64_t imu_dropped_backpressure{0};
-    std::uint64_t imu_buffer_overflow{0};
-    std::uint64_t outputs_received{0};
-    std::uint64_t outputs_published{0};
-    std::uint64_t outputs_skipped_first{0};
-    std::uint64_t outputs_skipped_no_tracking{0};
-    std::uint64_t outputs_inflated_airborne{0};
-    std::uint64_t ground_distance_missing{0};
-    // Live-config bookkeeping. Mirrors FusionService's
-    // config_reloads_applied / config_reloads_structural_skipped split
-    // (FusionService.h:225) so a website save that touches a structural
-    // field is observable instead of silently no-op.
-    std::uint64_t config_reloads_applied{0};
-    std::uint64_t config_reloads_structural_skipped{0};
-};
+// KimeraVioStats now lives in posest/vio/KimeraVioStats.h so that
+// posest/pipelines/PipelineStats.h can name it as a variant alternative
+// without transitively pulling in the consumer's GTSAM-heavy headers.
 
 // Consumes Frame objects (via ConsumerBase) and ImuSample measurements
 // (via a dedicated, single-consumer MeasurementBus instance), feeds
@@ -83,6 +68,14 @@ public:
     // IVisionPipeline. The consumer plugs into the per-camera pipeline
     // factory slot keyed by `type() == "vio"`; see ProductionFactories.
     const std::string& type() const override { return type_; }
+
+    // IVisionPipeline polymorphic telemetry hook. Wraps stats() in a
+    // PipelineStatsValue so DaemonController::refreshHealth can fan
+    // KimeraVioStats onto DaemonHealth alongside AprilTagPipelineStats
+    // without dynamic_cast'ing per concrete pipeline type. Stamps
+    // pipeline_id from ConsumerBase::id() so the JSON consumer can
+    // disambiguate when multiple VIO pipelines are wired (today only one).
+    pipelines::PipelineStatsValue pipelineStats() const override;
 
     // Stage a new config for the next process() iteration. Safe to call
     // from any thread; the swap happens at the top of process() before
@@ -158,6 +151,12 @@ private:
 
     mutable std::mutex stats_mu_;
     KimeraVioStats stats_;
+    // Wall-clock of the most recent successfully published VioMeasurement.
+    // Stamped from steady_clock at the bottom of onBackendOutput; consumed
+    // by stats() to derive KimeraVioStats::last_output_age_ms. Held here
+    // rather than on KimeraVioStats so that struct stays chrono-free for
+    // PipelineStats.h consumption.
+    std::optional<std::chrono::steady_clock::time_point> last_output_at_;
 
     // Pipeline type tag, returned by reference from type(). Constant
     // for the lifetime of the consumer.

@@ -23,6 +23,7 @@
 #include "posest/runtime/RuntimeGraph.h"
 #include "posest/runtime/WebService.h"
 #include "posest/teensy/TeensyService.h"
+#include "posest/vio/KimeraVioStats.h"
 
 namespace posest::runtime {
 
@@ -233,6 +234,13 @@ struct DaemonHealth {
     fusion::FusionStats fusion;
     std::vector<CameraLiveStats> cameras;
     std::vector<pipelines::AprilTagPipelineStats> apriltag_pipelines;
+    // Per-VIO-pipeline counters fanned out from
+    // IVisionPipeline::pipelineStats(). last_output_age_ms is the
+    // watchdog signal: a value that grows without bound means VIO is
+    // consuming frames and IMU but not emitting (autoinit failure or
+    // silent stall in Kimera's pipeline). Empty until the first
+    // VioMeasurement is published.
+    std::vector<vio::KimeraVioStats> vio_pipelines;
     std::string last_error;
     int shutdown_signal{0};
 };
