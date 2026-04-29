@@ -1,11 +1,28 @@
 [requires]
-opencv/4.10.0
 gtest/1.14.0
 sqlite3/3.45.3
 nlohmann_json/3.11.3
 apriltag/3.4.2
 yaml-cpp/0.8.0
-gtsam/4.2
+
+# OpenCV is intentionally NOT pulled via conan. libkimera_vio.so is
+# dynamically linked against the system OpenCV that
+# scripts/install_kimera_deps.sh's apt step installs
+# (libopencv-dev + libopencv-contrib-dev). Pulling a second OpenCV
+# through Conan would put two physical libopencv_core.so.410's in the
+# same process and corrupt cv::Mat at the ABI seam. CMake's normal
+# find_package(OpenCV) resolves to the system install via
+# /usr/include/opencv4 + /usr/lib/x86_64-linux-gnu/libopencv_*.so.410
+# (or Homebrew's prefix on macOS), which is exactly what Kimera uses.
+
+# GTSAM is intentionally NOT pulled via conan. Same rationale as
+# OpenCV: Kimera-VIO links the system-installed GTSAM (typically
+# /usr/local), and shipping a second conan-built GTSAM with
+# different compile flags (TBB on/off, Eigen source) would create an
+# ABI mismatch in the daemon binary. Install GTSAM 4.2 from source
+# via scripts/install_kimera_deps.sh (or set -DPOSEST_BUILD_VIO=OFF
+# in CMake to opt out of Kimera, in which case GTSAM still has to be
+# available system-wide for posest_fusion). See README.md.
 
 [generators]
 CMakeDeps
@@ -13,20 +30,3 @@ CMakeToolchain
 
 [layout]
 cmake_layout
-
-[options]
-opencv/*:shared=False
-opencv/*:contrib=False
-opencv/*:dnn=False
-opencv/*:nonfree=False
-opencv/*:with_ffmpeg=False
-opencv/*:with_gtk=False
-opencv/*:with_gstreamer=False
-opencv/*:with_jpeg2000=False
-opencv/*:with_openexr=False
-opencv/*:with_webp=False
-opencv/*:with_tiff=False
-opencv/*:with_quirc=False
-opencv/*:with_v4l=False
-opencv/*:with_wayland=False
-gtsam/*:with_TBB=False

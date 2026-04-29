@@ -6,10 +6,15 @@
 
 namespace posest::vio {
 
-// Emit the four Kimera-VIO YAMLs into `param_dir` so a downstream
+// Emit the seven Kimera-VIO YAMLs into `param_dir` so a downstream
 // VIO::VioParams(param_dir) constructor can read them. Files written:
+//   - PipelineParams.yaml          (compile-time-embedded copy; selects
+//                                    MonoImu frontend + plain VioBackend)
 //   - FrontendParams.yaml          (compile-time-embedded copy)
 //   - BackendParams.yaml           (compile-time-embedded copy)
+//   - LcdParams.yaml               (compile-time-embedded copy; required
+//                                    by parseYAML even when LCD is off)
+//   - DisplayParams.yaml           (compile-time-embedded copy; ditto)
 //   - ImuParams.yaml               (template + IMUtoBodyT_BS appended
 //                                    from FusionConfig::imu_extrinsic_body_to_imu)
 //   - LeftCameraParams.yaml        (intrinsics, distortion, T_BS) built

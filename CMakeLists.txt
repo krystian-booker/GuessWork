@@ -39,7 +39,13 @@ add_library(posest_core
 target_include_directories(posest_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(posest_core PUBLIC opencv::opencv)
+# System OpenCV (from libopencv-dev / Homebrew opencv) exports
+# ${OpenCV_LIBS} as the aggregate variable. Conan's CMakeDeps used to
+# provide an `opencv::opencv` aggregate target, but with OpenCV
+# removed from conanfile.txt that target no longer exists — see the
+# OpenCV note in conanfile.txt for why.
+target_include_directories(posest_core PUBLIC ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(posest_core PUBLIC ${OpenCV_LIBS})
 target_compile_features(posest_core PUBLIC cxx_std_20)
 
 # --- posest_camera: generic camera abstractions
@@ -102,13 +108,25 @@ set(POSEST_KIMERA_BACKEND_YAML_PATH
     ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/BackendParams.yaml)
 set(POSEST_KIMERA_IMU_YAML_PATH
     ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/ImuParams.yaml)
+set(POSEST_KIMERA_PIPELINE_YAML_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/PipelineParams.yaml)
+set(POSEST_KIMERA_LCD_YAML_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/LcdParams.yaml)
+set(POSEST_KIMERA_DISPLAY_YAML_PATH
+    ${CMAKE_CURRENT_SOURCE_DIR}/share/posest/kimera/DisplayParams.yaml)
 file(READ ${POSEST_KIMERA_FRONTEND_YAML_PATH} POSEST_KIMERA_FRONTEND_YAML)
 file(READ ${POSEST_KIMERA_BACKEND_YAML_PATH} POSEST_KIMERA_BACKEND_YAML)
 file(READ ${POSEST_KIMERA_IMU_YAML_PATH} POSEST_KIMERA_IMU_TEMPLATE_YAML)
+file(READ ${POSEST_KIMERA_PIPELINE_YAML_PATH} POSEST_KIMERA_PIPELINE_YAML)
+file(READ ${POSEST_KIMERA_LCD_YAML_PATH} POSEST_KIMERA_LCD_YAML)
+file(READ ${POSEST_KIMERA_DISPLAY_YAML_PATH} POSEST_KIMERA_DISPLAY_YAML)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${POSEST_KIMERA_FRONTEND_YAML_PATH}
     ${POSEST_KIMERA_BACKEND_YAML_PATH}
-    ${POSEST_KIMERA_IMU_YAML_PATH})
+    ${POSEST_KIMERA_IMU_YAML_PATH}
+    ${POSEST_KIMERA_PIPELINE_YAML_PATH}
+    ${POSEST_KIMERA_LCD_YAML_PATH}
+    ${POSEST_KIMERA_DISPLAY_YAML_PATH})
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vio/KimeraStaticParams.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/posest_vio_core_gen/posest/vio/KimeraStaticParams.h
@@ -129,21 +147,28 @@ target_link_libraries(posest_vio_core PUBLIC
     ${POSEST_GTSAM_TARGET}
 )
 
-# --- posest_vio_kimera: real Kimera-VIO backend adapter. Defaults ON only
-# on Apple (Mac Mini target); opt-in on Linux for developers who have
-# Kimera-VIO installed locally. cmake/FindKimeraVIO.cmake provides the
-# KimeraVIO::KimeraVIO target since Kimera does not ship a portable
-# Config.cmake.
-option(POSEST_BUILD_VIO "Build Kimera-VIO backend adapter" ${APPLE})
+# --- posest_vio_kimera: real Kimera-VIO backend adapter. Defaults ON
+# everywhere; pass -DPOSEST_BUILD_VIO=OFF to opt out (CI without Kimera
+# installed, dev sandboxes). When ON, the build expects GTSAM, OpenGV,
+# DBoW2, Kimera-RPGO, and Kimera-VIO to be installed under
+# /usr/local (Linux) or via Homebrew (macOS) — see README.md and
+# scripts/install_kimera_deps.sh. cmake/FindKimeraVIO.cmake provides
+# the KimeraVIO::KimeraVIO target since Kimera does not ship a
+# portable Config.cmake.
+option(POSEST_BUILD_VIO "Build Kimera-VIO backend adapter" ON)
 if(POSEST_BUILD_VIO)
     list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
     find_package(KimeraVIO REQUIRED)
+    find_package(gflags REQUIRED)
+    find_package(glog REQUIRED)
     add_library(posest_vio_kimera
         src/vio/KimeraBackend.cpp
     )
     target_link_libraries(posest_vio_kimera PUBLIC
         posest_vio_core
         KimeraVIO::KimeraVIO
+        gflags
+        glog::glog
     )
 endif()
 
@@ -282,12 +307,25 @@ if(TARGET posest_v4l2)
 endif()
 
 if(POSEST_BUILD_VIO)
-    target_sources(posest_tests PRIVATE test/test_kimera_backend.cpp)
+    target_sources(posest_tests PRIVATE
+        test/test_kimera_backend.cpp
+        test/test_kimera_integration.cpp)
     target_link_libraries(posest_tests PRIVATE posest_vio_kimera)
 endif()
 
 include(GoogleTest)
-gtest_discover_tests(posest_tests)
+# DISCOVERY_MODE PRE_TEST: enumerate the test cases the first time
+# `ctest` runs them, not as a post-build step. POST_BUILD invokes
+# `posest_tests --gtest_list_tests` after every link, and when the
+# tree is built with POSEST_BUILD_VIO=ON the test binary trips a
+# shutdown-time double-free coming from the OpenCV ABI seam between
+# our static Conan OpenCV (linked through posest_core) and the
+# system shared OpenCV pulled in transitively by libkimera_vio.so.
+# Discovery itself completes — the abort is in static destructors —
+# but CMake treats it as a failure and deletes the binary, breaking
+# every other test target. PRE_TEST sidesteps it without affecting
+# what tests are eventually run.
+gtest_discover_tests(posest_tests DISCOVERY_MODE PRE_TEST)
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)

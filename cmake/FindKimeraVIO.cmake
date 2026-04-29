@@ -48,6 +48,11 @@ find_library(KimeraVIO_LIBRARY
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(KimeraVIO
     REQUIRED_VARS KimeraVIO_INCLUDE_DIR KimeraVIO_LIBRARY
+    FAIL_MESSAGE "Kimera-VIO headers/library not found in /usr/local, \
+/opt/homebrew, or \$KimeraVIO_ROOT. Run scripts/install_kimera_deps.sh to \
+build the Kimera-VIO dependency chain from source, or set \
+-DPOSEST_BUILD_VIO=OFF to skip the Kimera adapter (the daemon falls back to \
+FakeVioBackend). See README.md."
 )
 
 if(KimeraVIO_FOUND AND NOT TARGET KimeraVIO::KimeraVIO)

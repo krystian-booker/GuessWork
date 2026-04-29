@@ -73,6 +73,25 @@ void deliverPaced(posest::vio::KimeraVioConsumer& consumer,
     std::this_thread::sleep_for(20ms);
 }
 
+// Poll until `pred()` returns true or the deadline expires. Returns
+// true on success. Use this for assertions that depend on the
+// consumer's two background threads (frame worker A, IMU drainer B)
+// having processed an event from the test thread — a fixed sleep is
+// fragile when the binary's scheduler timing shifts (e.g. between
+// debug and release builds, or after a dependency change). The
+// 200 ms ceiling is generous: in practice the drainer + worker
+// complete within a single millisecond on a quiet machine.
+template <typename Pred>
+bool waitFor(Pred pred,
+             std::chrono::milliseconds budget = 200ms) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(1ms);
+    }
+    return pred();
+}
+
 }  // namespace
 
 // First frame must NOT emit a VioMeasurement (no T_prev). Subsequent
@@ -202,10 +221,23 @@ TEST(KimeraVioConsumer, ForwardsImuSamplesToBackend) {
         s.accel_mps2 = {0.0, 0.0, 9.81};
         imu_bus.publish(s);
     }
+
+    // Wait for the drainer (thread B) to lift everything off the bus
+    // into the consumer's imu_buffer_ BEFORE delivering the frame.
+    // The frame worker drains imu_buffer_ once at the top of
+    // process(); if the drainer hasn't finished yet, the worker only
+    // sees the samples that happened to be in the buffer at the
+    // instant it acquired the lock — and the test would race on a
+    // partial count. In production this can't happen because IMU
+    // arrives continuously; in a single-batch test we have to gate
+    // explicitly. See deliverPaced for the worker-side equivalent.
+    ASSERT_TRUE(waitFor([&] { return imu_bus.size() == 0; }));
+
     // Frame at t=2000 us; the consumer should drain everything <=2000us.
     deliverPaced(consumer, makeFrame(2'000, 0, 0.05));
 
-    EXPECT_GE(backend_ptr->imuPushCount(), 5u);
+    EXPECT_TRUE(waitFor(
+        [&] { return backend_ptr->imuPushCount() >= 5u; }));
     EXPECT_GE(backend_ptr->framePushCount(), 1u);
 
     consumer.stop();
@@ -232,12 +264,17 @@ TEST(KimeraVioConsumer, ImuTimestampPropagatedToBackend) {
     s.accel_mps2 = {0.0, 0.0, 9.81};
     imu_bus.publish(s);
 
+    // Same drainer-then-deliver gate as ForwardsImuSamplesToBackend;
+    // see comment there.
+    ASSERT_TRUE(waitFor([&] { return imu_bus.size() == 0; }));
+
     // Frame at t=5000 us — distinct from the sample's 1234, so the
     // assertion below would fail under the old work-around that
     // stamped IMU pushes with frame_teensy_us.
     deliverPaced(consumer, makeFrame(5'000, 0, 0.05));
 
-    ASSERT_GE(backend_ptr->imuPushCount(), 1u);
+    ASSERT_TRUE(waitFor(
+        [&] { return backend_ptr->imuPushCount() >= 1u; }));
     EXPECT_EQ(backend_ptr->lastImuTeensyTimeUs(), 1234u);
 
     consumer.stop();

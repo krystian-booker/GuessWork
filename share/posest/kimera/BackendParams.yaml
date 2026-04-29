@@ -1,31 +1,74 @@
-# Kimera-VIO backend parameters for collision-tolerant fusion.
-#
-# Field-name convention: the backend YAML in older Kimera releases
-# is camelCase (see VioBackEndParams::parseYAML). This is a known
-# Kimera inconsistency between frontend (snake_case) and backend
-# (camelCase) — do NOT "fix" the casing without confirming against
-# the installed Kimera version, or the parser will silently fall
-# through to defaults.
+%YAML:1.0
+# Kimera-VIO backend parameters. Kimera's BackendParams::parseYAML
+# CHECK_FATAL aborts if any of the fields below is missing — and the
+# field-name casing is a mix of camelCase and snake_case that varies
+# by field. This is Kimera's published EurocMono reference set
+# verbatim; tune by diffing rather than rewriting from scratch.
 
-# Smart projection factors keep landmark positions implicit by
-# marginalizing them out at each step — essential at 800 features
-# per frame; without this the optimizer state explodes.
-useSmartFactors: true
+# Backend modality (RegularVioBackend only). 0 = structureless factors
+# only. We are running plain VioBackend (PipelineParams.yaml selects
+# backend_type=0) so this is parsed but ignored — keep set to 0 to
+# avoid surprising the parser if backend_type ever flips to 1.
+backend_modality: 0
 
-# Huber M-estimator threshold (in standardized residual units) for
-# robust loss on pose factors. 1.0 absorbs the 15 g+ collision shock
-# without rejecting legitimate hard accelerations — the chassis
-# routinely sees 8 g on hard turns and a tighter Huber would
-# downweight those and bias the trajectory. Cauchy is too aggressive
-# here; Huber is the right knob.
-huberLossThreshold: 1.0
+# Initialization. autoInitialize=1 → bootstrap the backend from the
+# IMU's gravity vector + first keyframe (this is what we want; there
+# is no ground-truth pose source on this platform). EurocMono ships
+# with autoInitialize=0 because the dataset injects ground truth at
+# t=0; with =0 + no GT injection Kimera's VioBackend CHECKs on a
+# non-identity GT and aborts.
+autoInitialize: 1
+roundOnAutoInitialize: 0
+initialPositionSigma: 1e-05
+initialRollPitchSigma: 0.174533
+initialYawSigma: 0.00174533
+initialVelocitySigma: 0.001
+initialAccBiasSigma: 0.1
+initialGyroBiasSigma: 0.01
 
-# Linearization mode: 1 = HESSIAN. The HESSIAN form keeps the
-# Gauss-Newton normal equations explicitly, which is required for
-# our smart-factor configuration on a non-trivially constrained
-# state. JACOBIAN_Q (0) is faster but fails on rank-deficient
-# constraint sets we'd hit when ToF inflation kills VIO factors.
-linearizationMode: 1
+# Smart-factor linearization. 0 = HESSIAN.
+linearizationMode: 0
+# Degeneracy handling. 1 = ZERO_ON_DEGENERACY.
+degeneracyMode: 1
+rankTolerance: 1
+landmarkDistanceThreshold: 10
+outlierRejection: 3
+retriangulationThreshold: 0.001
 
-# Defaults for unspecified fields — Kimera's auto-init, smoother
-# horizon, dog-leg toggling, etc. — are accepted at parse time.
+# Noise models
+smartNoiseSigma: 3.0
+monoNoiseSigma: 1.8
+monoNormType: 2
+monoNormParam: 4.6851
+stereoNoiseSigma: 1.8
+stereoNormType: 2
+stereoNormParam: 4.6851
+regularityNoiseSigma: 0.03
+regularityNormType: 1
+regularityNormParam: 0.04
+
+# Between-stereo factors (off in mono).
+addBetweenStereoFactors: 0
+betweenRotationPrecision: 0
+betweenTranslationPrecision: 100
+
+# ISAM2 / smoother
+relinearizeThreshold: 0.01
+relinearizeSkip: 1
+zero_velocity_precision: 1000
+no_motion_position_precision: 1000
+no_motion_rotation_precision: 10000
+constant_vel_precision: 100
+numOptimize: 1
+nr_states: 25
+wildfire_threshold: 0.001
+useDogLeg: 0
+
+# Method used to generate the initial guess for the pose of the keyframe
+#   IMU = 0
+#   MONO = 1
+#   STEREO = 2
+#   PNP = 3
+#   EXTERNAL_ODOM = 4
+pose_guess_source: 0
+mono_translation_scale_factor: 0.1

@@ -105,7 +105,8 @@ posest::runtime::RuntimeConfig makeVioReadyConfig() {
 class KimeraBackendSmokeFixture : public ::testing::Test {
 protected:
     void SetUp() override {
-        param_dir_ = makeTempParamDir(test_info_->name());
+        param_dir_ = makeTempParamDir(
+            ::testing::UnitTest::GetInstance()->current_test_info()->name());
         const auto cfg = makeVioReadyConfig();
         // Lay down all four YAMLs Kimera expects (FrontendParams,
         // BackendParams, ImuParams with IMUtoBodyT_BS + random walks

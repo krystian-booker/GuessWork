@@ -1,39 +1,53 @@
+%YAML:1.0
 # BMI088 IMU parameters at 1000 Hz, hardware-synchronized through the
 # Teensy 4.1 grandmaster clock.
 #
-# Noise densities below are the user-specified values for this BMI088
-# unit; they roll up the chip's continuous-time noise PSD with the
-# 1 kHz sampling rate Kimera assumes by default. The integration
-# sigma is held at 1e-8 to make pre-integration treat the IMU as a
-# near-noiseless source between samples — appropriate at 1 kHz where
-# integration error is dominated by the noise densities, not by the
-# discrete-step approximation.
+# This template covers every field Kimera's ImuParams::parseYAML reads
+# (Kimera-VIO/src/imu-frontend/ImuFrontendParams.cpp:28-79). Fields
+# left out cause cv::FileStorage CHECK aborts at VioParams ctor time
+# (KimeraBackend::start). Field-name convention: snake_case.
+#
+# Bias random-walk coefficients (accelerometer_random_walk,
+# gyroscope_random_walk) and the body↔IMU extrinsic (T_BS) are appended
+# at daemon start by KimeraParamWriter — see KimeraParamWriter.cpp.
 
-# Field-name convention: snake_case (matches Kimera's ImuParams YAML
-# parser). Verify against the installed Kimera version.
+# IMU preintegration:
+#   0: CombinedImuFactor (gtsam combined factor; biases coupled)
+#   1: ImuFactor (separate bias factors). FusionService uses this and
+#      we keep the two preintegrators consistent.
+imu_preintegration_type: 1
 
-# White noise PSDs.
-accelerometer_noise_density: 0.02
+# Camera-rate IMU resampling. Kimera 0 = off, 1 = on. Off because we
+# already hand Kimera one IMU sample per Teensy emit (~1 kHz) and the
+# upstream timesync filter handles drift.
+do_imu_rate_time_alignment: 0
+time_alignment_window_size_s: 10.0
+time_alignment_variance_threshold_scaling: 30.0
+
+# Sampling rate. Kimera divides noise densities by sqrt(rate_hz)
+# internally — match the firmware emit rate (1 kHz) exactly.
+rate_hz: 1000.0
+
+# Initial uncertainty on IMU biases at pipeline init. 1e-3 mirrors
+# Kimera's Euroc reference; FusionService's bias-calibration phase
+# tightens this for our own ISAM2 graph but Kimera maintains its own
+# bias estimate independently.
+imu_bias_init_sigma: 1.0e-3
+
+# White noise PSDs (BMI088 datasheet, rolled up to 1 kHz sampling).
 gyroscope_noise_density: 0.005
+accelerometer_noise_density: 0.02
 
 # Inter-sample integration uncertainty. 1e-8 is below the BMI088
 # digital noise floor at 1 kHz; effectively says "the discretization
 # itself adds no uncertainty, the noise densities own that budget".
 imu_integration_sigma: 1.0e-8
 
-# Bias random-walk coefficients (accelerometer_random_walk,
-# gyroscope_random_walk) are appended to this file at daemon start by
-# KimeraParamWriter, populated from FusionConfig::accel_bias_rw_sigma
-# and FusionConfig::gyro_bias_rw_sigma so both Kimera and FusionService
-# preintegration share one source of truth. Replace the FusionConfig
-# values with measurements from an Allan-variance run for production.
+# Per-sample timestamp offset between IMU and camera (after the
+# Teensy's hardware sync). 0 because the Teensy already aligns both
+# clocks; the time-sync filter handles host↔Teensy skew.
+imu_time_shift: 0.0
 
-# Sampling rate. Kimera divides noise densities by sqrt(sampling)
-# internally — match the firmware emit rate (1 kHz) exactly.
-nominal_sampling_time_s: 0.001
-
-# Body↔IMU extrinsic (IMUtoBodyT_BS) is appended to this file at
-# daemon start by KimeraParamWriter. The runtime composes it from
-# FusionConfig::imu_extrinsic_body_to_imu (inverted to satisfy
-# Kimera's IMU→body convention). Anything below this comment is
-# overwritten on every daemon boot — do not hand-edit.
+# Gravity in the world (n) frame, m/s². Kimera convention is +Z up,
+# so gravity points in -Z.
+n_gravity: [0.0, 0.0, -9.81]

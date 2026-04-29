@@ -28,17 +28,20 @@
 
 #include <opencv2/imgproc.hpp>
 
-// TODO(KIMERA-API): The exact include paths depend on Kimera's install
-// layout. Either of these tends to work; pick the one matching the
-// installed version.
+// Header names track the installed Kimera-VIO master at the time of
+// writing (see scripts/install_kimera_deps.sh for the pinned commit).
+// Kimera renamed `ImuFrontEnd*` → `ImuFrontend*` and
+// `VioBackEnd-*` → `VioBackend-*` between the early integration spike
+// and the current install; if a future bump renames them again,
+// update these and the API call sites below.
 #include <kimera-vio/pipeline/MonoImuPipeline.h>
 #include <kimera-vio/pipeline/Pipeline.h>
-#include <kimera-vio/pipeline/PipelineParams.h>
+#include <kimera-vio/pipeline/Pipeline-definitions.h>
 #include <kimera-vio/frontend/Frame.h>
 #include <kimera-vio/frontend/CameraParams.h>
-#include <kimera-vio/imu-frontend/ImuFrontEnd.h>
-#include <kimera-vio/imu-frontend/ImuFrontEnd-definitions.h>
-#include <kimera-vio/backend/VioBackEnd-definitions.h>
+#include <kimera-vio/imu-frontend/ImuFrontend.h>
+#include <kimera-vio/imu-frontend/ImuFrontend-definitions.h>
+#include <kimera-vio/backend/VioBackend-definitions.h>
 
 namespace posest::vio {
 
@@ -48,6 +51,16 @@ namespace {
 // pose enough to forward to the consumer. Tunable; see the
 // `tracking_ok` heuristic note in emitOutput.
 constexpr int kMinLandmarksForValid = 5;
+
+// `Pipeline::registerBackendOutputCallback` is `protected` in the
+// installed Kimera headers (Pipeline.h:215). Expose it through a
+// trivial subclass — no behavior change, just an access promotion.
+class MonoImuPipelinePublic final : public VIO::MonoImuPipeline {
+public:
+    using VIO::MonoImuPipeline::MonoImuPipeline;
+    using VIO::Pipeline::registerBackendOutputCallback;
+    using VIO::Pipeline::registerFrontendOutputCallback;
+};
 
 }  // namespace
 
@@ -83,17 +96,24 @@ public:
             cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
         }
 
-        // TODO(KIMERA-API): VIO::Frame constructor signature varies
-        // between releases. The four-arg form below matches recent
-        // master. Some versions accept (id, ts, cam, img, copy=true) —
-        // in that case drop the explicit clone() and pass `gray`.
+        // Frame ctor: (id, timestamp_ns, cam_param, img). Kimera's
+        // Frame stores `img_` as a shallow copy by default
+        // (frontend/Frame.h:51-56), so we clone() to give it
+        // independent ownership of the pixel data — the upstream
+        // caller is allowed to recycle `image`'s buffer the moment
+        // tryPushFrame returns.
         auto frame = std::make_unique<VIO::Frame>(
-            /*id=*/teensy_time_us,
+            /*id=*/static_cast<VIO::FrameId>(teensy_time_us),
             /*timestamp_ns=*/static_cast<VIO::Timestamp>(teensy_time_us) *
-                1000ULL,
+                1000LL,
             /*cam_param=*/left_cam_params_,
             /*image=*/gray.clone());
-        return pipeline_->fillSingleCameraQueue(std::move(frame));
+        // fillLeftFrameQueue returns void; Kimera's queue is unbounded
+        // by default, so we report success and rely on the consumer's
+        // upstream LatestFrameSlot drop-oldest semantics for
+        // backpressure.
+        pipeline_->fillLeftFrameQueue(std::move(frame));
+        return true;
     }
 
     bool tryPushImu(std::uint64_t teensy_time_us,
@@ -102,26 +122,28 @@ public:
         if (!running_.load() || !pipeline_) {
             return false;
         }
-        // TODO(KIMERA-API): VIO::ImuMeasurement is (timestamp_ns,
-        // Vector6) in recent master; the Vector6 ordering is
-        // [acc; gyro] which matches our ImuSample. Verify on the
-        // installed version.
+        // ImuMeasurement is (ImuStamp, ImuAccGyr) where ImuStamp is
+        // alias for VIO::Timestamp (int64 ns) and ImuAccGyr is
+        // Eigen::Matrix<double,6,1> ordered [acc; gyro] —
+        // matches our ImuSample directly.
         VIO::ImuAccGyr acc_gyr;
         acc_gyr << accel_mps2, gyro_radps;
         const VIO::Timestamp ts_ns =
-            static_cast<VIO::Timestamp>(teensy_time_us) * 1000ULL;
-        return pipeline_->fillSingleImuQueue(
-            VIO::ImuMeasurement(ts_ns, acc_gyr));
+            static_cast<VIO::Timestamp>(teensy_time_us) * 1000LL;
+        // fillSingleImuQueue returns void; same backpressure caveat
+        // as tryPushFrame above.
+        pipeline_->fillSingleImuQueue(VIO::ImuMeasurement(ts_ns, acc_gyr));
+        return true;
     }
 
     void start() override {
         if (running_.exchange(true)) {
             return;
         }
-        // TODO(KIMERA-API): VioParams' constructor signature has
-        // historically been (param_folder_path); some forks use
-        // (param_folder_path, lcd_param_folder_path). The single-arg
-        // form is correct for upstream master.
+        // VioParams loads PipelineParams.yaml + ImuParams.yaml +
+        // LeftCameraParams.yaml + (optional) RightCameraParams.yaml from
+        // `param_dir_`. The single-arg ctor is the upstream-master
+        // signature; matches what scripts/install_kimera_deps.sh builds.
         params_ = std::make_unique<VIO::VioParams>(param_dir_);
 
         // KimeraParamWriter emits exactly one camera (LeftCameraParams.yaml).
@@ -139,21 +161,26 @@ public:
         }
         left_cam_params_ = params_->camera_params_.at(0);
 
-        pipeline_ = std::make_unique<VIO::MonoImuPipeline>(*params_);
+        pipeline_ = std::make_unique<MonoImuPipelinePublic>(*params_);
 
         // The callback runs on Kimera's internal backend thread; we
         // copy the smart pointer's referent and route through
         // emitOutput which handles the lock dance and translation.
+        // VioBackendModule::OutputCallback is
+        // std::function<void(const std::shared_ptr<BackendOutput>&)>
+        // (PipelineModule.h:297). The output is non-const so we accept
+        // it as `BackendOutput::Ptr`.
         pipeline_->registerBackendOutputCallback(
-            [this](const VIO::BackendOutput::ConstPtr& out) {
+            [this](const VIO::BackendOutput::Ptr& out) {
                 if (out) {
                     emitOutput(*out);
                 }
             });
 
         spin_thread_ = std::thread([this] {
-            // pipeline_->spin() blocks until shutdown() is called.
-            pipeline_->spin();
+            // Pipeline::spin() blocks until shutdown() is called and
+            // returns false on shutdown. The bool is unused.
+            (void)pipeline_->spin();
         });
     }
 
@@ -191,31 +218,41 @@ private:
     // Kimera before flight):
     //   - W_State_Blkf_.pose_ is a gtsam::Pose3 in Kimera's W frame;
     //     copy directly into out.world_T_body.
-    //   - state_covariance_lkf_ is 15×15 over [rot, pos, vel, bg, ba]
-    //     in that order. Both Kimera's leading-6 block and gtsam's
-    //     Pose3 tangent use [rx, ry, rz, tx, ty, tz], so the
-    //     upper-left 6×6 block maps directly with no reordering.
-    //   - timestamp_kf_ is in nanoseconds; we recover teensy_time_us
-    //     by dividing by 1000 (exact, since we multiplied on push).
+    //   - state_covariance_lkf_ is gtsam::Matrix (Eigen dynamic) sized
+    //     15×15 over [rot, pos, vel, bg, ba] in that order. Both
+    //     Kimera's leading-6 block and gtsam's Pose3 tangent use
+    //     [rx, ry, rz, tx, ty, tz], so the upper-left 6×6 block maps
+    //     directly with no reordering.
+    //   - PipelinePayload::timestamp_ is in nanoseconds; we recover
+    //     teensy_time_us by dividing by 1000 (exact, since we
+    //     multiplied on push). BackendOutput inherits this field.
     void emitOutput(const VIO::BackendOutput& kout) {
         VioBackendOutput out;
         out.teensy_time_us =
-            static_cast<std::uint64_t>(kout.timestamp_kf_) / 1000ULL;
+            static_cast<std::uint64_t>(kout.timestamp_) / 1000ULL;
         out.world_T_body = kout.W_State_Blkf_.pose_;
 
         const auto& C = kout.state_covariance_lkf_;
-        out.pose_covariance = C.block<6, 6>(0, 0);
+        // Defensive: state_covariance_lkf_ is dynamically sized, and
+        // very early Kimera outputs (pre-initialization) can be empty.
+        // Skip with a degraded marker rather than indexing OOB.
+        if (C.rows() < 6 || C.cols() < 6) {
+            out.tracking_ok = false;
+            out.backend_status = "degraded";
+        } else {
+            out.pose_covariance = C.block<6, 6>(0, 0);
 
-        // tracking_ok heuristic. BackendOutput has no canonical
-        // "tracking is good" boolean upstream; landmark count plus a
-        // finite-covariance check is the conservative signal. The
-        // consumer applies its own first-frame skip and airborne
-        // covariance inflation downstream, so we err toward
-        // permissive here.
-        const bool finite_cov = C.diagonal().allFinite();
-        out.tracking_ok =
-            (kout.landmarks_kf_ >= kMinLandmarksForValid) && finite_cov;
-        out.backend_status = out.tracking_ok ? "valid" : "degraded";
+            // tracking_ok heuristic. BackendOutput has no canonical
+            // "tracking is good" boolean upstream; landmark count plus
+            // a finite-covariance check is the conservative signal.
+            // The consumer applies its own first-frame skip and
+            // airborne covariance inflation downstream, so we err
+            // toward permissive here.
+            const bool finite_cov = out.pose_covariance.diagonal().allFinite();
+            out.tracking_ok =
+                (kout.landmark_count_ >= kMinLandmarksForValid) && finite_cov;
+            out.backend_status = out.tracking_ok ? "valid" : "degraded";
+        }
 
         OutputCallback cb;
         {
@@ -234,7 +271,7 @@ private:
 
     std::unique_ptr<VIO::VioParams> params_;
     VIO::CameraParams left_cam_params_{};
-    std::unique_ptr<VIO::MonoImuPipeline> pipeline_;
+    std::unique_ptr<MonoImuPipelinePublic> pipeline_;
     std::thread spin_thread_;
 };
 

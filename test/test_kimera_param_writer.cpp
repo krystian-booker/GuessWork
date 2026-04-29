@@ -87,10 +87,24 @@ TEST(KimeraParamWriter, EmitsAllFourFilesWhenVioEnabled) {
 
     posest::vio::emitKimeraParamYamls(cfg, dir);
 
+    // Kimera's VioParams(folder) ctor unconditionally parses all of
+    // these — leaving any of them out crashes start() with a YAML open
+    // failure. See Pipeline-definitions.cpp:109-185.
+    EXPECT_TRUE(std::filesystem::exists(dir / "PipelineParams.yaml"));
     EXPECT_TRUE(std::filesystem::exists(dir / "FrontendParams.yaml"));
     EXPECT_TRUE(std::filesystem::exists(dir / "BackendParams.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(dir / "LcdParams.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(dir / "DisplayParams.yaml"));
     EXPECT_TRUE(std::filesystem::exists(dir / "ImuParams.yaml"));
     EXPECT_TRUE(std::filesystem::exists(dir / "LeftCameraParams.yaml"));
+
+    // PipelineParams must select MonoImu + plain VioBackend, otherwise
+    // KimeraBackend's MonoImuPipeline + missing RightCameraParams.yaml
+    // combination wouldn't load.
+    const auto pipeline_yaml = readWhole(dir / "PipelineParams.yaml");
+    EXPECT_NE(pipeline_yaml.find("frontend_type: 0"), std::string::npos);
+    EXPECT_NE(pipeline_yaml.find("backend_type: 0"), std::string::npos);
+    EXPECT_NE(pipeline_yaml.find("parallel_run: 1"), std::string::npos);
 
     const auto cam_yaml = readWhole(dir / "LeftCameraParams.yaml");
     EXPECT_NE(cam_yaml.find("%YAML:1.0"), std::string::npos);
@@ -106,11 +120,16 @@ TEST(KimeraParamWriter, EmitsAllFourFilesWhenVioEnabled) {
     const auto imu_yaml = readWhole(dir / "ImuParams.yaml");
     EXPECT_NE(imu_yaml.find("accelerometer_noise_density: 0.02"),
               std::string::npos);
-    EXPECT_NE(imu_yaml.find("IMUtoBodyT_BS:"), std::string::npos);
-    // Identity rotation + (0.05, 0, 0.10) translation. The data array
-    // ends with the homogeneous `0, 0, 0, 1` row.
-    EXPECT_NE(imu_yaml.find("0.050000000000000003"), std::string::npos);
-    EXPECT_NE(imu_yaml.find("0.10000000000000001"), std::string::npos);
+    // Kimera's ImuParams parser CHECK_FATAL aborts unless this matrix
+    // is identity (Kimera assumes IMU == body). The writer therefore
+    // emits identity regardless of imu_extrinsic_body_to_imu — that
+    // offset stays on FusionService's path. The test config above sets
+    // a non-identity offset on purpose, which would surface as a
+    // 0.05/0.10 substring if it leaked into the IMU YAML.
+    EXPECT_NE(imu_yaml.find("T_BS:"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("IMUtoBodyT_BS:"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("0.050000000000000003"), std::string::npos);
+    EXPECT_EQ(imu_yaml.find("0.10000000000000001"), std::string::npos);
 
     std::filesystem::remove_all(dir);
 }
@@ -213,11 +232,11 @@ TEST(KimeraParamWriter, ImuParamsCarriesRandomWalkFromFusionConfig) {
               std::string::npos);
     EXPECT_NE(imu_yaml.find("gyroscope_random_walk: " + fmt(3.5e-5)),
               std::string::npos);
-    // Both lines must precede the IMUtoBodyT_BS matrix block — Kimera
-    // reads by key so order is irrelevant for parsing, but the writer's
+    // Both lines must precede the T_BS matrix block — Kimera reads by
+    // key so order is irrelevant for parsing, but the writer's
     // contract is "scalars first, matrix block last".
     const auto rw_pos = imu_yaml.find("accelerometer_random_walk:");
-    const auto extrinsic_pos = imu_yaml.find("IMUtoBodyT_BS:");
+    const auto extrinsic_pos = imu_yaml.rfind("T_BS:");
     ASSERT_NE(rw_pos, std::string::npos);
     ASSERT_NE(extrinsic_pos, std::string::npos);
     EXPECT_LT(rw_pos, extrinsic_pos);

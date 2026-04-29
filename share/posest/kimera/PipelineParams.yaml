@@ -1,0 +1,32 @@
+%YAML:1.0
+# PipelineParams selects the top-level VIO pipeline shape. Kimera's
+# VioParams::parseYAML reads this file first (Pipeline-definitions.cpp:111)
+# to decide which backend / frontend / display variants to instantiate.
+# Mismatching this with the rest of the param set is fatal — e.g. the
+# StereoImu frontend requires a RightCameraParams.yaml that
+# KimeraParamWriter does not emit.
+
+# Frontend type
+#   0: MonoImu   ← we use this; KimeraParamWriter emits a single
+#                  LeftCameraParams.yaml.
+#   1: StereoImu (would also need RightCameraParams.yaml)
+frontend_type: 0
+
+# Backend type
+#   0: VioBackend (plain BackendParams.yaml schema)
+#   1: RegularVioBackend (RegularVioBackendParams schema, adds plane /
+#                         line / regularity factors)
+# We pick 0 — BackendParams.yaml is hand-tuned for the plain backend
+# and the regularity factors are not load-bearing for a downward
+# carpet-tracker.
+backend_type: 0
+
+# Display type. 0 = OpenCV, 1 = Pangolin. We never run the visualizer
+# on the daemon; this just gates which DisplayParams schema is used.
+display_type: 0
+
+# 1 = parallel (each pipeline module on its own thread). The daemon
+# expects pipeline_->spin() to block until shutdown(); sequential mode
+# spins once per call, which would deadlock against KimeraBackend's
+# spin_thread_.
+parallel_run: 1

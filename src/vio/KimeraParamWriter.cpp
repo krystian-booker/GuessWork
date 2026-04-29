@@ -181,20 +181,26 @@ std::string buildLeftCameraParamsYaml(
     const runtime::RuntimeConfig& cfg,
     const runtime::CameraCalibrationConfig& cam,
     const runtime::CameraImuCalibrationConfig& cam_imu) {
-    // T_BS: pose of camera in body frame (camera → body). Built from
-    //   T_imu_body  = imu_extrinsic_body_to_imu (IMU → body, see
-    //                 FusionService.cpp:942-943 — assigned to gtsam's
-    //                 body_P_sensor which is the pose of sensor in
-    //                 body frame).
-    //   T_cam_imu   = inverse(cam_imu.camera_to_imu). The struct field
-    //                 stores Kalibr's T_cam_imu directly (parser at
-    //                 CalibrationParsers.cpp:453), which is IMU → cam;
-    //                 inverting yields cam → IMU.
-    //   T_cam_body  = T_imu_body * T_cam_imu
-    const Matrix4 T_imu_body = pose3dToMatrix(cfg.fusion.imu_extrinsic_body_to_imu);
+    (void)cfg;
+    // T_BS: pose of the camera sensor in the body frame.
+    //
+    // Kimera enforces that the IMU IS the body frame — its
+    // ImuParams::parseYAML LOG(FATAL) aborts unless the IMU's T_BS is
+    // identity (Kimera-VIO/src/imu-frontend/ImuFrontendParams.cpp:50).
+    // So body == IMU here, and the camera's T_BS is just camera→IMU.
+    //
+    // CameraImuCalibrationConfig::camera_to_imu stores Kalibr's
+    // T_cam_imu (parser at CalibrationParsers.cpp:453), which is the
+    // IMU pose expressed in the camera frame — i.e., transforms IMU
+    // → camera. Inverting yields camera → IMU == camera → body, which
+    // is what Kimera's T_BS field expects.
+    //
+    // FusionConfig::imu_extrinsic_body_to_imu describes our own
+    // (non-Kimera) body↔IMU offset and is intentionally ignored here:
+    // mixing it in would push the camera transform outside Kimera's
+    // assumed frame and silently bias every published VioMeasurement.
     const Matrix4 T_cam_imu_struct = pose3dToMatrix(cam_imu.camera_to_imu);
-    const Matrix4 T_cam_imu_inv = invertRigid(T_cam_imu_struct);
-    const Matrix4 T_cam_body = multiply(T_imu_body, T_cam_imu_inv);
+    const Matrix4 T_cam_body = invertRigid(T_cam_imu_struct);
 
     std::ostringstream out;
     out << "%YAML:1.0\n"
@@ -237,12 +243,13 @@ std::string buildImuParamsYaml(const runtime::RuntimeConfig& cfg) {
         << cfg.fusion.accel_bias_rw_sigma << '\n';
     out << "gyroscope_random_walk: " << std::setprecision(17)
         << cfg.fusion.gyro_bias_rw_sigma << '\n';
-    // IMU → body. FusionConfig::imu_extrinsic_body_to_imu is assigned to
-    // gtsam's body_P_sensor (FusionService.cpp:942-943), which is the
-    // pose of the sensor in body frame — i.e., transforms IMU → body.
-    // Same direction as Kimera's IMUtoBodyT_BS.
-    const Matrix4 T_imu_body = pose3dToMatrix(cfg.fusion.imu_extrinsic_body_to_imu);
-    writeMatrix4Block(out, "IMUtoBodyT_BS", T_imu_body);
+    // T_BS: IMU sensor pose in body frame. Kimera assumes the IMU IS
+    // the body — its ImuParams parser CHECK_FATAL aborts unless this
+    // is identity (ImuFrontendParams.cpp:50). Anything off-identity
+    // would not just be ignored, it would crash the daemon at start.
+    // FusionConfig::imu_extrinsic_body_to_imu is preserved on our own
+    // FusionService path and intentionally not threaded through here.
+    writeMatrix4Block(out, "T_BS", identity4());
     return out.str();
 }
 
@@ -297,10 +304,16 @@ void emitKimeraParamYamls(
             param_dir.string() + ": " + ec.message());
     }
 
+    atomicWrite(param_dir / "PipelineParams.yaml",
+                static_params::kPipelineParamsYaml);
     atomicWrite(param_dir / "FrontendParams.yaml",
                 static_params::kFrontendParamsYaml);
     atomicWrite(param_dir / "BackendParams.yaml",
                 static_params::kBackendParamsYaml);
+    atomicWrite(param_dir / "LcdParams.yaml",
+                static_params::kLcdParamsYaml);
+    atomicWrite(param_dir / "DisplayParams.yaml",
+                static_params::kDisplayParamsYaml);
     atomicWrite(param_dir / "ImuParams.yaml",
                 buildImuParamsYaml(runtime_config));
     atomicWrite(param_dir / "LeftCameraParams.yaml",

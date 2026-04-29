@@ -1,0 +1,8 @@
+%YAML:1.0
+# OpenCV Display params. The daemon never opens a display, but
+# Kimera's VioParams::parseYAML still reads this file
+# unconditionally. The two flags below match Kimera's EurocMono
+# reference set.
+
+hold_2d_display: 0
+hold_3d_display: 0
