@@ -14,6 +14,7 @@
 #include "posest/MeasurementBus.h"
 #include "posest/MeasurementTypes.h"
 #include "posest/Timestamp.h"
+#include "posest/runtime/IVisionPipeline.h"
 #include "posest/vio/AirborneCovariance.h"
 #include "posest/vio/IVioBackend.h"
 #include "posest/vio/KimeraVioConfig.h"
@@ -62,7 +63,8 @@ struct KimeraVioStats {
 //   B. IMU drainer — blocks on imu_input_bus_.take() and buffers samples.
 // Plus the backend's output callback, which may run on Kimera's
 // internal thread. See class-internal comments for the locking story.
-class KimeraVioConsumer final : public ConsumerBase {
+class KimeraVioConsumer final : public ConsumerBase,
+                                public runtime::IVisionPipeline {
 public:
     KimeraVioConsumer(std::string id,
                       MeasurementBus& imu_input_bus,
@@ -77,6 +79,10 @@ public:
 
     void start() override;
     void stop() override;
+
+    // IVisionPipeline. The consumer plugs into the per-camera pipeline
+    // factory slot keyed by `type() == "vio"`; see ProductionFactories.
+    const std::string& type() const override { return type_; }
 
     // Stage a new config for the next process() iteration. Safe to call
     // from any thread; the swap happens at the top of process() before
@@ -152,6 +158,10 @@ private:
 
     mutable std::mutex stats_mu_;
     KimeraVioStats stats_;
+
+    // Pipeline type tag, returned by reference from type(). Constant
+    // for the lifetime of the consumer.
+    std::string type_{"vio"};
 };
 
 }  // namespace posest::vio

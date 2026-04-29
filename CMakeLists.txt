@@ -209,6 +209,11 @@ if(TARGET posest_v4l2)
     target_link_libraries(posest_daemon_lib PUBLIC posest_v4l2)
 endif()
 
+if(TARGET posest_vio_kimera)
+    target_compile_definitions(posest_daemon_lib PRIVATE POSEST_BUILD_VIO)
+    target_link_libraries(posest_daemon_lib PUBLIC posest_vio_kimera)
+endif()
+
 # --- posest_daemon: single process runtime entrypoint
 add_executable(posest_daemon app/posest_daemon.cpp)
 target_link_libraries(posest_daemon PRIVATE posest_daemon_lib)

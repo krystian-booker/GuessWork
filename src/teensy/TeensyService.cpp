@@ -577,6 +577,12 @@ Timestamp TeensyService::timestampFromTeensyTime(
     return Timestamp{std::chrono::microseconds(host_time_us)};
 }
 
+TeensyService::TimeConverter TeensyService::makeTeensyTimeConverter() {
+    return [this](std::uint64_t teensy_time_us, Timestamp fallback) {
+        return timestampFromTeensyTime(teensy_time_us, fallback);
+    };
+}
+
 std::vector<std::uint8_t> TeensyService::encodeCameraTriggerConfigPayload() const {
     std::vector<std::uint8_t> payload;
     payload.reserve(8 + camera_triggers_.size() * 28);

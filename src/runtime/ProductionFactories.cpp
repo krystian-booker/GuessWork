@@ -3,14 +3,28 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "posest/pipelines/AprilTagPipeline.h"
 #include "posest/pipelines/PlaceholderPipelines.h"
 #include "posest/runtime/PipelineContextHelpers.h"
+#include "posest/vio/FakeVioBackend.h"
+#include "posest/vio/IVioBackend.h"
+#include "posest/vio/KimeraVioConfigBuilder.h"
+#include "posest/vio/KimeraVioConsumer.h"
 
 #if defined(POSEST_HAS_V4L2)
 #include "posest/V4L2DeviceEnumerator.h"
 #include "posest/V4L2Producer.h"
+#endif
+
+#if defined(POSEST_BUILD_VIO)
+namespace posest::vio {
+// Forward-declared factory from src/vio/KimeraBackend.cpp. Compiled
+// only when POSEST_BUILD_VIO is on; otherwise we fall back to
+// FakeVioBackend so the daemon graph still builds on Linux dev/CI.
+std::unique_ptr<IVioBackend> makeKimeraBackend(const std::string& param_dir);
+}  // namespace posest::vio
 #endif
 
 namespace posest::runtime::detail {
@@ -130,9 +144,29 @@ std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(
             std::move(pipeline_config));
     }
     if (config.type == "vio") {
-        return std::make_shared<pipelines::PlaceholderVioPipeline>(
+        if (imu_vio_bus_ == nullptr || !time_converter_) {
+            throw std::runtime_error(
+                "VIO pipeline requested but ProductionPipelineFactory was "
+                "constructed without a VIO context — call setVioContext "
+                "before building the pipeline graph.");
+        }
+        std::unique_ptr<vio::IVioBackend> backend;
+#if defined(POSEST_BUILD_VIO)
+        backend = vio::makeKimeraBackend(runtime_config.kimera_vio.param_dir);
+#else
+        // Linux dev/CI without Kimera installed: drop in the
+        // deterministic fake so the daemon graph still builds and
+        // wires end-to-end. The trajectory it emits is synthetic; do
+        // not ship a build like this to a robot.
+        backend = std::make_unique<vio::FakeVioBackend>();
+#endif
+        return std::make_shared<vio::KimeraVioConsumer>(
             config.id,
-            measurement_sink);
+            *imu_vio_bus_,
+            measurement_sink,
+            time_converter_,
+            std::move(backend),
+            vio::buildKimeraVioConfig(runtime_config));
     }
     if (config.type == "mock_apriltag") {
         return std::make_shared<pipelines::PlaceholderAprilTagPipeline>(
@@ -140,6 +174,13 @@ std::shared_ptr<IVisionPipeline> ProductionPipelineFactory::createPipeline(
             measurement_sink);
     }
     throw std::runtime_error("Unsupported pipeline type: " + config.type);
+}
+
+void ProductionPipelineFactory::setVioContext(
+    MeasurementBus& imu_vio_bus,
+    TeensyTimeConverter time_converter) {
+    imu_vio_bus_ = &imu_vio_bus;
+    time_converter_ = std::move(time_converter);
 }
 
 }  // namespace posest::runtime

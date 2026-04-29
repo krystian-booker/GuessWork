@@ -848,6 +848,10 @@ TEST(ProductionFactories, CameraFactoryCreatesV4L2OnLinuxAndRejectsUnknown) {
 TEST(ProductionFactories, PipelineFactoryCreatesImplementedAndPlaceholderPipelines) {
     posest::runtime::ProductionPipelineFactory factory;
     posest::MeasurementBus bus(4);
+    posest::MeasurementBus imu_vio_bus(4);
+    factory.setVioContext(
+        imu_vio_bus,
+        [](std::uint64_t, posest::Timestamp fallback) { return fallback; });
 
     posest::runtime::PipelineConfig tags;
     tags.id = "tags";

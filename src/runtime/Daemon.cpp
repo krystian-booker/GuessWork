@@ -20,7 +20,10 @@
 #include "posest/calibration/CalibrationRecorder.h"
 #include "posest/calibration/CalibrationTargetWriter.h"
 #include "posest/config/CalibrationParsers.h"
+#include "posest/runtime/ProductionFactories.h"
 #include "posest/vio/KimeraParamWriter.h"
+#include "posest/vio/KimeraVioConfigBuilder.h"
+#include "posest/vio/KimeraVioConsumer.h"
 
 namespace posest::runtime {
 
@@ -1701,28 +1704,77 @@ void DaemonController::loadAndBuild() {
         fusion_ = std::make_unique<fusion::FusionService>(
             *measurement_bus_,
             fusion::buildFusionConfig(config_));
+
+        // When VIO is enabled, the consumer needs its own IMU bus
+        // (single-consumer contract on MeasurementBus). Fan IMU into
+        // both buses via a TeeSink; everything else routes to the
+        // main bus only. TeensyService publishes into the tee
+        // (which transparently forwards to the main bus when no VIO
+        // bus is configured).
+        if (config_.vio.enabled) {
+            imu_vio_bus_ =
+                std::make_unique<MeasurementBus>(kMeasurementBusCapacity);
+        } else {
+            imu_vio_bus_.reset();
+        }
+        imu_tee_ = std::make_unique<TeeSink>();
+        imu_tee_->addRoute<ImuSample>(measurement_bus_.get());
+        if (imu_vio_bus_) {
+            imu_tee_->addRoute<ImuSample>(imu_vio_bus_.get());
+        }
+        imu_tee_->addRoute<CameraTriggerEvent>(measurement_bus_.get());
+        imu_tee_->addRoute<ToFSample>(measurement_bus_.get());
+        imu_tee_->addRoute<ChassisSpeedsSample>(measurement_bus_.get());
+        imu_tee_->addRoute<AprilTagObservation>(measurement_bus_.get());
+        imu_tee_->addRoute<VioMeasurement>(measurement_bus_.get());
+
         teensy_ = std::make_shared<teensy::TeensyService>(
             config_.teensy, config_.camera_triggers,
-            *measurement_bus_,
+            *imu_tee_,
             teensy::makePosixSerialTransport, trigger_cache_,
             config_.vio, tof_cache_);
         fusion_->addOutputSink(teensy_);
+
+        // Plumb the VIO context into the production pipeline factory
+        // before the graph builds. Tests that construct the daemon
+        // with a non-production factory must do this themselves; the
+        // factory throws a clear error if it sees type=="vio"
+        // without setVioContext.
+        if (imu_vio_bus_) {
+            if (auto* prod_factory =
+                    dynamic_cast<ProductionPipelineFactory*>(&pipeline_factory_)) {
+                prod_factory->setVioContext(*imu_vio_bus_,
+                                            teensy_->makeTeensyTimeConverter());
+            }
+        }
+
         // F-1: hand new fusion config to the running service whenever the web
         // layer saves a RuntimeConfig. The callback runs on the web thread but
         // only stages a pending swap under FusionService::mu_ — the worker
         // applies it at the top of its next process() iteration.
         web_ = std::make_unique<WebService>(
             *config_store_,
-            [fusion = fusion_.get()](const RuntimeConfig& cfg) {
-                if (fusion) {
-                    fusion->applyConfig(fusion::buildFusionConfig(cfg));
+            [this](const RuntimeConfig& cfg) {
+                if (fusion_) {
+                    fusion_->applyConfig(fusion::buildFusionConfig(cfg));
                 }
-                // Kimera-VIO live-edit hook lands here once the daemon
-                // constructs a KimeraVioConsumer (currently the
-                // PlaceholderVioPipeline owns the "vio" slot — see
-                // ProductionFactories.cpp:132). The translator already
-                // exists: vio::buildKimeraVioConfig(cfg) →
-                // KimeraVioConsumer::applyConfig.
+                // Kimera-VIO live-edit hook: live fields (airborne
+                // thresholds, covariance scaling) take effect on the
+                // next process() iteration; structural fields
+                // (param_dir, imu_buffer_capacity, camera_id) are
+                // reverted by the consumer with a counter bump.
+                if (graph_) {
+                    for (const auto& pipeline : graph_->pipelines()) {
+                        if (pipeline && pipeline->type() == "vio") {
+                            if (auto* vio = dynamic_cast<vio::KimeraVioConsumer*>(
+                                    pipeline.get())) {
+                                vio->applyConfig(
+                                    vio::buildKimeraVioConfig(cfg));
+                                break;
+                            }
+                        }
+                    }
+                }
             });
         graph_ = std::make_unique<RuntimeGraph>(
             config_, camera_factory_, pipeline_factory_, *measurement_bus_);

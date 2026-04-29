@@ -100,6 +100,18 @@ public:
     std::optional<Frame> takeLastOutboundFrame() const;
     TeensyStats stats() const;
 
+    // Returns a callable that converts a Teensy hardware-clock
+    // microsecond stamp to a host steady_clock Timestamp via the
+    // service's TimeSyncFilter. The fallback is returned when the
+    // filter has not yet established a sync. Captures `this`; the
+    // lifetime of the returned callable must not exceed the
+    // TeensyService's. Type is `vio::TeensyTimeConverter` upstream
+    // — kept as a raw std::function here to avoid pulling Kimera
+    // headers into TeensyService consumers.
+    using TimeConverter =
+        std::function<Timestamp(std::uint64_t teensy_time_us, Timestamp fallback)>;
+    TimeConverter makeTeensyTimeConverter();
+
     // v4 FusedPose USB payload encoder. Public for golden-layout testing; the
     // service is the only production caller and uses the timestamped overload
     // from publish() so the firmware can measure end-to-end latency. The

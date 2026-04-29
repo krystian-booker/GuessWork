@@ -15,6 +15,7 @@
 #include "posest/ToFSampleCache.h"
 #include "posest/MeasurementTypes.h"
 #include "posest/MeasurementBus.h"
+#include "posest/TeeSink.h"
 #include "posest/config/IConfigStore.h"
 #include "posest/fusion/FusionService.h"
 #include "posest/pipelines/PipelineStats.h"
@@ -333,6 +334,15 @@ private:
 
     RuntimeConfig config_;
     std::unique_ptr<MeasurementBus> measurement_bus_;
+    // Dedicated bus for IMU samples consumed by the VIO pipeline. The
+    // main MeasurementBus is single-consumer (FusionService); fanning
+    // IMU into both buses via TeeSink lets the VIO consumer drain its
+    // own queue without contending with FusionService.
+    std::unique_ptr<MeasurementBus> imu_vio_bus_;
+    // Fan-out sink installed in front of TeensyService when
+    // imu_vio_bus_ exists. Routes ImuSample to both buses; everything
+    // else to the main bus only.
+    std::unique_ptr<TeeSink> imu_tee_;
     std::shared_ptr<CameraTriggerCache> trigger_cache_;
     std::shared_ptr<ToFSampleCache> tof_cache_;
     std::unique_ptr<fusion::FusionService> fusion_;

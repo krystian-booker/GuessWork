@@ -438,7 +438,11 @@ TEST(AprilTagPipeline, SingleTagWithFullContextPopulatesFieldToRobotPose) {
 
 TEST(Pipelines, ProductionPipelineFactoryCreatesConfiguredPipelines) {
     posest::MeasurementBus bus(4);
+    posest::MeasurementBus imu_vio_bus(4);
     posest::runtime::ProductionPipelineFactory factory;
+    factory.setVioContext(
+        imu_vio_bus,
+        [](std::uint64_t, posest::Timestamp fallback) { return fallback; });
 
     posest::runtime::PipelineConfig tags;
     tags.id = "tags";
@@ -465,6 +469,16 @@ TEST(Pipelines, ProductionPipelineFactoryCreatesConfiguredPipelines) {
     unknown.id = "unknown";
     unknown.type = "unknown";
     EXPECT_THROW(factory.createPipeline(unknown, bus), std::runtime_error);
+}
+
+TEST(Pipelines, ProductionPipelineFactoryRejectsVioWithoutContext) {
+    posest::MeasurementBus bus(4);
+    posest::runtime::ProductionPipelineFactory factory;
+
+    posest::runtime::PipelineConfig vio;
+    vio.id = "vio";
+    vio.type = "vio";
+    EXPECT_THROW(factory.createPipeline(vio, bus), std::runtime_error);
 }
 
 TEST(Pipelines, ProductionPipelineFactoryPassesActiveCalibrationToAprilTagPipeline) {
