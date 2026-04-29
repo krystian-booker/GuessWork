@@ -741,6 +741,38 @@ TEST(KimeraVioConsumer, MissingToFSampleSurfacesAsMissingCount) {
     consumer->stop();
 }
 
+// Phase 3.2: mono_translation_scale_factor is structural — Kimera reads
+// it once from BackendParams.yaml at backend start, so a live edit
+// reverts with the structural-skipped counter bump (mirrors param_dir).
+TEST(KimeraVioConsumer, ApplyConfigRevertsMonoTranslationScaleFactor) {
+    posest::MeasurementBus imu_bus(64);
+    posest::MeasurementBus out_bus(64);
+
+    posest::vio::KimeraVioConfig cfg;
+    cfg.mono_translation_scale_factor = 0.1;
+
+    auto backend = std::make_unique<posest::vio::FakeVioBackend>();
+    posest::vio::KimeraVioConsumer consumer(
+        "vio", imu_bus, out_bus, &identityConverter,
+        std::move(backend), cfg);
+    consumer.start();
+    deliverPaced(consumer, makeFrame(1'000, 0, 0.05));
+
+    posest::vio::KimeraVioConfig updated = cfg;
+    updated.mono_translation_scale_factor = 0.5;  // structural — reverted
+    consumer.applyConfig(updated);
+
+    deliverPaced(consumer, makeFrame(2'000, 1, 0.05));
+    auto got = drainVio(out_bus, 1);
+    ASSERT_EQ(got.size(), 1u);
+
+    auto s = consumer.stats();
+    EXPECT_EQ(s.config_reloads_applied, 1u);
+    EXPECT_EQ(s.config_reloads_structural_skipped, 1u);
+
+    consumer.stop();
+}
+
 // Frames without a Teensy timestamp can't be aligned to IMU and must
 // be dropped with the right counter bumped.
 TEST(KimeraVioConsumer, DropsFramesMissingTeensyTimestamp) {

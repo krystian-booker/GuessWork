@@ -241,6 +241,20 @@ struct DaemonHealth {
     // silent stall in Kimera's pipeline). Empty until the first
     // VioMeasurement is published.
     std::vector<vio::KimeraVioStats> vio_pipelines;
+    // Phase 3.1: Kimera YAML lifecycle observability. Counts the
+    // successful emitKimeraParamYamls calls fired by the WebService
+    // save callback (the initial loadAndBuild emit does NOT count —
+    // only post-startup repaints). vio_yaml_restart_required becomes
+    // true on the first successful repaint and stays true: Kimera
+    // reads YAMLs once at backend start, so any post-start repaint
+    // requires a daemon restart to actually take effect.
+    // vio_yaml_repaint_last_error is empty when the last attempt
+    // succeeded; populated with std::exception::what() on failure
+    // (the running pipeline keeps using the previously-emitted YAMLs
+    // and is unaffected by a failed repaint).
+    std::uint64_t vio_yaml_repaint_count{0};
+    bool vio_yaml_restart_required{false};
+    std::string vio_yaml_repaint_last_error;
     std::string last_error;
     int shutdown_signal{0};
 };
@@ -331,9 +345,24 @@ public:
 
     DaemonHealth health() const;
 
+    // Phase 3.1: test/web hook returning the WebService instance owned
+    // by the controller. Returns nullptr before loadAndBuild() runs.
+    // Production users (HTTP server, future web frontend) reach the
+    // service through this same accessor; tests use it to drive
+    // stageConfig without wrapping the unique_ptr.
+    WebService* webService() { return web_.get(); }
+
 private:
     void refreshHealth();
     void markFailed(const std::string& error);
+    // Phase 3.1: invoked by the WebService save callback. Emits the
+    // Kimera YAML set under vio_yaml_mu_ when `cfg` differs from
+    // last_emitted_yaml_config_ in any field KimeraParamWriter
+    // consumes. Captures any std::exception::what() into
+    // health_.vio_yaml_repaint_last_error rather than re-throwing —
+    // a failed repaint must not break the save callback for the
+    // other live-reload paths above it.
+    void repaintKimeraYamlsIfChanged(const RuntimeConfig& cfg);
 
     DaemonOptions options_;
     std::unique_ptr<config::IConfigStore> config_store_;
@@ -359,6 +388,15 @@ private:
     std::unique_ptr<RuntimeGraph> graph_;
     mutable std::mutex mu_;
     DaemonHealth health_;
+    // Phase 3.1: serialize the WebService save callback's calls to
+    // emitKimeraParamYamls. Per-file atomic-rename is safe, but the
+    // SET of seven YAML files is not atomic — back-to-back saves could
+    // interleave a partial set on disk if the callback ran on
+    // overlapping threads. Also guards last_emitted_yaml_config_,
+    // which is the comparison baseline for "did anything Kimera-
+    // relevant change since the last emit".
+    mutable std::mutex vio_yaml_mu_;
+    RuntimeConfig last_emitted_yaml_config_;
     bool built_{false};
     bool started_{false};
 };

@@ -71,4 +71,7 @@ useDogLeg: 0
 #   PNP = 3
 #   EXTERNAL_ODOM = 4
 pose_guess_source: 0
-mono_translation_scale_factor: 0.1
+# mono_translation_scale_factor lives in kimera_vio_config and is
+# appended to this file at emission time by KimeraParamWriter — DO NOT
+# uncomment a literal here, two values for the same key would shadow
+# unpredictably depending on parser order.

@@ -489,6 +489,17 @@ void validateRuntimeConfig(const runtime::RuntimeConfig& config) {
             ">= 0 (0 disables the gate)");
     require(config.kimera_vio.landmark_count_floor >= 0,
             "kimera_vio landmark_count_floor must be >= 0");
+    // Phase 3.2: bound mono_translation_scale_factor to (0, 1]. The
+    // value is a precision-prior weight on Kimera's monocular pose
+    // guess; values <=0 disable the prior in nonsensical ways
+    // (gtsam::noiseModel::Constrained::All), and values >1 would
+    // claim more precision than the IMU+geometry-derived guess can
+    // possibly provide.
+    require(isFinite(config.kimera_vio.mono_translation_scale_factor) &&
+                config.kimera_vio.mono_translation_scale_factor > 0.0 &&
+                config.kimera_vio.mono_translation_scale_factor <= 1.0,
+            "kimera_vio mono_translation_scale_factor must be finite and "
+            "in (0, 1]");
 
     // GTSAM fusion-graph tunables. Bounds are deliberately loose where the
     // graph itself will gracefully degrade and tight where a bad value would

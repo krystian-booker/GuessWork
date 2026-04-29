@@ -546,6 +546,25 @@ COMMIT;
 )sql";
 }
 
+const char* migration17Sql() {
+    // Phase 3.2: promote mono_translation_scale_factor from a static
+    // line in BackendParams.yaml to a runtime-tunable column on
+    // kimera_vio_config. KimeraParamWriter strips the static line from
+    // the embedded template and appends the runtime value at emit time.
+    // Default 0.1 matches the EurocMono reference value the static
+    // template carried before this migration — an unmigrated DB picks
+    // up identical behaviour.
+    return R"sql(
+BEGIN;
+
+ALTER TABLE kimera_vio_config
+    ADD COLUMN mono_translation_scale_factor REAL NOT NULL DEFAULT 0.1;
+
+PRAGMA user_version = 17;
+COMMIT;
+)sql";
+}
+
 const char* migration16Sql() {
     // Phase 2 carpet-scenario tunables on kimera_vio_config:
     //   - preprocess_clahe: gate for CLAHE pre-processing in
@@ -646,7 +665,7 @@ COMMIT;
 }  // namespace
 
 int currentSchemaVersion() {
-    return 16;
+    return 17;
 }
 
 void applyMigrations(sqlite3* db) {
@@ -721,6 +740,10 @@ void applyMigrations(sqlite3* db) {
     }
     if (migrated_version == 15) {
         exec(db, migration16Sql());
+        migrated_version = 16;
+    }
+    if (migrated_version == 16) {
+        exec(db, migration17Sql());
     }
 }
 

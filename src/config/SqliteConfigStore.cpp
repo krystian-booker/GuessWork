@@ -757,7 +757,8 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
             "covariance_strategy, covariance_scale_alpha, "
             "imu_buffer_capacity, airborne_lookup_capacity, "
             "preprocess_clahe, clahe_clip_limit, clahe_tile_grid_size, "
-            "clahe_min_variance_laplacian, landmark_count_floor "
+            "clahe_min_variance_laplacian, landmark_count_floor, "
+            "mono_translation_scale_factor "
             "FROM kimera_vio_config WHERE id = 1");
         if (stmt.stepRow()) {
             config.kimera_vio.param_dir = stmt.columnText(0);
@@ -789,6 +790,8 @@ runtime::RuntimeConfig SqliteConfigStore::loadRuntimeConfig() const {
                 stmt.columnDouble(13);
             config.kimera_vio.landmark_count_floor =
                 static_cast<std::int32_t>(stmt.columnInt64(14));
+            config.kimera_vio.mono_translation_scale_factor =
+                stmt.columnDouble(15);
         }
     }
 
@@ -1293,8 +1296,9 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             "covariance_strategy, covariance_scale_alpha, "
             "imu_buffer_capacity, airborne_lookup_capacity, "
             "preprocess_clahe, clahe_clip_limit, clahe_tile_grid_size, "
-            "clahe_min_variance_laplacian, landmark_count_floor) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            "clahe_min_variance_laplacian, landmark_count_floor, "
+            "mono_translation_scale_factor) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         insert.bindText(1, config.kimera_vio.param_dir);
         insert.bindDouble(2, config.kimera_vio.airborne.above_m);
         insert.bindDouble(3, config.kimera_vio.airborne.below_m);
@@ -1321,6 +1325,7 @@ void SqliteConfigStore::saveRuntimeConfig(const runtime::RuntimeConfig& config) 
             config.kimera_vio.clahe_min_variance_laplacian);
         insert.bindInt64(15,
             static_cast<sqlite3_int64>(config.kimera_vio.landmark_count_floor));
+        insert.bindDouble(16, config.kimera_vio.mono_translation_scale_factor);
         insert.stepDone();
     }
 

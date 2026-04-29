@@ -77,6 +77,16 @@ struct KimeraVioConfig {
     // operator, not a hard reject.
     std::int32_t landmark_count_floor{8};
 
+    // Phase 3.2: promoted from static BackendParams.yaml. KimeraParamWriter
+    // strips the line out of the embedded template and appends the
+    // runtime value at emit time. Treated as structural by
+    // KimeraVioConsumer::applyConfig (Kimera reads BackendParams.yaml
+    // once at start; live edits require a daemon restart, signalled
+    // via config_reloads_structural_skipped + the YAML repaint
+    // counters in DaemonHealth). Default 0.1 matches the EurocMono
+    // reference; tighten on a textured-platform soak before changing.
+    double mono_translation_scale_factor{0.1};
+
     AirborneThresholds airborne;
 
     // Diagonal multiplier applied when airborne or settling. 1e3 is

@@ -162,6 +162,23 @@ TEST_F(KimeraBackendSmokeFixture, EmittedYamlsParseUnderInstalledKimera) {
     });
 }
 
+// Phase 3.2: BackendParams.yaml is now runtime-templated for
+// mono_translation_scale_factor. Re-emit with a non-default value and
+// confirm Kimera's parser still accepts it (the field is read by
+// VioBackendParams::parseYAML; an unrecognised key would not show up
+// here but a syntax error or ordering bug would).
+TEST_F(KimeraBackendSmokeFixture,
+       EmittedYamlsParseWithCustomMonoTranslationScale) {
+    auto cfg = makeVioReadyConfig();
+    cfg.kimera_vio.mono_translation_scale_factor = 0.85;
+    posest::vio::emitKimeraParamYamls(cfg, param_dir_.string());
+
+    EXPECT_NO_FATAL_FAILURE({
+        VIO::VioParams params(param_dir_.string());
+        EXPECT_EQ(params.camera_params_.size(), 1u);
+    });
+}
+
 TEST_F(KimeraBackendSmokeFixture, PushesRejectedBeforeStartAcceptedAfter) {
     auto backend = posest::vio::makeKimeraBackend(param_dir_.string());
     ASSERT_NE(backend, nullptr);

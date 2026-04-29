@@ -1,6 +1,8 @@
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -11,6 +13,7 @@
 #include "posest/config/SqliteConfigStore.h"
 #include "posest/runtime/Daemon.h"
 #include "posest/runtime/ProductionFactories.h"
+#include "posest/runtime/WebService.h"
 
 using namespace std::chrono_literals;
 
@@ -805,6 +808,227 @@ TEST(DaemonController, StartupFailureRecordsFailedHealthAndError) {
     EXPECT_NE(health.last_error.find("fake pipeline factory"), std::string::npos);
 
     std::filesystem::remove(path);
+}
+
+// Helper: build a RuntimeConfig with vio.enabled=true and the active
+// calibrations Kimera needs. Mirrors test_kimera_param_writer.cpp's
+// makeVioReadyConfig but lives here so the daemon test isn't coupled
+// to that file.
+namespace {
+posest::runtime::RuntimeConfig makeVioReadyDaemonConfig(
+    const std::filesystem::path& kimera_param_dir) {
+    posest::runtime::RuntimeConfig cfg;
+
+    posest::CameraConfig cam;
+    cam.id = "downward";
+    cam.type = "v4l2";
+    cam.device = "/dev/video0";
+    cam.enabled = false;  // disabled so the FakeCameraFactory is never called
+    cam.format.width = 640;
+    cam.format.height = 480;
+    cam.format.fps = 120.0;
+    cam.format.pixel_format = "mjpeg";
+    cfg.cameras.push_back(cam);
+
+    posest::runtime::CameraCalibrationConfig calib;
+    calib.camera_id = "downward";
+    calib.version = "v1";
+    calib.active = true;
+    calib.source_file_path = "/tmp/calib.yaml";
+    calib.created_at = "2026-04-29T00:00:00Z";
+    calib.image_width = 640;
+    calib.image_height = 480;
+    calib.camera_model = "pinhole";
+    calib.distortion_model = "radtan";
+    calib.fx = 500.0;
+    calib.fy = 501.0;
+    calib.cx = 320.0;
+    calib.cy = 240.0;
+    calib.distortion_coefficients = {0.1, -0.05, 0.001, -0.001};
+    cfg.calibrations.push_back(calib);
+
+    posest::runtime::CameraImuCalibrationConfig cam_imu;
+    cam_imu.camera_id = "downward";
+    cam_imu.version = "imu-v1";
+    cam_imu.active = true;
+    cam_imu.source_file_path = "/tmp/imucam.yaml";
+    cam_imu.created_at = "2026-04-29T00:01:00Z";
+    cam_imu.camera_to_imu = {{0.01, 0.02, 0.03}, {0.0, 0.0, 0.0}};
+    cam_imu.imu_to_camera = {{-0.01, -0.02, -0.03}, {0.0, 0.0, 0.0}};
+    cam_imu.time_shift_s = 0.004;
+    cfg.camera_imu_calibrations.push_back(cam_imu);
+
+    // Validator requires camera-to-robot extrinsics for any active
+    // calibration. Identity is fine for this test — VIO only consumes
+    // the intrinsic and camera-to-IMU rows.
+    posest::runtime::CameraExtrinsicsConfig extr;
+    extr.camera_id = "downward";
+    extr.version = "v1";
+    extr.camera_to_robot = {{0.0, 0.0, 0.1}, {0.0, 0.0, 0.0}};
+    cfg.camera_extrinsics.push_back(extr);
+
+    cfg.vio.enabled = true;
+    cfg.vio.vio_camera_id = "downward";
+    cfg.kimera_vio.param_dir = kimera_param_dir.string();
+    return cfg;
+}
+}  // namespace
+
+// Phase 3.1: a save callback that doesn't touch any Kimera-relevant
+// field is a no-op for the YAML repaint path. Counter stays at zero,
+// restart_required stays false.
+TEST(DaemonController, VioYamlRepaintNoOpWhenIrrelevantFieldChanges) {
+    const auto db_path = tempDbPath("yaml_repaint_noop");
+    std::filesystem::remove(db_path);
+    const auto kimera_dir = std::filesystem::temp_directory_path() /
+        ("posest_yaml_repaint_noop_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(kimera_dir);
+
+    const auto cfg = makeVioReadyDaemonConfig(kimera_dir);
+    {
+        posest::config::SqliteConfigStore seed(db_path);
+        seed.saveRuntimeConfig(cfg);
+    }
+
+    posest::runtime::DaemonOptions options;
+    options.config_path = db_path;
+    auto store = std::make_unique<posest::config::SqliteConfigStore>(db_path);
+    FakeCameraFactory camera_factory;
+    FakePipelineFactory pipeline_factory;
+    posest::runtime::DaemonController daemon(
+        options, std::move(store), camera_factory, pipeline_factory);
+    daemon.loadAndBuild();
+    ASSERT_NE(daemon.webService(), nullptr);
+
+    // Sanity: initial emit did NOT count toward the post-startup
+    // repaint counter.
+    EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 0u);
+    EXPECT_FALSE(daemon.health().vio_yaml_restart_required);
+
+    // Save with only a non-Kimera field changed — fusion sigma, no
+    // calibration drift, no param_dir change.
+    auto unchanged = cfg;
+    unchanged.fusion.shock_threshold_mps2 = 99.0;  // outside any Kimera input
+    daemon.webService()->stageConfig(unchanged);
+
+    EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 0u);
+    EXPECT_FALSE(daemon.health().vio_yaml_restart_required);
+    EXPECT_TRUE(daemon.health().vio_yaml_repaint_last_error.empty());
+
+    daemon.stop();
+    std::filesystem::remove_all(kimera_dir);
+    std::filesystem::remove(db_path);
+}
+
+// Phase 3.1: changing the active CameraCalibrationConfig's intrinsics
+// triggers a repaint. The new fx ends up on disk; the counter and
+// restart_required flag both bump.
+TEST(DaemonController, VioYamlRepaintFiresOnIntrinsicChange) {
+    const auto db_path = tempDbPath("yaml_repaint_intrinsics");
+    std::filesystem::remove(db_path);
+    const auto kimera_dir = std::filesystem::temp_directory_path() /
+        ("posest_yaml_repaint_intrinsics_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(kimera_dir);
+
+    const auto cfg = makeVioReadyDaemonConfig(kimera_dir);
+    {
+        posest::config::SqliteConfigStore seed(db_path);
+        seed.saveRuntimeConfig(cfg);
+    }
+
+    posest::runtime::DaemonOptions options;
+    options.config_path = db_path;
+    auto store = std::make_unique<posest::config::SqliteConfigStore>(db_path);
+    FakeCameraFactory camera_factory;
+    FakePipelineFactory pipeline_factory;
+    posest::runtime::DaemonController daemon(
+        options, std::move(store), camera_factory, pipeline_factory);
+    daemon.loadAndBuild();
+    ASSERT_NE(daemon.webService(), nullptr);
+
+    // Initial emit produced the YAMLs as part of loadAndBuild.
+    ASSERT_TRUE(std::filesystem::exists(kimera_dir / "LeftCameraParams.yaml"));
+
+    auto changed = cfg;
+    changed.calibrations[0].fx = 777.5;  // distinct, away from default 500
+    daemon.webService()->stageConfig(changed);
+
+    EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 1u);
+    EXPECT_TRUE(daemon.health().vio_yaml_restart_required);
+    EXPECT_TRUE(daemon.health().vio_yaml_repaint_last_error.empty());
+
+    // Confirm the new intrinsic landed on disk.
+    std::ifstream in(kimera_dir / "LeftCameraParams.yaml");
+    std::stringstream buf;
+    buf << in.rdbuf();
+    EXPECT_NE(buf.str().find("777.5"), std::string::npos);
+
+    // A second save with the same fx is a no-op for the counter.
+    daemon.webService()->stageConfig(changed);
+    EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 1u);
+
+    // A third save with a different fx bumps to 2.
+    auto changed_again = changed;
+    changed_again.calibrations[0].fx = 888.5;
+    daemon.webService()->stageConfig(changed_again);
+    EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 2u);
+
+    daemon.stop();
+    std::filesystem::remove_all(kimera_dir);
+    std::filesystem::remove(db_path);
+}
+
+// Phase 3.2 + 3.1: changing mono_translation_scale_factor counts as a
+// Kimera-relevant change (it appears in BackendParams.yaml). The
+// runtime-templated emit lands the new value on disk.
+TEST(DaemonController, VioYamlRepaintFiresOnMonoScaleFactorChange) {
+    const auto db_path = tempDbPath("yaml_repaint_scale");
+    std::filesystem::remove(db_path);
+    const auto kimera_dir = std::filesystem::temp_directory_path() /
+        ("posest_yaml_repaint_scale_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(kimera_dir);
+
+    auto cfg = makeVioReadyDaemonConfig(kimera_dir);
+    cfg.kimera_vio.mono_translation_scale_factor = 0.1;
+    {
+        posest::config::SqliteConfigStore seed(db_path);
+        seed.saveRuntimeConfig(cfg);
+    }
+
+    posest::runtime::DaemonOptions options;
+    options.config_path = db_path;
+    auto store = std::make_unique<posest::config::SqliteConfigStore>(db_path);
+    FakeCameraFactory camera_factory;
+    FakePipelineFactory pipeline_factory;
+    posest::runtime::DaemonController daemon(
+        options, std::move(store), camera_factory, pipeline_factory);
+    daemon.loadAndBuild();
+
+    auto changed = cfg;
+    changed.kimera_vio.mono_translation_scale_factor = 0.5;
+    daemon.webService()->stageConfig(changed);
+
+    EXPECT_EQ(daemon.health().vio_yaml_repaint_count, 1u);
+    EXPECT_TRUE(daemon.health().vio_yaml_restart_required);
+
+    std::ifstream in(kimera_dir / "BackendParams.yaml");
+    std::stringstream buf;
+    buf << in.rdbuf();
+    // Distinct value 0.5 must appear; the previous 0.1 line must not
+    // (the writer rebuilds the file from scratch each emit, so old
+    // values can't survive as stale text).
+    EXPECT_NE(buf.str().find("mono_translation_scale_factor: 0.5"),
+              std::string::npos);
+
+    daemon.stop();
+    std::filesystem::remove_all(kimera_dir);
+    std::filesystem::remove(db_path);
 }
 
 TEST(DaemonSignal, WaitLoopExitsWhenSignalIsRequested) {

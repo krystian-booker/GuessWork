@@ -402,6 +402,94 @@ void rememberDataset(
     });
 }
 
+// Phase 3.1: detect whether two RuntimeConfigs would produce different
+// Kimera YAMLs. Used by the WebService save callback to decide whether
+// to re-run emitKimeraParamYamls. Compares only the fields that
+// KimeraParamWriter actually consumes: pulling in extra fields would
+// produce no-op repaints; missing fields would silently leave stale
+// YAMLs on disk. Keep this in lockstep with KimeraParamWriter.cpp's
+// inputs whenever a new field is threaded in.
+const CameraCalibrationConfig* findActiveIntrinsics(
+    const RuntimeConfig& cfg, const std::string& camera_id) {
+    if (camera_id.empty()) return nullptr;
+    for (const auto& c : cfg.calibrations) {
+        if (c.active && c.camera_id == camera_id) return &c;
+    }
+    return nullptr;
+}
+
+const CameraImuCalibrationConfig* findActiveCamImu(
+    const RuntimeConfig& cfg, const std::string& camera_id) {
+    if (camera_id.empty()) return nullptr;
+    for (const auto& c : cfg.camera_imu_calibrations) {
+        if (c.active && c.camera_id == camera_id) return &c;
+    }
+    return nullptr;
+}
+
+bool intrinsicsDiffer(const CameraCalibrationConfig* a,
+                      const CameraCalibrationConfig* b) {
+    if (a == nullptr && b == nullptr) return false;
+    if (a == nullptr || b == nullptr) return true;
+    return a->image_width != b->image_width ||
+           a->image_height != b->image_height ||
+           a->camera_model != b->camera_model ||
+           a->distortion_model != b->distortion_model ||
+           a->fx != b->fx || a->fy != b->fy ||
+           a->cx != b->cx || a->cy != b->cy ||
+           a->distortion_coefficients != b->distortion_coefficients;
+}
+
+bool poseDiffers(const Pose3d& a, const Pose3d& b) {
+    return a.translation_m.x != b.translation_m.x ||
+           a.translation_m.y != b.translation_m.y ||
+           a.translation_m.z != b.translation_m.z ||
+           a.rotation_rpy_rad.x != b.rotation_rpy_rad.x ||
+           a.rotation_rpy_rad.y != b.rotation_rpy_rad.y ||
+           a.rotation_rpy_rad.z != b.rotation_rpy_rad.z;
+}
+
+bool cameraImuDiffers(const CameraImuCalibrationConfig* a,
+                      const CameraImuCalibrationConfig* b) {
+    if (a == nullptr && b == nullptr) return false;
+    if (a == nullptr || b == nullptr) return true;
+    return poseDiffers(a->camera_to_imu, b->camera_to_imu);
+}
+
+bool kimeraYamlsRequireRepaint(const RuntimeConfig& last,
+                               const RuntimeConfig& next) {
+    // Toggling vio.enabled is structural even when other fields are
+    // unchanged — a save flipping enabled→true must materialize the
+    // YAML set on disk so the next backend start succeeds.
+    if (last.vio.enabled != next.vio.enabled) return true;
+    if (!next.vio.enabled) return false;  // disabled → emit is a no-op anyway
+
+    if (last.vio.vio_camera_id != next.vio.vio_camera_id) return true;
+    if (last.kimera_vio.param_dir != next.kimera_vio.param_dir) return true;
+    // ImuParams.yaml carries these from FusionConfig.
+    if (last.fusion.accel_bias_rw_sigma != next.fusion.accel_bias_rw_sigma ||
+        last.fusion.gyro_bias_rw_sigma != next.fusion.gyro_bias_rw_sigma) {
+        return true;
+    }
+    // BackendParams.yaml carries mono_translation_scale_factor at emit
+    // time (Phase 3.2). Any other runtime-templated backend field added
+    // later must be compared here too.
+    if (last.kimera_vio.mono_translation_scale_factor !=
+        next.kimera_vio.mono_translation_scale_factor) {
+        return true;
+    }
+
+    const auto* last_intr = findActiveIntrinsics(last, last.vio.vio_camera_id);
+    const auto* next_intr = findActiveIntrinsics(next, next.vio.vio_camera_id);
+    if (intrinsicsDiffer(last_intr, next_intr)) return true;
+
+    const auto* last_ci = findActiveCamImu(last, last.vio.vio_camera_id);
+    const auto* next_ci = findActiveCamImu(next, next.vio.vio_camera_id);
+    if (cameraImuDiffers(last_ci, next_ci)) return true;
+
+    return false;
+}
+
 }  // namespace
 
 DaemonOptions parseDaemonOptions(int argc, const char* const argv[]) {
@@ -966,6 +1054,13 @@ std::string healthToJson(const DaemonHealth& health) {
     // Per-VIO-pipeline telemetry. last_output_age_ms is the watchdog
     // signal: a missing value means VIO has not yet emitted; a value that
     // grows without bound means autoinit or the spin thread has stalled.
+    // Phase 3.1: VIO YAML repaint observability. The count and
+    // restart_required flag are post-startup signals: the
+    // loadAndBuild()-time emit doesn't increment count.
+    out["vio_yaml_repaint_count"] = health.vio_yaml_repaint_count;
+    out["vio_yaml_restart_required"] = health.vio_yaml_restart_required;
+    out["vio_yaml_repaint_last_error"] = health.vio_yaml_repaint_last_error;
+
     nlohmann::json vio_array = nlohmann::json::array();
     for (const auto& v : health.vio_pipelines) {
         nlohmann::json j = {
@@ -1725,6 +1820,13 @@ void DaemonController::loadAndBuild() {
         if (!config_.kimera_vio.param_dir.empty()) {
             vio::emitKimeraParamYamls(config_, config_.kimera_vio.param_dir);
         }
+        // Phase 3.1: seed the YAML-repaint baseline. Subsequent
+        // WebService saves compare against this snapshot to decide
+        // whether the on-disk YAML set needs refreshing.
+        {
+            std::lock_guard<std::mutex> g(vio_yaml_mu_);
+            last_emitted_yaml_config_ = config_;
+        }
         {
             std::lock_guard<std::mutex> g(mu_);
             health_.state = DaemonState::LoadedConfig;
@@ -1820,6 +1922,15 @@ void DaemonController::loadAndBuild() {
                         }
                     }
                 }
+                // Phase 3.1: re-emit Kimera YAMLs when the saved config
+                // changed any field KimeraParamWriter consumes. Kimera
+                // reads YAMLs once at backend start, so the change only
+                // takes effect on the next daemon restart — surfaced
+                // via vio_yaml_restart_required for operator visibility.
+                // Failures don't propagate (the running pipeline keeps
+                // serving the previously-emitted YAMLs); only the
+                // last-error string updates.
+                repaintKimeraYamlsIfChanged(cfg);
             });
         graph_ = std::make_unique<RuntimeGraph>(
             config_, camera_factory_, pipeline_factory_, *measurement_bus_);
@@ -1980,6 +2091,46 @@ void DaemonController::markFailed(const std::string& error) {
     std::lock_guard<std::mutex> g(mu_);
     health_.state = DaemonState::Failed;
     health_.last_error = error;
+}
+
+void DaemonController::repaintKimeraYamlsIfChanged(const RuntimeConfig& cfg) {
+    // Empty param_dir means VIO YAML emission is disabled at the
+    // operator level — skip the repaint entirely (matches the
+    // loadAndBuild guard at the matching check site).
+    if (cfg.kimera_vio.param_dir.empty()) {
+        return;
+    }
+
+    // Snapshot under vio_yaml_mu_ so the comparison + emit is one
+    // logical step. If two saves race, the second blocks behind the
+    // first's emit and then re-evaluates — guaranteeing the on-disk
+    // YAML set always reflects exactly one of the saves end-to-end
+    // rather than a partial interleave across the seven files.
+    std::lock_guard<std::mutex> g(vio_yaml_mu_);
+    if (!kimeraYamlsRequireRepaint(last_emitted_yaml_config_, cfg)) {
+        return;
+    }
+
+    std::string error_capture;
+    bool ok = false;
+    try {
+        vio::emitKimeraParamYamls(cfg, cfg.kimera_vio.param_dir);
+        last_emitted_yaml_config_ = cfg;
+        ok = true;
+    } catch (const std::exception& e) {
+        error_capture = e.what();
+    } catch (...) {
+        error_capture = "unknown exception during emitKimeraParamYamls";
+    }
+
+    std::lock_guard<std::mutex> hg(mu_);
+    if (ok) {
+        ++health_.vio_yaml_repaint_count;
+        health_.vio_yaml_restart_required = true;
+        health_.vio_yaml_repaint_last_error.clear();
+    } else {
+        health_.vio_yaml_repaint_last_error = std::move(error_capture);
+    }
 }
 
 }  // namespace posest::runtime

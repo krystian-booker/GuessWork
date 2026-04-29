@@ -209,6 +209,37 @@ TEST(KimeraParamWriter, RejectsUnknownDistortionModel) {
     std::filesystem::remove_all(dir);
 }
 
+// Phase 3.2: BackendParams.yaml carries mono_translation_scale_factor
+// from the runtime config (the static template no longer hardcodes a
+// value). Appended at the end so Kimera's getYamlParam can pick it up
+// by key without ordering surprises.
+TEST(KimeraParamWriter, BackendParamsCarriesMonoScaleFromConfig) {
+    const auto dir = tempDir("backend_mono_scale");
+    auto cfg = makeVioReadyConfig();
+    // Distinct, non-default value so the assertion can't pass on the
+    // 0.1 default that migration 17 seeds.
+    cfg.kimera_vio.mono_translation_scale_factor = 0.42;
+
+    posest::vio::emitKimeraParamYamls(cfg, dir);
+    const auto backend_yaml = readWhole(dir / "BackendParams.yaml");
+
+    const auto fmt = [](double v) {
+        std::ostringstream s;
+        s << std::setprecision(17) << v;
+        return s.str();
+    };
+    EXPECT_NE(backend_yaml.find(
+                  "mono_translation_scale_factor: " + fmt(0.42)),
+              std::string::npos);
+    // The static template must NOT also carry a literal — two values
+    // for the same key would let Kimera's parser pick whichever wins
+    // last, and the unit value of 0.42 above is meaningless if the
+    // template still supplies 0.1.
+    EXPECT_EQ(backend_yaml.find(
+                  "mono_translation_scale_factor: 0.1\n"),
+              std::string::npos);
+}
+
 TEST(KimeraParamWriter, ImuParamsCarriesRandomWalkFromFusionConfig) {
     const auto dir = tempDir("imu_random_walk");
     auto cfg = makeVioReadyConfig();

@@ -1443,6 +1443,16 @@ TEST(ConfigValidator, RejectsKimeraLandmarkFloorNegative) {
                  std::invalid_argument);
 }
 
+TEST(ConfigValidator, RejectsKimeraMonoTranslationScaleFactorOutOfRange) {
+    auto config = makeValidConfig();
+    config.kimera_vio.mono_translation_scale_factor = 0.0;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+    config.kimera_vio.mono_translation_scale_factor = 1.5;
+    EXPECT_THROW(posest::config::validateRuntimeConfig(config),
+                 std::invalid_argument);
+}
+
 TEST(ConfigValidator, RejectsFusionMaxKeyframeDtOutOfRange) {
     auto config = makeValidConfig();
     config.fusion.max_keyframe_dt_seconds = 0.001;  // too small
@@ -1509,6 +1519,10 @@ TEST(SqliteConfigStore, KimeraVioConfigDefaultsForFreshDatabase) {
     EXPECT_EQ(loaded.kimera_vio.clahe_tile_grid_size, 16);
     EXPECT_DOUBLE_EQ(loaded.kimera_vio.clahe_min_variance_laplacian, 0.0);
     EXPECT_EQ(loaded.kimera_vio.landmark_count_floor, 8);
+    // Phase 3.2 / migration 17 default. 0.1 mirrors the EurocMono
+    // reference value the static template carried before the column
+    // existed — unmigrated DBs see the same Kimera behaviour.
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.mono_translation_scale_factor, 0.1);
 
     std::filesystem::remove(path);
 }
@@ -1538,6 +1552,7 @@ TEST(SqliteConfigStore, KimeraVioConfigRoundTripsAndReopens) {
     config.kimera_vio.clahe_tile_grid_size = 8;
     config.kimera_vio.clahe_min_variance_laplacian = 12.5;
     config.kimera_vio.landmark_count_floor = 12;
+    config.kimera_vio.mono_translation_scale_factor = 0.45;
 
     {
         posest::config::SqliteConfigStore store(path);
@@ -1566,6 +1581,7 @@ TEST(SqliteConfigStore, KimeraVioConfigRoundTripsAndReopens) {
     EXPECT_EQ(loaded.kimera_vio.clahe_tile_grid_size, 8);
     EXPECT_DOUBLE_EQ(loaded.kimera_vio.clahe_min_variance_laplacian, 12.5);
     EXPECT_EQ(loaded.kimera_vio.landmark_count_floor, 12);
+    EXPECT_DOUBLE_EQ(loaded.kimera_vio.mono_translation_scale_factor, 0.45);
 
     std::filesystem::remove(path);
 }

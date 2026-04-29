@@ -180,17 +180,22 @@ bool KimeraVioConsumer::drainPendingConfig() {
     // at start(); imu_buffer_capacity sizes the deque consulted by the
     // IMU drainer thread (B); camera_id is stamped on every emitted
     // measurement and changing it would scramble FusionService's
-    // routing. Each requires a backend restart and is silently rolled
-    // back here for parity with FusionService's structural reversion
-    // (FusionService.cpp:762-806).
+    // routing; mono_translation_scale_factor only takes effect through
+    // BackendParams.yaml at backend start (Phase 3.2). Each requires a
+    // backend restart and is silently rolled back here for parity with
+    // FusionService's structural reversion (FusionService.cpp:762-806).
     const bool structural_diff =
         staged->param_dir != config_.param_dir ||
         staged->imu_buffer_capacity != config_.imu_buffer_capacity ||
-        staged->camera_id != config_.camera_id;
+        staged->camera_id != config_.camera_id ||
+        staged->mono_translation_scale_factor !=
+            config_.mono_translation_scale_factor;
     if (structural_diff) {
         staged->param_dir = config_.param_dir;
         staged->imu_buffer_capacity = config_.imu_buffer_capacity;
         staged->camera_id = config_.camera_id;
+        staged->mono_translation_scale_factor =
+            config_.mono_translation_scale_factor;
         std::lock_guard<std::mutex> g(stats_mu_);
         ++stats_.config_reloads_structural_skipped;
     }

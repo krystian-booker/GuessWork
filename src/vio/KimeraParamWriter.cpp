@@ -227,6 +227,26 @@ std::string buildLeftCameraParamsYaml(
     return out.str();
 }
 
+std::string buildBackendParamsYaml(const runtime::RuntimeConfig& cfg) {
+    // Phase 3.2: emit the static-template body, then append
+    // mono_translation_scale_factor from the runtime config. The
+    // template no longer carries a literal for this key (intentional —
+    // two values for the same key would shadow unpredictably depending
+    // on parser order; see share/posest/kimera/BackendParams.yaml).
+    // Emitting the dynamic field at the end keeps `YamlParser::getYamlParam`
+    // in Kimera predictable: last-write-wins is moot when the key is
+    // unique.
+    std::ostringstream out;
+    out << static_params::kBackendParamsYaml;
+    if (!static_params::kBackendParamsYaml.empty() &&
+        static_params::kBackendParamsYaml.back() != '\n') {
+        out << '\n';
+    }
+    out << "mono_translation_scale_factor: " << std::setprecision(17)
+        << cfg.kimera_vio.mono_translation_scale_factor << '\n';
+    return out.str();
+}
+
 std::string buildImuParamsYaml(const runtime::RuntimeConfig& cfg) {
     std::ostringstream out;
     out << static_params::kImuParamsTemplateYaml;
@@ -322,7 +342,7 @@ void emitKimeraParamYamls(
     atomicWrite(param_dir / "FrontendParams.yaml",
                 static_params::kFrontendParamsYaml);
     atomicWrite(param_dir / "BackendParams.yaml",
-                static_params::kBackendParamsYaml);
+                buildBackendParamsYaml(runtime_config));
     atomicWrite(param_dir / "LcdParams.yaml",
                 static_params::kLcdParamsYaml);
     atomicWrite(param_dir / "DisplayParams.yaml",
