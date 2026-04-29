@@ -276,6 +276,11 @@ if(TARGET posest_v4l2)
     target_link_libraries(posest_tests PRIVATE posest_v4l2)
 endif()
 
+if(POSEST_BUILD_VIO)
+    target_sources(posest_tests PRIVATE test/test_kimera_backend.cpp)
+    target_link_libraries(posest_tests PRIVATE posest_vio_kimera)
+endif()
+
 include(GoogleTest)
 gtest_discover_tests(posest_tests)
 
