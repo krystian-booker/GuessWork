@@ -40,6 +40,23 @@
 # debug information files
 *.dwo
 
-# CMake build directory
+# CMake build directories (any variant)
 build/
+build-*/
+cmake-build-*/
+CMakeUserPresets.json
+
+# Generated compilation database
+compile_commands.json
+.cache/
+
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
