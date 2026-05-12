@@ -57,6 +57,9 @@ compile_commands.json
 web/node_modules/
 web/dist/
 
+# Playwright MCP scratch dir (snapshots, console logs)
+.playwright-mcp/
+
 # Editors / IDEs — keep shared VS Code config, ignore the rest
 .vscode/*
 !.vscode/launch.json

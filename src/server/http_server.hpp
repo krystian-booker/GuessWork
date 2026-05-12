@@ -7,13 +7,17 @@ namespace gw::server {
 
 class PipelineStatsView;
 class StreamConsumer;
+class CameraRepository;
 
 // Thin wrapper around a Crow application. The Crow SDK headers are heavyweight
 // (asio, boost-style metaprogramming) so we hide them behind a Pimpl: consumers
 // of this header don't pay the compile-time cost.
 class HttpServer {
 public:
-    HttpServer(uint16_t port, PipelineStatsView& stats, StreamConsumer& stream);
+    HttpServer(uint16_t           port,
+               PipelineStatsView& stats,
+               StreamConsumer&    stream,
+               CameraRepository&  cameras);
     ~HttpServer();
 
     HttpServer(const HttpServer&)            = delete;

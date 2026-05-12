@@ -149,18 +149,26 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(crow)
 
 # ----------------------------------------------------------------------------
+# SQLite (system-installed; macOS ships sqlite3 in the SDK)
+# ----------------------------------------------------------------------------
+find_package(SQLite3 REQUIRED)
+
+# ----------------------------------------------------------------------------
 # HTTP server library
 # ----------------------------------------------------------------------------
 add_library(gw_server
     src/server/pipeline_stats.cpp
     src/server/routes_status.cpp
     src/server/routes_stream.cpp
+    src/server/routes_camera.cpp
     src/server/static_assets.cpp
     src/server/http_server.cpp
     src/server/stream_consumer.cpp
     src/server/webrtc_peer.cpp
+    src/server/database.cpp
+    src/server/camera_repository.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder Crow::Crow LibDataChannel::LibDataChannel)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -226,8 +234,10 @@ if(GW_BUILD_TESTS)
         tests/test_frame_channel.cpp
         tests/test_mono8_to_nv12.cpp
         tests/test_h264_encoder.cpp
+        tests/test_database.cpp
+        tests/test_camera_repository.cpp
     )
-    target_link_libraries(gw_tests PRIVATE gw_core gw_encoder GTest::gtest_main)
+    target_link_libraries(gw_tests PRIVATE gw_core gw_encoder gw_server GTest::gtest_main)
     include(GoogleTest)
     gtest_discover_tests(gw_tests)
 endif()

@@ -9,6 +9,8 @@
 #include <rtc/rtc.hpp>
 
 #include "producer/spinnaker_producer.hpp"
+#include "server/camera_repository.hpp"
+#include "server/database.hpp"
 #include "server/http_server.hpp"
 #include "server/pipeline_stats.hpp"
 #include "server/stream_consumer.hpp"
@@ -69,8 +71,12 @@ int main(int argc, char** argv) {
               << " @ " << cli.stream_fps << " fps, "
               << (cli.stream_bitrate / 1000) << " kbps\n";
 
+    gw::server::Database         database(gw::server::Database::default_path());
+    gw::server::CameraRepository cameras(database);
+    std::cerr << "guesswork: database at " << gw::server::Database::default_path() << "\n";
+
     std::cerr << "guesswork: listening on http://localhost:" << cli.port << "\n";
-    gw::server::HttpServer server(cli.port, stats, stream);
+    gw::server::HttpServer server(cli.port, stats, stream, cameras);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     stream.detach();
