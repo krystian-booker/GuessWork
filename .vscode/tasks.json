@@ -1,0 +1,115 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S", "${workspaceFolder}",
+                "-B", "${workspaceFolder}/build",
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Build (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build", "${workspaceFolder}/build",
+                "-j"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "dependsOn": "CMake: Configure (Debug)",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "CMake: Configure (TSan)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S", "${workspaceFolder}",
+                "-B", "${workspaceFolder}/build-tsan",
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DGW_ENABLE_TSAN=ON"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Build (TSan)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build", "${workspaceFolder}/build-tsan",
+                "-j"
+            ],
+            "dependsOn": "CMake: Configure (TSan)",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "CMake: Configure (ASan)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S", "${workspaceFolder}",
+                "-B", "${workspaceFolder}/build-asan",
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DGW_ENABLE_ASAN=ON"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Build (ASan)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build", "${workspaceFolder}/build-asan",
+                "-j"
+            ],
+            "dependsOn": "CMake: Configure (ASan)",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "CTest: Run all (Debug)",
+            "type": "shell",
+            "command": "ctest",
+            "args": ["--output-on-failure"],
+            "options": {
+                "cwd": "${workspaceFolder}/build"
+            },
+            "dependsOn": "CMake: Build (Debug)",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "CTest: Run all (TSan)",
+            "type": "shell",
+            "command": "ctest",
+            "args": ["--output-on-failure"],
+            "options": {
+                "cwd": "${workspaceFolder}/build-tsan"
+            },
+            "dependsOn": "CMake: Build (TSan)",
+            "problemMatcher": []
+        },
+        {
+            "label": "CTest: Run all (ASan)",
+            "type": "shell",
+            "command": "ctest",
+            "args": ["--output-on-failure"],
+            "options": {
+                "cwd": "${workspaceFolder}/build-asan"
+            },
+            "dependsOn": "CMake: Build (ASan)",
+            "problemMatcher": []
+        }
+    ]
+}

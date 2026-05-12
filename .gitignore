@@ -53,8 +53,12 @@ compile_commands.json
 # macOS
 .DS_Store
 
-# Editors / IDEs
-.vscode/
+# Editors / IDEs — keep shared VS Code config, ignore the rest
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
 .idea/
 *.swp
 *.swo

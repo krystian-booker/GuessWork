@@ -1,0 +1,84 @@
+{
+    "version": "0.2.0",
+    "inputs": [
+        {
+            "id": "gtestFilter",
+            "type": "promptString",
+            "description": "gtest --gtest_filter pattern (e.g. FrameChannelTest.* or *.Stress*)",
+            "default": "*"
+        }
+    ],
+    "configurations": [
+        {
+            "name": "Debug guesswork",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/guesswork",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: Build (Debug)"
+        },
+        {
+            "name": "Debug gw_tests (all)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/gw_tests",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: Build (Debug)"
+        },
+        {
+            "name": "Debug gw_tests (filter…)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/gw_tests",
+            "args": ["--gtest_filter=${input:gtestFilter}"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: Build (Debug)"
+        },
+        {
+            "name": "Debug gw_tests (TSan)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-tsan/gw_tests",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build-tsan",
+            "environment": [
+                { "name": "TSAN_OPTIONS", "value": "halt_on_error=1:second_deadlock_stack=1" }
+            ],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: Build (TSan)"
+        },
+        {
+            "name": "Debug gw_tests (ASan/UBSan)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-asan/gw_tests",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build-asan",
+            "environment": [
+                { "name": "MallocNanoZone", "value": "0" },
+                { "name": "ASAN_OPTIONS", "value": "halt_on_error=1:abort_on_error=1:detect_leaks=0" },
+                { "name": "UBSAN_OPTIONS", "value": "halt_on_error=1:print_stacktrace=1" }
+            ],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: Build (ASan)"
+        }
+    ]
+}
