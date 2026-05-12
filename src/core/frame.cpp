@@ -1,11 +1,10 @@
 #include "core/frame.hpp"
 
-#include "core/frame_pool.hpp"
-
 namespace gw {
 
-Frame::Frame(FramePool& pool, CVPixelBufferRef buffer)
-    : pool_(&pool),
+Frame::Frame(void* owner, RecycleFn recycle, CVPixelBufferRef buffer)
+    : owner_(owner),
+      recycle_(recycle),
       buffer_(buffer),
       width_(static_cast<uint32_t>(CVPixelBufferGetWidth(buffer))),
       height_(static_cast<uint32_t>(CVPixelBufferGetHeight(buffer))),
@@ -28,6 +27,7 @@ void Frame::reset_for_acquire() {
     host_capture_ns_ = 0;
     camera_ts_ns_    = 0;
     producer_id_.clear();
+    aux_data_.store(nullptr, std::memory_order_relaxed);
     refcount_.store(1, std::memory_order_release);
 }
 
@@ -51,7 +51,7 @@ bool Frame::try_retain() {
 void Frame::release() {
     const uint32_t prev = refcount_.fetch_sub(1, std::memory_order_acq_rel);
     if (prev == 1) {
-        pool_->return_to_pool(this);
+        recycle_(owner_, this);
     }
 }
 

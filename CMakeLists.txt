@@ -63,6 +63,7 @@ target_link_libraries(gw_spinnaker INTERFACE
 # ----------------------------------------------------------------------------
 add_library(gw_producer
     src/producer/spinnaker_producer.cpp
+    src/producer/spinnaker_user_buffer_pool.cpp
 )
 target_link_libraries(gw_producer PUBLIC gw_core gw_spinnaker)
 

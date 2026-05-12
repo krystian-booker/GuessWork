@@ -1,51 +1,15 @@
 #include "core/frame_pool.hpp"
 
-#include <CoreFoundation/CoreFoundation.h>
-#include <CoreVideo/CoreVideo.h>
-
 #include <stdexcept>
+
+#include "core/iosurface_buffer.hpp"
 
 namespace gw {
 
 namespace {
 
-// Create one IOSurface-backed CVPixelBuffer with the given format.
-// Returns a CFRetain'd buffer the caller must release.
-CVPixelBufferRef create_iosurface_buffer(const FrameFormat& fmt) {
-    CFMutableDictionaryRef iosurface_props =
-        CFDictionaryCreateMutable(kCFAllocatorDefault,
-                                  0,
-                                  &kCFTypeDictionaryKeyCallBacks,
-                                  &kCFTypeDictionaryValueCallBacks);
-
-    CFMutableDictionaryRef attrs =
-        CFDictionaryCreateMutable(kCFAllocatorDefault,
-                                  0,
-                                  &kCFTypeDictionaryKeyCallBacks,
-                                  &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(attrs, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
-
-    // 64-byte row alignment: cache-line friendly + matches NEON / Metal expectations.
-    const int  align    = 64;
-    CFNumberRef alignRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &align);
-    CFDictionarySetValue(attrs, kCVPixelBufferBytesPerRowAlignmentKey, alignRef);
-    CFRelease(alignRef);
-
-    CVPixelBufferRef buffer = nullptr;
-    const CVReturn   r      = CVPixelBufferCreate(kCFAllocatorDefault,
-                                           fmt.width,
-                                           fmt.height,
-                                           fmt.pixel_format,
-                                           attrs,
-                                           &buffer);
-
-    CFRelease(attrs);
-    CFRelease(iosurface_props);
-
-    if (r != kCVReturnSuccess || buffer == nullptr) {
-        throw std::runtime_error("CVPixelBufferCreate failed");
-    }
-    return buffer;
+void recycle_thunk(void* owner, Frame* f) {
+    static_cast<FramePool*>(owner)->return_to_pool(f);
 }
 
 }  // namespace
@@ -57,10 +21,10 @@ FramePool::FramePool(FrameFormat format, uint32_t capacity)
     }
     slots_.reserve(capacity);
     for (uint32_t i = 0; i < capacity; ++i) {
-        CVPixelBufferRef pb   = create_iosurface_buffer(format);
+        CVPixelBufferRef pb   = make_iosurface_pixel_buffer(format);
         auto             slot = std::make_unique<Slot>();
         // Frame's ctor CFRetains the buffer; we own the original ref and CFRelease here.
-        slot->frame = std::unique_ptr<Frame>(new Frame(*this, pb));
+        slot->frame = std::make_unique<Frame>(this, &recycle_thunk, pb);
         CFRelease(pb);
         slot->in_pool.store(true, std::memory_order_release);
         slots_.push_back(std::move(slot));

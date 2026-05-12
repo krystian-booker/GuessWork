@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <iostream>
 #include <optional>
 #include <thread>
@@ -25,13 +24,16 @@
 
 #include "core/clock.hpp"
 #include "core/frame.hpp"
-#include "core/frame_pool.hpp"
+#include "producer/spinnaker_user_buffer_pool.hpp"
 
 namespace gw {
 
 namespace {
 
-constexpr uint32_t kFramePoolCapacity = 4;
+// Per-camera user-buffer pool size. Spinnaker NewestOnly requires ≥ 3;
+// we add headroom for the publisher's working slot, channel-latest, and one
+// or two consumer in-flight frames.
+constexpr uint32_t kPoolCapacity = 6;
 constexpr uint64_t kGetNextImageTimeoutMs = 1000;
 
 // Helpers ------------------------------------------------------------------
@@ -66,26 +68,26 @@ int64_t read_int_node(Spinnaker::GenApi::INodeMap& nm, const char* node_name) {
 // -------------------------------------------------------------------------
 
 struct SpinnakerProducer::Impl {
-    std::string                name;
-    FrameFormat                format{};
-    FrameChannel               channel;
-    std::optional<FramePool>   pool;
-    Spinnaker::SystemPtr       system;
-    Spinnaker::CameraList      cam_list;
-    Spinnaker::CameraPtr       cam;
-    std::atomic<bool>          stop_requested{false};
-    std::atomic<bool>          streaming{false};
-    std::thread                worker;
-    uint64_t                   sequence_counter = 0;
+    std::string                              name;
+    FrameFormat                              format{};
+    FrameChannel                             channel;
+    std::optional<SpinnakerUserBufferPool>   user_pool;
+    Spinnaker::SystemPtr                     system;
+    Spinnaker::CameraList                    cam_list;
+    Spinnaker::CameraPtr                     cam;
+    std::atomic<bool>                        stop_requested{false};
+    std::atomic<bool>                        streaming{false};
+    std::atomic<bool>                        owner_user{false};   // true once SetBufferOwnership(USER) succeeds
+    std::thread                              worker;
+    uint64_t                                 sequence_counter = 0;
 
-    std::atomic<uint64_t>      total_published{0};
-    std::atomic<uint64_t>      total_dropped{0};
-    std::atomic<uint64_t>      total_incomplete{0};
+    std::atomic<uint64_t>                    total_published{0};
+    std::atomic<uint64_t>                    total_dropped{0};
+    std::atomic<uint64_t>                    total_incomplete{0};
 
     explicit Impl(std::string n) : name(std::move(n)) {}
 
     void capture_loop();
-    void copy_into_iosurface(const Spinnaker::ImagePtr& img, Frame* f);
 };
 
 // -------------------------------------------------------------------------
@@ -153,9 +155,37 @@ void SpinnakerProducer::start() {
             .height       = static_cast<uint32_t>(h),
             .pixel_format = kCVPixelFormatType_OneComponent8,
         };
-        std::cout << "Resolution: " << w << "x" << h << " Mono8\n";
+        const int64_t payload = read_int_node(dev_nm, "PayloadSize");
+        std::cout << "Resolution: " << w << "x" << h << " Mono8 (payload " << payload << " B)\n";
 
-        impl_->pool.emplace(impl_->format, kFramePoolCapacity);
+        // Allocate the user-buffer pool. Buffers are 1024-byte rounded; their
+        // IOSurface base addresses go straight to Spinnaker.
+        impl_->user_pool.emplace(impl_->format, kPoolCapacity, static_cast<uint64_t>(payload));
+
+        // Stride sanity: for Mono8 with no row padding, Spinnaker writes
+        // `width` bytes/row and our IOSurface must match. PayloadSize == w*h
+        // also confirms no per-row Spinnaker padding.
+        const size_t bpr = impl_->user_pool->bytes_per_row();
+        if (bpr != static_cast<size_t>(w)) {
+            throw std::runtime_error(
+                "IOSurface row stride (" + std::to_string(bpr) +
+                ") does not match camera width (" + std::to_string(w) + ")");
+        }
+        if (payload != w * h) {
+            throw std::runtime_error(
+                "Camera PayloadSize (" + std::to_string(payload) +
+                ") does not match width*height (" + std::to_string(w * h) + ")");
+        }
+
+        // Hand our IOSurface base addresses to Spinnaker as DMA targets.
+        auto addrs = impl_->user_pool->base_addresses();
+        impl_->cam->SetBufferOwnership(Spinnaker::SPINNAKER_BUFFER_OWNERSHIP_USER);
+        impl_->owner_user.store(true);
+        impl_->cam->SetUserBuffers(addrs.data(),
+                                   static_cast<uint64_t>(addrs.size()),
+                                   impl_->user_pool->buffer_size());
+        std::cout << "User-buffer DMA enabled (" << addrs.size() << " buffers x "
+                  << impl_->user_pool->buffer_size() << " B)\n";
 
         impl_->cam->BeginAcquisition();
         impl_->streaming.store(true);
@@ -182,9 +212,19 @@ void SpinnakerProducer::stop() {
     }
     if (impl_->streaming.exchange(false)) {
         try { impl_->cam->EndAcquisition(); } catch (...) {}
-        try { impl_->cam->DeInit(); }         catch (...) {}
     }
-    impl_->pool.reset();
+    // Restore default buffer ownership BEFORE DeInit so the camera comes back
+    // clean on the next launch (otherwise Spinnaker may complain about stale
+    // user buffers from a previous session).
+    if (impl_->owner_user.exchange(false)) {
+        try {
+            impl_->cam->SetBufferOwnership(Spinnaker::SPINNAKER_BUFFER_OWNERSHIP_SYSTEM);
+        } catch (...) {}
+    }
+    if (impl_->cam) {
+        try { impl_->cam->DeInit(); } catch (...) {}
+    }
+    impl_->user_pool.reset();
     impl_->cam = nullptr;
     impl_->cam_list.Clear();
     if (impl_->system) {
@@ -214,30 +254,25 @@ void SpinnakerProducer::Impl::capture_loop() {
             continue;
         }
 
-        Frame* f = pool->acquire();
-        if (!f) {
-            // Pool exhausted: should be very rare given pool size > consumers + 1.
-            total_dropped.fetch_add(1, std::memory_order_relaxed);
-            img->Release();
-            continue;
-        }
+        // Read camera-side metadata before transferring the ImagePtr to the
+        // pool — once moved the local `img` is empty.
+        const uint64_t camera_ts = static_cast<uint64_t>(img->GetTimeStamp());
 
-        try {
-            copy_into_iosurface(img, f);
-        } catch (...) {
-            f->release();
-            img->Release();
+        Frame* f = user_pool->checkout(std::move(img));
+        if (!f) {
+            // Pointer returned by GetNextImage didn't match any of our slots —
+            // would indicate Spinnaker handed us a buffer we don't own.
+            total_dropped.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
         f->set_sequence(++sequence_counter);
         f->set_host_capture_ns(Clock::now_ns());
-        f->set_camera_ts_ns(static_cast<uint64_t>(img->GetTimeStamp()));
+        f->set_camera_ts_ns(camera_ts);
         f->set_producer_id(name);
 
         channel.publish(f);
         total_published.fetch_add(1, std::memory_order_relaxed);
-        img->Release();
     }
 }
 
@@ -247,30 +282,6 @@ SpinnakerProducerStats SpinnakerProducer::stats() const {
         .total_dropped    = impl_->total_dropped.load(std::memory_order_relaxed),
         .total_incomplete = impl_->total_incomplete.load(std::memory_order_relaxed),
     };
-}
-
-void SpinnakerProducer::Impl::copy_into_iosurface(const Spinnaker::ImagePtr& img, Frame* f) {
-    CVPixelBufferRef pb = f->pixel_buffer();
-    if (CVPixelBufferLockBaseAddress(pb, 0) != kCVReturnSuccess) {
-        throw std::runtime_error("CVPixelBufferLockBaseAddress failed");
-    }
-
-    auto* dst        = static_cast<uint8_t*>(CVPixelBufferGetBaseAddress(pb));
-    const auto* src  = static_cast<const uint8_t*>(img->GetData());
-    const size_t dst_stride = CVPixelBufferGetBytesPerRow(pb);
-    const size_t src_stride = img->GetStride();
-    const size_t height     = img->GetHeight();
-    const size_t row_bytes  = std::min(dst_stride, src_stride);
-
-    if (src_stride == dst_stride) {
-        std::memcpy(dst, src, src_stride * height);
-    } else {
-        for (size_t y = 0; y < height; ++y) {
-            std::memcpy(dst + y * dst_stride, src + y * src_stride, row_bytes);
-        }
-    }
-
-    CVPixelBufferUnlockBaseAddress(pb, 0);
 }
 
 }  // namespace gw
