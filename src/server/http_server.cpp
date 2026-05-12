@@ -3,6 +3,7 @@
 #include <crow.h>
 
 #include "server/routes_status.hpp"
+#include "server/routes_stream.hpp"
 #include "server/static_assets.hpp"
 
 namespace gw::server {
@@ -11,14 +12,15 @@ struct HttpServer::Impl {
     crow::SimpleApp app;
     uint16_t        port;
 
-    Impl(uint16_t p, PipelineStatsView& stats) : port(p) {
+    Impl(uint16_t p, PipelineStatsView& stats, StreamConsumer& stream) : port(p) {
         register_status_routes(app, stats);
+        register_stream_routes(app, stream);
         register_static_routes(app);
     }
 };
 
-HttpServer::HttpServer(uint16_t port, PipelineStatsView& stats)
-    : impl_(std::make_unique<Impl>(port, stats)) {}
+HttpServer::HttpServer(uint16_t port, PipelineStatsView& stats, StreamConsumer& stream)
+    : impl_(std::make_unique<Impl>(port, stats, stream)) {}
 
 HttpServer::~HttpServer() = default;
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchStatus, type Status } from './api/status'
+import Stream from './Stream'
 
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null)
@@ -30,6 +31,8 @@ export default function App() {
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: 24, maxWidth: 720 }}>
       <h1 style={{ marginBottom: 8 }}>GuessWork</h1>
       <p style={{ color: '#666', marginTop: 0 }}>Pipeline status</p>
+      <Stream />
+      <h2 style={{ marginBottom: 8 }}>Status</h2>
       {error && (
         <p style={{ color: 'crimson' }}>Failed to fetch /api/status: {error}</p>
       )}

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(GuessWork LANGUAGES CXX OBJCXX)
+# VERSION is propagated to vendored deps that use CMAKE_PROJECT_VERSION
+# (notably libsrtp, which set_target_properties()s its lib with it).
+project(GuessWork VERSION 0.1.0 LANGUAGES CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -106,6 +108,28 @@ target_link_libraries(gw_app PUBLIC gw_core
 )
 
 # ----------------------------------------------------------------------------
+# Video encoder (Mono8 -> NV12 + H.264 via VideoToolbox)
+# ----------------------------------------------------------------------------
+add_library(gw_encoder
+    src/encoder/mono8_to_nv12.cpp
+    src/encoder/h264_encoder.cpp
+)
+target_include_directories(gw_encoder PUBLIC src)
+target_link_libraries(gw_encoder PUBLIC
+    "-framework Accelerate"
+    "-framework CoreFoundation"
+    "-framework CoreMedia"
+    "-framework CoreVideo"
+    "-framework VideoToolbox"
+)
+
+# ----------------------------------------------------------------------------
+# WebRTC stack (libdatachannel + vendored libsrtp + libjuice + mbedtls + plog).
+# Pulled before Crow so the FetchContent settings don't clash.
+# ----------------------------------------------------------------------------
+include(${CMAKE_SOURCE_DIR}/cmake/libdatachannel.cmake)
+
+# ----------------------------------------------------------------------------
 # Crow HTTP framework (fetched). Crow needs standalone Asio at configure time;
 # fetch it ourselves and point Crow's Findasio.cmake at the source tree.
 # ----------------------------------------------------------------------------
@@ -130,10 +154,13 @@ FetchContent_MakeAvailable(crow)
 add_library(gw_server
     src/server/pipeline_stats.cpp
     src/server/routes_status.cpp
+    src/server/routes_stream.cpp
     src/server/static_assets.cpp
     src/server/http_server.cpp
+    src/server/stream_consumer.cpp
+    src/server/webrtc_peer.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer Crow::Crow)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder Crow::Crow LibDataChannel::LibDataChannel)
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -197,8 +224,10 @@ if(GW_BUILD_TESTS)
         tests/test_clock.cpp
         tests/test_frame_pool.cpp
         tests/test_frame_channel.cpp
+        tests/test_mono8_to_nv12.cpp
+        tests/test_h264_encoder.cpp
     )
-    target_link_libraries(gw_tests PRIVATE gw_core GTest::gtest_main)
+    target_link_libraries(gw_tests PRIVATE gw_core gw_encoder GTest::gtest_main)
     include(GoogleTest)
     gtest_discover_tests(gw_tests)
 endif()
