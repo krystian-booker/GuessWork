@@ -27,6 +27,8 @@ if(GW_ENABLE_ASAN)
 endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic)
+# Objective-C++ files use ARC.
+add_compile_options($<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 
 # ----------------------------------------------------------------------------
 # Core library
@@ -45,10 +47,54 @@ target_link_libraries(gw_core PUBLIC
 )
 
 # ----------------------------------------------------------------------------
+# Spinnaker SDK (system-installed under /usr/local)
+# ----------------------------------------------------------------------------
+add_library(gw_spinnaker INTERFACE)
+target_include_directories(gw_spinnaker INTERFACE /usr/local/include/spinnaker)
+target_link_libraries(gw_spinnaker INTERFACE
+    /usr/local/lib/libSpinnaker.dylib
+    # libSpinnaker.dylib resolves libGenApi*, libGCBase*, etc. via @rpath.
+    # Add /usr/local/lib to the executable's runtime search path.
+    "-Wl,-rpath,/usr/local/lib"
+)
+
+# ----------------------------------------------------------------------------
+# Producer / Consumer / App libraries
+# ----------------------------------------------------------------------------
+add_library(gw_producer
+    src/producer/spinnaker_producer.cpp
+)
+target_link_libraries(gw_producer PUBLIC gw_core gw_spinnaker)
+
+add_library(gw_consumer
+    src/consumer/preview_consumer.mm
+)
+target_link_libraries(gw_consumer PUBLIC gw_core
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework CoreVideo"
+)
+
+add_library(gw_app
+    src/app/preview_window.mm
+)
+target_link_libraries(gw_app PUBLIC gw_core
+    "-framework AppKit"
+    "-framework QuartzCore"
+    "-framework Metal"
+)
+
+# ----------------------------------------------------------------------------
 # Main executable
 # ----------------------------------------------------------------------------
-add_executable(guesswork src/main.cpp)
-target_link_libraries(guesswork PRIVATE gw_core)
+add_executable(guesswork src/main.mm)
+target_link_libraries(guesswork PRIVATE
+    gw_app
+    gw_consumer
+    gw_producer
+    gw_core
+    "-framework AppKit"
+)
 
 # ----------------------------------------------------------------------------
 # Tests
