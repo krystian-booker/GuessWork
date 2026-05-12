@@ -53,6 +53,10 @@ compile_commands.json
 # macOS
 .DS_Store
 
+# React frontend
+web/node_modules/
+web/dist/
+
 # Editors / IDEs — keep shared VS Code config, ignore the rest
 .vscode/*
 !.vscode/launch.json
