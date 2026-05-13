@@ -16,6 +16,7 @@
 #include "core/clock.hpp"
 #include "core/frame.hpp"
 #include "producer/spinnaker_user_buffer_pool.hpp"
+#include "producer/spinnaker_video_modes.hpp"
 
 namespace gw {
 
@@ -63,7 +64,9 @@ struct SpinnakerProducer::Impl {
     // order, so user_pool is listed first.
     std::string                              name;
     std::string                              serial;
+    std::optional<std::string>               mode;
     FrameFormat                              format{};
+    VideoModeList                            cached_modes;
     std::optional<SpinnakerUserBufferPool>   user_pool;
     FrameChannel                             channel;
     std::unique_ptr<SpinnakerCameraBinding>  binding;       // system + cam smart ptrs
@@ -77,7 +80,8 @@ struct SpinnakerProducer::Impl {
     std::atomic<uint64_t>                    total_dropped{0};
     std::atomic<uint64_t>                    total_incomplete{0};
 
-    Impl(std::string n, std::string s) : name(std::move(n)), serial(std::move(s)) {}
+    Impl(std::string n, std::string s, std::optional<std::string> m)
+        : name(std::move(n)), serial(std::move(s)), mode(std::move(m)) {}
 
     void capture_loop();
 };
@@ -86,8 +90,10 @@ struct SpinnakerProducer::Impl {
 // Public API
 // -------------------------------------------------------------------------
 
-SpinnakerProducer::SpinnakerProducer(std::string name, std::string serial)
-    : impl_(std::make_unique<Impl>(std::move(name), std::move(serial))) {}
+SpinnakerProducer::SpinnakerProducer(std::string                name,
+                                     std::string                serial,
+                                     std::optional<std::string> mode)
+    : impl_(std::make_unique<Impl>(std::move(name), std::move(serial), std::move(mode))) {}
 
 SpinnakerProducer::~SpinnakerProducer() {
     try {
@@ -97,10 +103,13 @@ SpinnakerProducer::~SpinnakerProducer() {
     }
 }
 
-std::string_view SpinnakerProducer::name()   const { return impl_->name; }
-std::string_view SpinnakerProducer::serial() const { return impl_->serial; }
-FrameFormat      SpinnakerProducer::format() const { return impl_->format; }
-FrameChannel&    SpinnakerProducer::channel()      { return impl_->channel; }
+std::string_view     SpinnakerProducer::name()   const { return impl_->name; }
+std::string_view     SpinnakerProducer::serial() const { return impl_->serial; }
+FrameFormat          SpinnakerProducer::format() const { return impl_->format; }
+FrameChannel&        SpinnakerProducer::channel()      { return impl_->channel; }
+const VideoModeList& SpinnakerProducer::cached_video_modes() const {
+    return impl_->cached_modes;
+}
 
 void SpinnakerProducer::bind_camera(std::unique_ptr<SpinnakerCameraBinding> binding) {
     if (impl_->streaming.load()) {
@@ -124,8 +133,15 @@ void SpinnakerProducer::start() {
         Spinnaker::GenApi::INodeMap& tl_stream_nm = cam->GetTLStreamNodeMap();
         set_enum_node(tl_stream_nm, "StreamBufferHandlingMode", "NewestOnly");
 
-        // Force Mono8 on the device.
+        // Cache the available modes for this camera while we hold Init.
+        impl_->cached_modes = enumerate_video_modes_initialized(cam);
+
+        // Force Mono8 on the device. The VideoMode (sensor mode) must be set
+        // FIRST since it determines which pixel formats are advertised.
         Spinnaker::GenApi::INodeMap& dev_nm = cam->GetNodeMap();
+        if (impl_->mode && !impl_->mode->empty()) {
+            set_enum_node(dev_nm, "VideoMode", impl_->mode->c_str());
+        }
         set_enum_node(dev_nm, "PixelFormat", "Mono8");
 
         const int64_t w = read_int_node(dev_nm, "Width");

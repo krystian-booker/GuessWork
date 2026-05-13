@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -69,6 +70,7 @@ struct CameraSlot {
     int64_t                            id     = 0;
     std::string                        name;
     std::string                        serial;
+    std::optional<std::string>         mode;         // GenICam VideoMode symbolic
     std::unique_ptr<SpinnakerProducer> producer;     // null when offline
     std::shared_ptr<StreamConsumer>    stream;       // null when offline
     FpsSampler                         fps;
@@ -135,6 +137,7 @@ void CameraSupervisor::Impl::load_db_into_slots_locked() {
         s.id     = row.id;
         s.name   = row.name;
         s.serial = row.serial;
+        s.mode   = row.mode;
         slots_by_id.emplace(row.id, std::move(s));
         id_by_serial[row.serial] = row.id;
     }
@@ -147,7 +150,7 @@ void CameraSupervisor::Impl::try_start_slot_locked(CameraSlot& slot, Spinnaker::
     binding->system = system;
     binding->cam    = cam;
 
-    auto producer = std::make_unique<SpinnakerProducer>(slot.name, slot.serial);
+    auto producer = std::make_unique<SpinnakerProducer>(slot.name, slot.serial, slot.mode);
     producer->bind_camera(std::move(binding));
     try {
         producer->start();
@@ -335,6 +338,7 @@ void CameraSupervisor::on_camera_added(int64_t camera_id) {
     s.id     = row->id;
     s.name   = row->name;
     s.serial = row->serial;
+    s.mode   = row->mode;
     auto [it, _] = impl_->slots_by_id.emplace(row->id, std::move(s));
     impl_->id_by_serial[it->second.serial] = it->second.id;
 
@@ -359,7 +363,79 @@ void CameraSupervisor::on_camera_updated(int64_t camera_id) {
     if (it == impl_->slots_by_id.end()) return;
     const auto row = impl_->repo.get(camera_id);
     if (!row) return;
-    it->second.name = row->name;
+
+    CameraSlot& slot = it->second;
+    slot.name = row->name;
+
+    if (row->mode != slot.mode) {
+        slot.mode = row->mode;
+        // If currently running, restart the producer so the new mode applies.
+        if (slot.producer) {
+            const std::string serial = slot.serial;
+            impl_->stop_slot_locked(slot);
+
+            if (!impl_->system) return;
+            Spinnaker::CameraList cams = impl_->system->GetCameras();
+            const unsigned int n = cams.GetSize();
+            for (unsigned int i = 0; i < n; ++i) {
+                Spinnaker::CameraPtr cam = cams.GetByIndex(i);
+                if (read_tl_string(cam, "DeviceSerialNumber") == serial) {
+                    impl_->try_start_slot_locked(slot, cam);
+                    break;
+                }
+            }
+            cams.Clear();
+        }
+    }
+}
+
+std::optional<gw::VideoModeList>
+CameraSupervisor::list_video_modes_for_id(int64_t camera_id) {
+    std::lock_guard lk(impl_->mu);
+    auto it = impl_->slots_by_id.find(camera_id);
+    if (it == impl_->slots_by_id.end()) return std::nullopt;
+    if (!it->second.producer) return std::nullopt;
+    return it->second.producer->cached_video_modes();
+}
+
+std::optional<gw::VideoModeOption>
+CameraSupervisor::current_mode_for(int64_t camera_id) {
+    std::lock_guard lk(impl_->mu);
+    auto it = impl_->slots_by_id.find(camera_id);
+    if (it == impl_->slots_by_id.end()) return std::nullopt;
+    const auto& slot = it->second;
+    if (!slot.producer) return std::nullopt;
+    const auto& list = slot.producer->cached_video_modes();
+    if (!list.supported) return std::nullopt;
+    // Prefer the slot's configured mode; fall back to the producer's reported
+    // current (when slot.mode is unset, the producer is running the camera's
+    // default mode).
+    const std::optional<std::string>& want = slot.mode ? slot.mode : list.current;
+    if (!want) return std::nullopt;
+    for (const auto& opt : list.options) {
+        if (opt.name == *want) return opt;
+    }
+    return std::nullopt;
+}
+
+std::optional<gw::VideoModeList>
+CameraSupervisor::list_video_modes_for_serial(const std::string& serial) {
+    std::lock_guard lk(impl_->mu);
+    if (!impl_->system) return std::nullopt;
+
+    Spinnaker::CameraList cams = impl_->system->GetCameras();
+    const unsigned int n = cams.GetSize();
+    std::optional<gw::VideoModeList> out;
+    for (unsigned int i = 0; i < n; ++i) {
+        Spinnaker::CameraPtr cam = cams.GetByIndex(i);
+        if (read_tl_string(cam, "DeviceSerialNumber") == serial) {
+            // Spinnaker exceptions propagate to the route layer (mapped to 503).
+            out = gw::enumerate_video_modes_standalone(cam);
+            break;
+        }
+    }
+    cams.Clear();
+    return out;
 }
 
 void CameraSupervisor::on_camera_removed(int64_t camera_id) {

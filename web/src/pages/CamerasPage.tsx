@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react'
 import {
+  CameraOfflineError,
   createCamera,
   deleteCamera,
+  getAvailableCameraModes,
+  getCameraModes,
   listAvailableCameras,
   listCameras,
   updateCamera,
   type AvailableCamera,
   type Camera,
+  type CameraMode,
 } from '../api/cameras'
+import ModeSelect from '../components/ModeSelect'
 
 const inputStyle: React.CSSProperties = {
   padding: '6px 10px',
@@ -52,6 +57,21 @@ const modalCard: React.CSSProperties = {
   boxShadow: '0 10px 25px rgba(0,0,0,0.15)',
 }
 
+// Renders "[1280x960 @ 30fps]" suffix when the camera reports geometry.
+function modeGeometrySuffix(c: Camera): string {
+  const parts: string[] = []
+  if (c.mode_width != null && c.mode_height != null) {
+    parts.push(`${c.mode_width}x${c.mode_height}`)
+  }
+  if (c.mode_max_fps != null) {
+    const fps = c.mode_max_fps >= 1
+      ? Math.round(c.mode_max_fps)
+      : Math.round(c.mode_max_fps * 10) / 10
+    parts.push(`${fps}fps`)
+  }
+  return parts.length === 0 ? '' : ` [${parts.join(' @ ')}]`
+}
+
 function OnlineDot({ online }: { online: boolean }) {
   return (
     <span
@@ -68,20 +88,46 @@ function OnlineDot({ online }: { online: boolean }) {
   )
 }
 
+// Tri-state load handle for an async modes fetch.
+interface ModesState {
+  options: CameraMode[]
+  current: string | null
+  supported: boolean
+  loading: boolean
+  error: string | null
+  offline: boolean
+}
+
+const emptyModes: ModesState = {
+  options: [],
+  current: null,
+  supported: true,
+  loading: false,
+  error: null,
+  offline: false,
+}
+
 export default function CamerasPage() {
   const [cameras, setCameras] = useState<Camera[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [editingId, setEditingId] = useState<number | null>(null)
-  const [editingName, setEditingName] = useState('')
-  const [editError, setEditError] = useState<string | null>(null)
 
-  const [modalOpen, setModalOpen] = useState(false)
-  const [modalName, setModalName] = useState('')
-  const [modalSerial, setModalSerial] = useState('')
+  // --- Add modal state ---
+  const [addOpen, setAddOpen] = useState(false)
+  const [addName, setAddName] = useState('')
+  const [addSerial, setAddSerial] = useState('')
   const [available, setAvailable] = useState<AvailableCamera[] | null>(null)
-  const [modalError, setModalError] = useState<string | null>(null)
-  const [modalLoading, setModalLoading] = useState(false)
+  const [addError, setAddError] = useState<string | null>(null)
+  const [addLoading, setAddLoading] = useState(false)
+  const [addModes, setAddModes] = useState<ModesState>(emptyModes)
+  const [addSelectedMode, setAddSelectedMode] = useState<string | null>(null)
+
+  // --- Edit modal state ---
+  const [editCamera, setEditCamera] = useState<Camera | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editError, setEditError] = useState<string | null>(null)
+  const [editModes, setEditModes] = useState<ModesState>(emptyModes)
+  const [editSelectedMode, setEditSelectedMode] = useState<string | null>(null)
 
   const refresh = async () => {
     try {
@@ -97,65 +143,149 @@ export default function CamerasPage() {
     refresh()
   }, [])
 
+  // --- Add modal handlers ---
+
   const openAddModal = async () => {
-    setModalOpen(true)
-    setModalName('')
-    setModalSerial('')
-    setModalError(null)
-    setModalLoading(true)
+    setAddOpen(true)
+    setAddName('')
+    setAddSerial('')
+    setAddError(null)
+    setAddLoading(true)
     setAvailable(null)
+    setAddModes(emptyModes)
+    setAddSelectedMode(null)
     try {
       const list = await listAvailableCameras()
       setAvailable(list)
-      if (list.length > 0) setModalSerial(list[0].serial)
+      if (list.length > 0) setAddSerial(list[0].serial)
     } catch (e) {
-      setModalError(e instanceof Error ? e.message : String(e))
+      setAddError(e instanceof Error ? e.message : String(e))
       setAvailable([])
     } finally {
-      setModalLoading(false)
+      setAddLoading(false)
     }
   }
 
-  const closeModal = () => {
+  // Refetch modes whenever the chosen serial changes.
+  useEffect(() => {
+    if (!addOpen || !addSerial) return
+    let cancelled = false
+    setAddModes({ ...emptyModes, loading: true })
+    setAddSelectedMode(null)
+    getAvailableCameraModes(addSerial)
+      .then((r) => {
+        if (cancelled) return
+        setAddModes({
+          options: r.options,
+          current: r.current,
+          supported: r.supported,
+          loading: false,
+          error: null,
+          offline: false,
+        })
+        setAddSelectedMode(r.current ?? (r.options[0]?.name ?? null))
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setAddModes({
+          ...emptyModes,
+          error: e instanceof Error ? e.message : String(e),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [addOpen, addSerial])
+
+  const closeAddModal = () => {
     if (busy) return
-    setModalOpen(false)
+    setAddOpen(false)
   }
 
-  const onSubmitModal = async (e: React.FormEvent) => {
+  const onSubmitAdd = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!modalName.trim() || !modalSerial || busy) return
+    if (!addName.trim() || !addSerial || busy) return
     setBusy(true)
-    setModalError(null)
+    setAddError(null)
     try {
-      await createCamera(modalName.trim(), modalSerial)
-      setModalOpen(false)
+      await createCamera({
+        name: addName.trim(),
+        serial: addSerial,
+        mode:
+          addModes.supported && addSelectedMode ? addSelectedMode : undefined,
+      })
+      setAddOpen(false)
       await refresh()
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : String(err))
+      setAddError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
   }
 
-  const startEdit = (c: Camera) => {
-    setEditingId(c.id)
-    setEditingName(c.name)
+  // --- Edit modal handlers ---
+
+  const openEditModal = async (c: Camera) => {
+    setEditCamera(c)
+    setEditName(c.name)
     setEditError(null)
+    setEditModes({ ...emptyModes, loading: true })
+    setEditSelectedMode(c.mode)
+    try {
+      const r = await getCameraModes(c.id)
+      setEditModes({
+        options: r.options,
+        current: r.current,
+        supported: r.supported,
+        loading: false,
+        error: null,
+        offline: false,
+      })
+      setEditSelectedMode(c.mode ?? r.current ?? (r.options[0]?.name ?? null))
+    } catch (err) {
+      if (err instanceof CameraOfflineError) {
+        setEditModes({ ...emptyModes, offline: true })
+      } else {
+        setEditModes({
+          ...emptyModes,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
   }
 
-  const cancelEdit = () => {
-    setEditingId(null)
-    setEditingName('')
-    setEditError(null)
+  const closeEditModal = () => {
+    if (busy) return
+    setEditCamera(null)
   }
 
-  const saveEdit = async (id: number) => {
-    if (!editingName.trim() || busy) return
+  const onSubmitEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editCamera || busy) return
+    const trimmedName = editName.trim()
+    if (!trimmedName) return
+
+    // Build a partial body containing only changed fields.
+    const patch: { name?: string; mode?: string } = {}
+    if (trimmedName !== editCamera.name) patch.name = trimmedName
+    if (
+      editModes.supported &&
+      !editModes.offline &&
+      editSelectedMode &&
+      editSelectedMode !== editCamera.mode
+    ) {
+      patch.mode = editSelectedMode
+    }
+    if (!patch.name && !patch.mode) {
+      setEditCamera(null)
+      return
+    }
+
     setBusy(true)
     setEditError(null)
     try {
-      await updateCamera(id, editingName.trim())
-      cancelEdit()
+      await updateCamera(editCamera.id, patch)
+      setEditCamera(null)
       await refresh()
     } catch (err) {
       setEditError(err instanceof Error ? err.message : String(err))
@@ -203,78 +333,65 @@ export default function CamerasPage() {
               <th style={{ padding: 8, width: 120 }}>Status</th>
               <th style={{ padding: 8 }}>Name</th>
               <th style={{ padding: 8, width: 180 }}>Serial</th>
+              <th style={{ padding: 8, width: 220 }}>Mode</th>
               <th style={{ padding: 8, width: 220 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {cameras.map((c) => {
-              const isEditing = editingId === c.id
-              return (
-                <tr key={c.id} style={{ borderBottom: '1px solid #eee' }}>
-                  <td style={{ padding: 8, color: '#666' }}>{c.id}</td>
-                  <td style={{ padding: 8, color: '#374151' }}>
-                    <OnlineDot online={c.online} />
-                    {c.online ? 'online' : 'offline'}
-                  </td>
-                  <td style={{ padding: 8 }}>
-                    {isEditing ? (
-                      <input
-                        aria-label={`Edit name for camera ${c.id}`}
-                        value={editingName}
-                        onChange={(e) => setEditingName(e.target.value)}
-                        style={{ ...inputStyle, width: '100%' }}
-                      />
-                    ) : (
-                      c.name
-                    )}
-                  </td>
-                  <td style={{ padding: 8, fontFamily: 'monospace', color: '#374151' }}>
-                    {c.serial}
-                  </td>
-                  <td style={{ padding: 8 }}>
-                    {isEditing ? (
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button
-                          type="button"
-                          style={primaryButtonStyle}
-                          onClick={() => saveEdit(c.id)}
-                          disabled={busy || !editingName.trim()}
-                        >
-                          Save
-                        </button>
-                        <button type="button" style={neutralButtonStyle} onClick={cancelEdit}>
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button type="button" style={neutralButtonStyle} onClick={() => startEdit(c)}>
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          style={dangerButtonStyle}
-                          onClick={() => onDelete(c.id)}
-                          disabled={busy}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              )
-            })}
+            {cameras.map((c) => (
+              <tr key={c.id} style={{ borderBottom: '1px solid #eee' }}>
+                <td style={{ padding: 8, color: '#666' }}>{c.id}</td>
+                <td style={{ padding: 8, color: '#374151' }}>
+                  <OnlineDot online={c.online} />
+                  {c.online ? 'online' : 'offline'}
+                </td>
+                <td style={{ padding: 8 }}>{c.name}</td>
+                <td style={{ padding: 8, fontFamily: 'monospace', color: '#374151' }}>
+                  {c.serial}
+                </td>
+                <td style={{ padding: 8, color: '#4b5563' }}>
+                  {c.mode ? (
+                    <>
+                      {c.mode}
+                      {modeGeometrySuffix(c) && (
+                        <span style={{ color: '#6b7280' }}>{modeGeometrySuffix(c)}</span>
+                      )}
+                    </>
+                  ) : (
+                    <span style={{ color: '#9ca3af' }}>—</span>
+                  )}
+                </td>
+                <td style={{ padding: 8 }}>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      style={neutralButtonStyle}
+                      onClick={() => openEditModal(c)}
+                      disabled={busy}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      style={dangerButtonStyle}
+                      onClick={() => onDelete(c.id)}
+                      disabled={busy}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}
-      {editError && <p style={{ color: 'crimson', marginTop: 8 }}>{editError}</p>}
 
-      {modalOpen && (
-        <div role="dialog" aria-modal="true" style={modalOverlay} onClick={closeModal}>
+      {addOpen && (
+        <div role="dialog" aria-modal="true" style={modalOverlay} onClick={closeAddModal}>
           <div style={modalCard} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Add camera</h3>
-            <form onSubmit={onSubmitModal}>
+            <form onSubmit={onSubmitAdd}>
               <label style={{ display: 'block', marginBottom: 12 }}>
                 <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
                   Name
@@ -282,8 +399,8 @@ export default function CamerasPage() {
                 <input
                   aria-label="New camera name"
                   placeholder="e.g. front-left"
-                  value={modalName}
-                  onChange={(e) => setModalName(e.target.value)}
+                  value={addName}
+                  onChange={(e) => setAddName(e.target.value)}
                   style={{ ...inputStyle, width: '100%' }}
                   autoFocus
                 />
@@ -292,7 +409,7 @@ export default function CamerasPage() {
                 <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
                   Spinnaker camera
                 </span>
-                {modalLoading ? (
+                {addLoading ? (
                   <p style={{ color: '#666', margin: 0 }}>Detecting connected cameras…</p>
                 ) : available && available.length === 0 ? (
                   <p style={{ color: '#666', margin: 0 }}>
@@ -301,8 +418,8 @@ export default function CamerasPage() {
                 ) : (
                   <select
                     aria-label="Spinnaker camera"
-                    value={modalSerial}
-                    onChange={(e) => setModalSerial(e.target.value)}
+                    value={addSerial}
+                    onChange={(e) => setAddSerial(e.target.value)}
                     style={{ ...inputStyle, width: '100%', background: '#fff' }}
                   >
                     {available?.map((a) => (
@@ -314,19 +431,102 @@ export default function CamerasPage() {
                   </select>
                 )}
               </label>
-              {modalError && (
-                <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{modalError}</p>
+              {addSerial && available && available.length > 0 && (
+                <label style={{ display: 'block', marginBottom: 12 }}>
+                  <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                    Mode
+                  </span>
+                  <ModeSelect
+                    value={addSelectedMode}
+                    options={addModes.options}
+                    loading={addModes.loading}
+                    error={addModes.error}
+                    onChange={setAddSelectedMode}
+                    hint="This camera doesn't expose a Mode setting."
+                  />
+                </label>
+              )}
+              {addError && (
+                <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{addError}</p>
               )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
-                <button type="button" style={neutralButtonStyle} onClick={closeModal} disabled={busy}>
+                <button type="button" style={neutralButtonStyle} onClick={closeAddModal} disabled={busy}>
                   Cancel
                 </button>
                 <button
                   type="submit"
                   style={primaryButtonStyle}
-                  disabled={busy || modalLoading || !modalName.trim() || !modalSerial}
+                  disabled={
+                    busy ||
+                    addLoading ||
+                    addModes.loading ||
+                    !addName.trim() ||
+                    !addSerial
+                  }
                 >
                   Add
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editCamera && (
+        <div role="dialog" aria-modal="true" style={modalOverlay} onClick={closeEditModal}>
+          <div style={modalCard} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>Edit camera</h3>
+            <form onSubmit={onSubmitEdit}>
+              <label style={{ display: 'block', marginBottom: 12 }}>
+                <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                  Name
+                </span>
+                <input
+                  aria-label={`Edit name for camera ${editCamera.id}`}
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  style={{ ...inputStyle, width: '100%' }}
+                  autoFocus
+                />
+              </label>
+              <div style={{ marginBottom: 12 }}>
+                <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                  Serial
+                </span>
+                <code style={{ fontSize: 13, color: '#4b5563' }}>{editCamera.serial}</code>
+              </div>
+              <label style={{ display: 'block', marginBottom: 12 }}>
+                <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                  Mode
+                </span>
+                <ModeSelect
+                  value={editSelectedMode}
+                  options={editModes.options}
+                  loading={editModes.loading}
+                  error={editModes.error}
+                  disabled={editModes.offline}
+                  onChange={setEditSelectedMode}
+                  hint={
+                    editModes.offline
+                      ? 'Camera must be online to change Mode.'
+                      : "This camera doesn't expose a Mode setting."
+                  }
+                  disabledHint="Camera must be online to change Mode."
+                />
+              </label>
+              {editError && (
+                <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{editError}</p>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                <button type="button" style={neutralButtonStyle} onClick={closeEditModal} disabled={busy}>
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  style={primaryButtonStyle}
+                  disabled={busy || editModes.loading || !editName.trim()}
+                >
+                  Save
                 </button>
               </div>
             </form>

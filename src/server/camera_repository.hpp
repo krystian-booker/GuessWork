@@ -12,10 +12,11 @@ namespace gw::server {
 class Database;
 
 struct Camera {
-    int64_t     id         = 0;
-    std::string name;
-    std::string serial;
-    int64_t     created_at = 0;  // unix seconds
+    int64_t                    id         = 0;
+    std::string                name;
+    std::string                serial;
+    std::optional<std::string> mode;       // GenICam VideoMode symbolic, or unset
+    int64_t                    created_at = 0;  // unix seconds
 };
 
 // Thrown when a write violates the UNIQUE(name) constraint. Route layer maps
@@ -43,12 +44,17 @@ public:
     std::optional<Camera> find_by_serial(std::string_view serial);
 
     // Throws DuplicateNameError or DuplicateSerialError on UNIQUE conflict.
-    Camera                create(std::string_view name, std::string_view serial);
+    Camera                create(std::string_view                name,
+                                 std::string_view                serial,
+                                 std::optional<std::string_view> mode = std::nullopt);
 
-    // Renames a camera. Serial cannot be changed (delete + re-add instead).
+    // Partial update. Either field may be nullopt to leave it unchanged; an
+    // entirely-nullopt call returns the row as-is. Serial cannot be changed.
     // Returns the updated row, or std::nullopt if id does not exist.
     // Throws DuplicateNameError on UNIQUE conflict.
-    std::optional<Camera> update(int64_t id, std::string_view name);
+    std::optional<Camera> update(int64_t                         id,
+                                 std::optional<std::string_view> name,
+                                 std::optional<std::string_view> mode);
 
     // Returns true if a row was deleted.
     bool                  remove(int64_t id);

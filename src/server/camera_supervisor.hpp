@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "producer/spinnaker_video_modes.hpp"
 
 namespace gw::server {
 
@@ -82,6 +85,22 @@ public:
     void on_camera_added(int64_t camera_id);
     void on_camera_updated(int64_t camera_id);
     void on_camera_removed(int64_t camera_id);
+
+    // Returns the producer's cached VideoModeList for an online camera.
+    // nullopt if the camera id has no running producer (offline or unknown).
+    // Callers distinguish 404 vs 409 by checking repo.get(id) separately.
+    std::optional<gw::VideoModeList> list_video_modes_for_id(int64_t camera_id);
+
+    // Walks connected Spinnaker cameras, finds the one with the given serial,
+    // and enumerates its VideoMode entries. nullopt if no camera with that
+    // serial is currently connected. Spinnaker exceptions during Init are
+    // propagated for the route layer to map to 503.
+    std::optional<gw::VideoModeList> list_video_modes_for_serial(const std::string& serial);
+
+    // Currently-active mode entry (geometry + max FPS) for an online camera.
+    // nullopt if the camera is offline, unknown, or its producer didn't cache
+    // a matching entry.
+    std::optional<gw::VideoModeOption> current_mode_for(int64_t camera_id);
 
 private:
     struct Impl;

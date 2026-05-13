@@ -2,12 +2,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
 #include "core/frame_channel.hpp"
 #include "core/frame_format.hpp"
 #include "producer/producer.hpp"
+#include "producer/spinnaker_video_modes.hpp"
 
 namespace gw {
 
@@ -29,7 +31,9 @@ struct SpinnakerCameraBinding;
 
 class SpinnakerProducer final : public IProducer {
 public:
-    SpinnakerProducer(std::string name, std::string serial);
+    SpinnakerProducer(std::string                name,
+                      std::string                serial,
+                      std::optional<std::string> mode = std::nullopt);
     ~SpinnakerProducer() override;
 
     SpinnakerProducer(const SpinnakerProducer&)            = delete;
@@ -48,6 +52,10 @@ public:
     void stop()  override;
 
     SpinnakerProducerStats stats() const;
+
+    // Modes enumerated during start(). Returns an empty {supported=false,...}
+    // if start() hasn't run or failed before the cache was populated.
+    const VideoModeList& cached_video_modes() const;
 
 private:
     struct Impl;
