@@ -353,6 +353,15 @@ void CameraSupervisor::on_camera_added(int64_t camera_id) {
     cams.Clear();
 }
 
+void CameraSupervisor::on_camera_updated(int64_t camera_id) {
+    std::lock_guard lk(impl_->mu);
+    auto it = impl_->slots_by_id.find(camera_id);
+    if (it == impl_->slots_by_id.end()) return;
+    const auto row = impl_->repo.get(camera_id);
+    if (!row) return;
+    it->second.name = row->name;
+}
+
 void CameraSupervisor::on_camera_removed(int64_t camera_id) {
     std::lock_guard lk(impl_->mu);
     auto it = impl_->slots_by_id.find(camera_id);

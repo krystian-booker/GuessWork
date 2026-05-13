@@ -77,7 +77,10 @@ public:
     // cameras table. on_camera_added starts the producer immediately if the
     // hardware is already connected; otherwise it'll start on the next arrival
     // event. on_camera_removed stops the producer if running.
+    // on_camera_updated re-reads the row so cached fields (e.g. name) stay in
+    // sync with the DB.
     void on_camera_added(int64_t camera_id);
+    void on_camera_updated(int64_t camera_id);
     void on_camera_removed(int64_t camera_id);
 
 private:

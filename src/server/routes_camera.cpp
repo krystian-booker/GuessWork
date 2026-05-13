@@ -177,6 +177,7 @@ void register_camera_routes(crow::SimpleApp&  app,
         try {
             const auto c = repo.update(id, parsed.name);
             if (!c) return error_response(404, "camera not found");
+            supervisor.on_camera_updated(c->id);
             return json_response(200, camera_to_json(*c, supervisor.is_online(c->id)));
         } catch (const DuplicateNameError& e) {
             return error_response(409, e.what());
