@@ -71,10 +71,24 @@ struct CameraSlot {
     std::string                        name;
     std::string                        serial;
     std::optional<std::string>         mode;         // GenICam VideoMode symbolic
+    gw::CameraSettingsValues           settings;     // persisted live-tunables
     std::unique_ptr<SpinnakerProducer> producer;     // null when offline
     std::shared_ptr<StreamConsumer>    stream;       // null when offline
     FpsSampler                         fps;
 };
+
+namespace {
+
+gw::CameraSettingsValues settings_from_row(const Camera& row) {
+    gw::CameraSettingsValues v;
+    v.gain_auto     = row.gain_auto;
+    v.gain          = row.gain;
+    v.exposure_auto = row.exposure_auto;
+    v.exposure      = row.exposure;
+    return v;
+}
+
+}  // namespace
 
 class SystemEventListener : public Spinnaker::InterfaceEventHandler {
 public:
@@ -134,10 +148,11 @@ void CameraSupervisor::Impl::load_db_into_slots_locked() {
     for (const auto& row : repo.list_all()) {
         if (row.serial.empty()) continue;   // legacy POC rows
         CameraSlot s;
-        s.id     = row.id;
-        s.name   = row.name;
-        s.serial = row.serial;
-        s.mode   = row.mode;
+        s.id       = row.id;
+        s.name     = row.name;
+        s.serial   = row.serial;
+        s.mode     = row.mode;
+        s.settings = settings_from_row(row);
         slots_by_id.emplace(row.id, std::move(s));
         id_by_serial[row.serial] = row.id;
     }
@@ -150,7 +165,8 @@ void CameraSupervisor::Impl::try_start_slot_locked(CameraSlot& slot, Spinnaker::
     binding->system = system;
     binding->cam    = cam;
 
-    auto producer = std::make_unique<SpinnakerProducer>(slot.name, slot.serial, slot.mode);
+    auto producer = std::make_unique<SpinnakerProducer>(
+        slot.name, slot.serial, slot.mode, slot.settings);
     producer->bind_camera(std::move(binding));
     try {
         producer->start();
@@ -167,6 +183,8 @@ void CameraSupervisor::Impl::try_start_slot_locked(CameraSlot& slot, Spinnaker::
     slot.producer = std::move(producer);
     slot.stream   = std::move(stream);
     slot.fps      = FpsSampler{};
+    // Cache what the camera actually accepted (post-clamp, post-quantization).
+    try { slot.settings = slot.producer->current_settings(); } catch (...) {}
     std::cerr << "CameraSupervisor: camera '" << slot.name
               << "' (serial " << slot.serial << ") online\n";
 }
@@ -335,10 +353,11 @@ void CameraSupervisor::on_camera_added(int64_t camera_id) {
     if (impl_->slots_by_id.count(camera_id)) return;  // already tracking
 
     CameraSlot s;
-    s.id     = row->id;
-    s.name   = row->name;
-    s.serial = row->serial;
-    s.mode   = row->mode;
+    s.id       = row->id;
+    s.name     = row->name;
+    s.serial   = row->serial;
+    s.mode     = row->mode;
+    s.settings = settings_from_row(*row);
     auto [it, _] = impl_->slots_by_id.emplace(row->id, std::move(s));
     impl_->id_by_serial[it->second.serial] = it->second.id;
 
@@ -365,7 +384,8 @@ void CameraSupervisor::on_camera_updated(int64_t camera_id) {
     if (!row) return;
 
     CameraSlot& slot = it->second;
-    slot.name = row->name;
+    slot.name     = row->name;
+    slot.settings = settings_from_row(*row);
 
     if (row->mode != slot.mode) {
         slot.mode = row->mode;
@@ -416,6 +436,32 @@ CameraSupervisor::current_mode_for(int64_t camera_id) {
         if (opt.name == *want) return opt;
     }
     return std::nullopt;
+}
+
+gw::CameraSettingsValues
+CameraSupervisor::apply_settings_live(int64_t                          camera_id,
+                                      const gw::CameraSettingsPatch&   patch) {
+    std::lock_guard lk(impl_->mu);
+    auto it = impl_->slots_by_id.find(camera_id);
+    if (it == impl_->slots_by_id.end()) {
+        throw std::runtime_error("apply_settings_live: unknown camera id");
+    }
+    CameraSlot& slot = it->second;
+    if (!slot.producer) {
+        throw std::runtime_error("apply_settings_live: camera is offline");
+    }
+    const auto applied = slot.producer->apply_settings_live(patch);
+    slot.settings = applied;
+    return applied;
+}
+
+std::optional<gw::CameraSettingsLimits>
+CameraSupervisor::settings_limits_for_id(int64_t camera_id) {
+    std::lock_guard lk(impl_->mu);
+    auto it = impl_->slots_by_id.find(camera_id);
+    if (it == impl_->slots_by_id.end()) return std::nullopt;
+    if (!it->second.producer) return std::nullopt;
+    return it->second.producer->cached_settings_limits();
 }
 
 std::optional<gw::VideoModeList>

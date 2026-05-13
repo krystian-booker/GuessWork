@@ -16,7 +16,28 @@ struct Camera {
     std::string                name;
     std::string                serial;
     std::optional<std::string> mode;       // GenICam VideoMode symbolic, or unset
+    // Live-tunable settings. Each unset (nullopt) means "use camera default" —
+    // we don't touch the corresponding GenICam node at start.
+    std::optional<bool>        gain_auto;
+    std::optional<double>      gain;
+    std::optional<bool>        exposure_auto;
+    std::optional<double>      exposure;
     int64_t                    created_at = 0;  // unix seconds
+};
+
+// Partial update payload. All fields are optional; an entirely-empty struct is
+// a no-op. The repository preserves any field left at nullopt.
+struct CameraUpdate {
+    std::optional<std::string> name;
+    std::optional<std::string> mode;
+    std::optional<bool>        gain_auto;
+    std::optional<double>      gain;
+    std::optional<bool>        exposure_auto;
+    std::optional<double>      exposure;
+
+    bool empty() const {
+        return !name && !mode && !gain_auto && !gain && !exposure_auto && !exposure;
+    }
 };
 
 // Thrown when a write violates the UNIQUE(name) constraint. Route layer maps
@@ -48,13 +69,11 @@ public:
                                  std::string_view                serial,
                                  std::optional<std::string_view> mode = std::nullopt);
 
-    // Partial update. Either field may be nullopt to leave it unchanged; an
-    // entirely-nullopt call returns the row as-is. Serial cannot be changed.
-    // Returns the updated row, or std::nullopt if id does not exist.
-    // Throws DuplicateNameError on UNIQUE conflict.
-    std::optional<Camera> update(int64_t                         id,
-                                 std::optional<std::string_view> name,
-                                 std::optional<std::string_view> mode);
+    // Partial update. Any field of CameraUpdate may be nullopt to leave it
+    // unchanged; an entirely-empty patch returns the row as-is. Serial cannot
+    // be changed. Returns the updated row, or std::nullopt if id does not
+    // exist. Throws DuplicateNameError on UNIQUE conflict.
+    std::optional<Camera> update(int64_t id, const CameraUpdate& patch);
 
     // Returns true if a row was deleted.
     bool                  remove(int64_t id);

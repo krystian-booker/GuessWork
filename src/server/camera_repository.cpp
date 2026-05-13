@@ -21,6 +21,21 @@ struct StmtGuard {
     throw std::runtime_error(std::string(what) + ": " + sqlite3_errmsg(h));
 }
 
+std::optional<double> column_real_opt(sqlite3_stmt* stmt, int idx) {
+    if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
+    return sqlite3_column_double(stmt, idx);
+}
+
+std::optional<bool> column_bool_opt(sqlite3_stmt* stmt, int idx) {
+    if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
+    return sqlite3_column_int(stmt, idx) != 0;
+}
+
+// Standard SELECT projection — keep column order in sync with read_row().
+constexpr const char* kSelectColumns =
+    "id, name, serial, mode, "
+    "gain_auto, gain, exposure_auto, exposure, created_at";
+
 Camera read_row(sqlite3_stmt* stmt) {
     Camera c;
     c.id         = sqlite3_column_int64(stmt, 0);
@@ -34,7 +49,11 @@ Camera read_row(sqlite3_stmt* stmt) {
         const auto* mode_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
         c.mode = mode_text ? std::string(mode_text) : std::string();
     }
-    c.created_at = sqlite3_column_int64(stmt, 4);
+    c.gain_auto     = column_bool_opt(stmt, 4);
+    c.gain          = column_real_opt(stmt, 5);
+    c.exposure_auto = column_bool_opt(stmt, 6);
+    c.exposure      = column_real_opt(stmt, 7);
+    c.created_at    = sqlite3_column_int64(stmt, 8);
     return c;
 }
 
@@ -55,9 +74,9 @@ bool err_mentions(sqlite3* h, std::string_view needle) {
 std::vector<Camera> CameraRepository::list_all() {
     return db_.with_handle([](sqlite3* h) {
         StmtGuard g;
-        if (sqlite3_prepare_v2(h,
-                               "SELECT id, name, serial, mode, created_at FROM cameras ORDER BY id;",
-                               -1, &g.stmt, nullptr) != SQLITE_OK) {
+        const std::string sql =
+            std::string("SELECT ") + kSelectColumns + " FROM cameras ORDER BY id;";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "list_all: prepare");
         }
 
@@ -75,9 +94,9 @@ std::vector<Camera> CameraRepository::list_all() {
 std::optional<Camera> CameraRepository::get(int64_t id) {
     return db_.with_handle([id](sqlite3* h) -> std::optional<Camera> {
         StmtGuard g;
-        if (sqlite3_prepare_v2(h,
-                               "SELECT id, name, serial, mode, created_at FROM cameras WHERE id = ?;",
-                               -1, &g.stmt, nullptr) != SQLITE_OK) {
+        const std::string sql =
+            std::string("SELECT ") + kSelectColumns + " FROM cameras WHERE id = ?;";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "get: prepare");
         }
         sqlite3_bind_int64(g.stmt, 1, id);
@@ -93,10 +112,9 @@ std::optional<Camera> CameraRepository::find_by_serial(std::string_view serial) 
     const std::string serial_str(serial);
     return db_.with_handle([&](sqlite3* h) -> std::optional<Camera> {
         StmtGuard g;
-        if (sqlite3_prepare_v2(
-                h,
-                "SELECT id, name, serial, mode, created_at FROM cameras WHERE serial = ?;",
-                -1, &g.stmt, nullptr) != SQLITE_OK) {
+        const std::string sql =
+            std::string("SELECT ") + kSelectColumns + " FROM cameras WHERE serial = ?;";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "find_by_serial: prepare");
         }
         sqlite3_bind_text(g.stmt, 1, serial_str.c_str(), -1, SQLITE_TRANSIENT);
@@ -117,11 +135,10 @@ Camera CameraRepository::create(std::string_view                name,
         mode ? std::optional<std::string>(std::string(*mode)) : std::nullopt;
     return db_.with_handle([&](sqlite3* h) {
         StmtGuard g;
-        if (sqlite3_prepare_v2(
-                h,
-                "INSERT INTO cameras (name, serial, mode) VALUES (?, ?, ?) "
-                "RETURNING id, name, serial, mode, created_at;",
-                -1, &g.stmt, nullptr) != SQLITE_OK) {
+        const std::string sql =
+            std::string("INSERT INTO cameras (name, serial, mode) VALUES (?, ?, ?) "
+                        "RETURNING ") + kSelectColumns + ";";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "create: prepare");
         }
         sqlite3_bind_text(g.stmt, 1, name_str.c_str(),   -1, SQLITE_TRANSIENT);
@@ -142,47 +159,53 @@ Camera CameraRepository::create(std::string_view                name,
     });
 }
 
-std::optional<Camera> CameraRepository::update(int64_t                         id,
-                                               std::optional<std::string_view> name,
-                                               std::optional<std::string_view> mode) {
-    // Both nullopt → no-op; return the current row (or nullopt if id missing).
-    if (!name && !mode) return get(id);
-
-    const std::optional<std::string> name_str =
-        name ? std::optional<std::string>(std::string(*name)) : std::nullopt;
-    const std::optional<std::string> mode_str =
-        mode ? std::optional<std::string>(std::string(*mode)) : std::nullopt;
+std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& patch) {
+    // Empty patch → no-op; return the current row (or nullopt if id missing).
+    if (patch.empty()) return get(id);
 
     return db_.with_handle([&](sqlite3* h) -> std::optional<Camera> {
         StmtGuard g;
-        // Build SET clause based on which fields are present. Mode allows
-        // explicit empty string == NULL (caller decides) — we treat any value
-        // with has_value() as an explicit set.
+
+        // Convention: an empty `mode` string clears the column (NULL). Numeric
+        // and bool optionals cannot be cleared back to NULL via this path.
         std::string sql = "UPDATE cameras SET ";
         bool first = true;
-        if (name_str) { sql += "name = ?"; first = false; }
-        if (mode_str) { if (!first) sql += ", "; sql += "mode = ?"; }
-        sql += " WHERE id = ? RETURNING id, name, serial, mode, created_at;";
+        auto add_col = [&](const char* expr) {
+            if (!first) sql += ", ";
+            sql += expr;
+            first = false;
+        };
+        if (patch.name)          add_col("name = ?");
+        if (patch.mode)          add_col("mode = ?");
+        if (patch.gain_auto)     add_col("gain_auto = ?");
+        if (patch.gain)          add_col("gain = ?");
+        if (patch.exposure_auto) add_col("exposure_auto = ?");
+        if (patch.exposure)      add_col("exposure = ?");
+        sql += " WHERE id = ? RETURNING ";
+        sql += kSelectColumns;
+        sql += ";";
 
         if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "update: prepare");
         }
         int idx = 1;
-        if (name_str) {
-            sqlite3_bind_text(g.stmt, idx++, name_str->c_str(), -1, SQLITE_TRANSIENT);
+        if (patch.name) {
+            sqlite3_bind_text(g.stmt, idx++, patch.name->c_str(), -1, SQLITE_TRANSIENT);
         }
-        if (mode_str) {
-            // Convention: empty string means "clear the mode" (NULL); any other
-            // string is an explicit set.
-            if (mode_str->empty()) sqlite3_bind_null(g.stmt, idx++);
-            else sqlite3_bind_text(g.stmt, idx++, mode_str->c_str(), -1, SQLITE_TRANSIENT);
+        if (patch.mode) {
+            if (patch.mode->empty()) sqlite3_bind_null(g.stmt, idx++);
+            else sqlite3_bind_text(g.stmt, idx++, patch.mode->c_str(), -1, SQLITE_TRANSIENT);
         }
+        if (patch.gain_auto)     sqlite3_bind_int   (g.stmt, idx++, *patch.gain_auto ? 1 : 0);
+        if (patch.gain)          sqlite3_bind_double(g.stmt, idx++, *patch.gain);
+        if (patch.exposure_auto) sqlite3_bind_int   (g.stmt, idx++, *patch.exposure_auto ? 1 : 0);
+        if (patch.exposure)      sqlite3_bind_double(g.stmt, idx++, *patch.exposure);
         sqlite3_bind_int64(g.stmt, idx, id);
 
         const int rc = sqlite3_step(g.stmt);
         if (rc == SQLITE_ROW) return read_row(g.stmt);
         if (rc == SQLITE_DONE) return std::nullopt;
-        if (is_unique_violation(rc) && name_str) throw DuplicateNameError(*name_str);
+        if (is_unique_violation(rc) && patch.name) throw DuplicateNameError(*patch.name);
         throw_sqlite(h, "update: step");
     });
 }

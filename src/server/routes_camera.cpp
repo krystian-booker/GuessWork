@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "producer/camera_settings.hpp"
 #include "server/camera_repository.hpp"
 #include "server/camera_supervisor.hpp"
 
@@ -28,6 +29,12 @@ crow::response error_response(int status, const std::string& message) {
     return json_response(status, std::move(body));
 }
 
+template <typename T>
+void put_opt(crow::json::wvalue& j, const char* key, const std::optional<T>& v) {
+    if (v) j[key] = *v;
+    else   j[key] = nullptr;
+}
+
 crow::json::wvalue camera_to_json(const Camera&                              c,
                                   bool                                       online,
                                   const std::optional<gw::VideoModeOption>&  current) {
@@ -43,8 +50,27 @@ crow::json::wvalue camera_to_json(const Camera&                              c,
     else                              j["mode_height"]  = nullptr;
     if (current && current->max_fps) j["mode_max_fps"] = *current->max_fps;
     else                              j["mode_max_fps"] = nullptr;
+    put_opt(j, "gain_auto",     c.gain_auto);
+    put_opt(j, "gain",          c.gain);
+    put_opt(j, "exposure_auto", c.exposure_auto);
+    put_opt(j, "exposure",      c.exposure);
     j["online"]     = online;
     j["created_at"] = c.created_at;
+    return j;
+}
+
+crow::json::wvalue range_to_json(const gw::CameraSettingRange& r) {
+    crow::json::wvalue j;
+    j["min"]  = r.min;
+    j["max"]  = r.max;
+    j["unit"] = r.unit;
+    return j;
+}
+
+crow::json::wvalue limits_to_json(const gw::CameraSettingsLimits& l) {
+    crow::json::wvalue j;
+    if (l.gain)     j["gain"]     = range_to_json(*l.gain);     else j["gain"]     = nullptr;
+    if (l.exposure) j["exposure"] = range_to_json(*l.exposure); else j["exposure"] = nullptr;
     return j;
 }
 
@@ -114,6 +140,25 @@ bool parse_optional_string(const crow::json::rvalue& body, const char* field,
     return true;
 }
 
+bool parse_optional_bool(const crow::json::rvalue& body, const char* field,
+                         std::optional<bool>& out, crow::response& err) {
+    if (!body.has(field)) { out = std::nullopt; return true; }
+    const auto t = body[field].t();
+    if (t == crow::json::type::True)  { out = true;  return true; }
+    if (t == crow::json::type::False) { out = false; return true; }
+    err = error_response(400, std::string("field must be a boolean: ") + field);
+    return false;
+}
+
+bool parse_optional_number(const crow::json::rvalue& body, const char* field,
+                           std::optional<double>& out, crow::response& err) {
+    if (!body.has(field)) { out = std::nullopt; return true; }
+    const auto t = body[field].t();
+    if (t == crow::json::type::Number) { out = body[field].d(); return true; }
+    err = error_response(400, std::string("field must be a number: ") + field);
+    return false;
+}
+
 struct CreateBody {
     std::string                name;
     std::string                serial;
@@ -139,8 +184,17 @@ CreateBody parse_create_body(const crow::request& req) {
 struct UpdateBody {
     std::optional<std::string> name;
     std::optional<std::string> mode;
+    std::optional<bool>        gain_auto;
+    std::optional<double>      gain;
+    std::optional<bool>        exposure_auto;
+    std::optional<double>      exposure;
     crow::response             error;
     bool                       ok = false;
+
+    bool has_settings() const {
+        return gain_auto || gain || exposure_auto || exposure;
+    }
+    bool empty() const { return !name && !mode && !has_settings(); }
 };
 
 UpdateBody parse_update_body(const crow::request& req) {
@@ -152,12 +206,25 @@ UpdateBody parse_update_body(const crow::request& req) {
     }
     if (!parse_optional_string(body, "name", r.name, r.error)) return r;
     if (!parse_optional_string(body, "mode", r.mode, r.error)) return r;
-    if (!r.name && !r.mode) {
-        r.error = error_response(400, "PUT body must include at least one of: name, mode");
+    if (!parse_optional_bool  (body, "gain_auto",     r.gain_auto,     r.error)) return r;
+    if (!parse_optional_number(body, "gain",          r.gain,          r.error)) return r;
+    if (!parse_optional_bool  (body, "exposure_auto", r.exposure_auto, r.error)) return r;
+    if (!parse_optional_number(body, "exposure",      r.exposure,      r.error)) return r;
+    if (r.empty()) {
+        r.error = error_response(400, "PUT body must include at least one updatable field");
         return r;
     }
     r.ok = true;
     return r;
+}
+
+gw::CameraSettingsPatch patch_from_body(const UpdateBody& b) {
+    gw::CameraSettingsPatch p;
+    p.gain_auto     = b.gain_auto;
+    p.gain          = b.gain;
+    p.exposure_auto = b.exposure_auto;
+    p.exposure      = b.exposure;
+    return p;
 }
 
 }  // namespace
@@ -250,13 +317,32 @@ void register_camera_routes(crow::SimpleApp&  app,
         auto parsed = parse_update_body(req);
         if (!parsed.ok) return std::move(parsed.error);
         try {
-            const std::optional<std::string_view> name_view =
-                parsed.name ? std::optional<std::string_view>(*parsed.name) : std::nullopt;
-            const std::optional<std::string_view> mode_view =
-                parsed.mode ? std::optional<std::string_view>(*parsed.mode) : std::nullopt;
-            const auto c = repo.update(id, name_view, mode_view);
+            // Push settings to the live producer first so we can persist the
+            // actually-applied values (post-clamp, post-quantization) instead
+            // of the raw request body. Skipped when the camera is offline —
+            // the DB write below still takes effect on next start().
+            if (parsed.has_settings() && supervisor.is_online(id)) {
+                const auto applied = supervisor.apply_settings_live(
+                    id, patch_from_body(parsed));
+                parsed.gain_auto     = applied.gain_auto;
+                parsed.gain          = applied.gain;
+                parsed.exposure_auto = applied.exposure_auto;
+                parsed.exposure      = applied.exposure;
+            }
+
+            CameraUpdate upd;
+            upd.name          = parsed.name;
+            upd.mode          = parsed.mode;
+            upd.gain_auto     = parsed.gain_auto;
+            upd.gain          = parsed.gain;
+            upd.exposure_auto = parsed.exposure_auto;
+            upd.exposure      = parsed.exposure;
+
+            const auto c = repo.update(id, upd);
             if (!c) return error_response(404, "camera not found");
+
             supervisor.on_camera_updated(c->id);
+
             const bool on = supervisor.is_online(c->id);
             return json_response(
                 200,
@@ -264,6 +350,18 @@ void register_camera_routes(crow::SimpleApp&  app,
                                on ? supervisor.current_mode_for(c->id) : std::nullopt));
         } catch (const DuplicateNameError& e) {
             return error_response(409, e.what());
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/cameras/<int>/settings/limits").methods("GET"_method)
+    ([&repo, &supervisor](int64_t id) {
+        try {
+            if (!repo.get(id))                  return error_response(404, "camera not found");
+            auto lim = supervisor.settings_limits_for_id(id);
+            if (!lim)                           return error_response(409, "camera is offline");
+            return json_response(200, limits_to_json(*lim));
         } catch (const std::exception& e) {
             return error_response(500, e.what());
         }

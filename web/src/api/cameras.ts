@@ -10,8 +10,31 @@ export interface Camera {
   mode_width: number | null
   mode_height: number | null
   mode_max_fps: number | null
+  // Live-tunable settings. null means "use camera default".
+  gain_auto: boolean | null
+  gain: number | null
+  exposure_auto: boolean | null
+  exposure: number | null
   online: boolean
   created_at: number
+}
+
+export interface SettingRange {
+  min: number
+  max: number
+  unit: string
+}
+
+export interface CameraSettingsLimits {
+  gain: SettingRange | null
+  exposure: SettingRange | null
+}
+
+export interface CameraSettingsPatch {
+  gain_auto?: boolean
+  gain?: number
+  exposure_auto?: boolean
+  exposure?: number
 }
 
 export interface AvailableCamera {
@@ -48,6 +71,10 @@ export async function listCameras(): Promise<Camera[]> {
   return asJson<Camera[]>(await fetch('/api/cameras'))
 }
 
+export async function getCamera(id: number): Promise<Camera> {
+  return asJson<Camera>(await fetch(`/api/cameras/${id}`))
+}
+
 export async function listAvailableCameras(): Promise<AvailableCamera[]> {
   return asJson<AvailableCamera[]>(await fetch('/api/cameras/available'))
 }
@@ -69,7 +96,7 @@ export async function createCamera(input: {
 
 export async function updateCamera(
   id: number,
-  patch: { name?: string; mode?: string },
+  patch: { name?: string; mode?: string } & CameraSettingsPatch,
 ): Promise<Camera> {
   const res = await fetch(`/api/cameras/${id}`, {
     method: 'PUT',
@@ -77,6 +104,14 @@ export async function updateCamera(
     body: JSON.stringify(patch),
   })
   return asJson<Camera>(res)
+}
+
+export async function getCameraSettingsLimits(
+  id: number,
+): Promise<CameraSettingsLimits> {
+  const res = await fetch(`/api/cameras/${id}/settings/limits`)
+  if (res.status === 409) throw new CameraOfflineError()
+  return asJson<CameraSettingsLimits>(res)
 }
 
 export async function deleteCamera(id: number): Promise<void> {

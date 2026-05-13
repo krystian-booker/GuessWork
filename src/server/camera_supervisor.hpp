@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "producer/camera_settings.hpp"
 #include "producer/spinnaker_video_modes.hpp"
 
 namespace gw::server {
@@ -101,6 +102,16 @@ public:
     // nullopt if the camera is offline, unknown, or its producer didn't cache
     // a matching entry.
     std::optional<gw::VideoModeOption> current_mode_for(int64_t camera_id);
+
+    // Apply a settings patch to a running camera. Returns the actually-applied
+    // values (post-clamp, post-quantization). Throws if the camera is offline
+    // — the route layer maps the exception to 409.
+    gw::CameraSettingsValues apply_settings_live(int64_t                          camera_id,
+                                                  const gw::CameraSettingsPatch&  patch);
+
+    // Cached min/max/unit for a running camera's settable nodes. nullopt if
+    // the camera is offline or unknown.
+    std::optional<gw::CameraSettingsLimits> settings_limits_for_id(int64_t camera_id);
 
 private:
     struct Impl;

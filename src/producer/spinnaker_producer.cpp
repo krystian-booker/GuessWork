@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -51,6 +52,143 @@ int64_t read_int_node(Spinnaker::GenApi::INodeMap& nm, const char* node_name) {
     return ptr->GetValue();
 }
 
+// Per-node helpers for the live-settings path. Each tolerates the node being
+// absent or non-readable so partial-support cameras drop fields silently
+// rather than fail the whole apply.
+
+std::optional<double> try_read_float(Spinnaker::GenApi::INodeMap& nm, const char* name) {
+    try {
+        Spinnaker::GenApi::CFloatPtr p = nm.GetNode(name);
+        if (Spinnaker::GenApi::IsReadable(p)) return p->GetValue();
+    } catch (...) {}
+    return std::nullopt;
+}
+
+// Anything other than "Off" (e.g. "Continuous", "Once") reads back as true.
+std::optional<bool> try_read_auto_enum(Spinnaker::GenApi::INodeMap& nm, const char* name) {
+    try {
+        Spinnaker::GenApi::CEnumerationPtr p = nm.GetNode(name);
+        if (!Spinnaker::GenApi::IsReadable(p)) return std::nullopt;
+        Spinnaker::GenApi::CEnumEntryPtr cur = p->GetCurrentEntry();
+        if (!Spinnaker::GenApi::IsReadable(cur)) return std::nullopt;
+        const std::string sym(cur->GetSymbolic().c_str());
+        return sym != "Off";
+    } catch (...) { return std::nullopt; }
+}
+
+// Returns the post-clamp, post-quantization readback value.
+std::optional<double> try_write_float(Spinnaker::GenApi::INodeMap& nm,
+                                      const char*                  name,
+                                      double                       value) {
+    try {
+        Spinnaker::GenApi::CFloatPtr p = nm.GetNode(name);
+        if (!Spinnaker::GenApi::IsWritable(p)) return std::nullopt;
+        const double lo = p->GetMin();
+        const double hi = p->GetMax();
+        if (value < lo) value = lo;
+        if (value > hi) value = hi;
+        p->SetValue(value);
+        return p->GetValue();
+    } catch (...) { return std::nullopt; }
+}
+
+std::optional<bool> try_write_auto_enum(Spinnaker::GenApi::INodeMap& nm,
+                                        const char*                  name,
+                                        bool                         on) {
+    try {
+        Spinnaker::GenApi::CEnumerationPtr p = nm.GetNode(name);
+        if (!Spinnaker::GenApi::IsWritable(p)) return std::nullopt;
+        Spinnaker::GenApi::CEnumEntryPtr entry =
+            p->GetEntryByName(on ? "Continuous" : "Off");
+        if (!Spinnaker::GenApi::IsReadable(entry)) return std::nullopt;
+        p->SetIntValue(entry->GetValue());
+        return try_read_auto_enum(nm, name);
+    } catch (...) { return std::nullopt; }
+}
+
+std::optional<CameraSettingRange> read_range(Spinnaker::GenApi::INodeMap& nm,
+                                             const char*                  name) {
+    try {
+        Spinnaker::GenApi::CFloatPtr p = nm.GetNode(name);
+        if (!Spinnaker::GenApi::IsReadable(p)) return std::nullopt;
+        CameraSettingRange r;
+        r.min  = p->GetMin();
+        r.max  = p->GetMax();
+        try { r.unit = std::string(p->GetUnit().c_str()); } catch (...) {}
+        return r;
+    } catch (...) { return std::nullopt; }
+}
+
+CameraSettingsValues read_all_settings(Spinnaker::GenApi::INodeMap& nm) {
+    CameraSettingsValues v;
+    v.gain_auto     = try_read_auto_enum(nm, "GainAuto");
+    v.gain          = try_read_float    (nm, "Gain");
+    v.exposure_auto = try_read_auto_enum(nm, "ExposureAuto");
+    v.exposure      = try_read_float    (nm, "ExposureTime");
+    return v;
+}
+
+CameraSettingsLimits read_all_limits(Spinnaker::GenApi::INodeMap& nm) {
+    CameraSettingsLimits l;
+    l.gain     = read_range(nm, "Gain");
+    l.exposure = read_range(nm, "ExposureTime");
+    return l;
+}
+
+// BlackLevelEnabled adds a pedestal that hurts AprilTag detection; we never
+// expose it as a setting, so force it off where the camera supports it.
+void try_disable_black_level(Spinnaker::GenApi::INodeMap& nm) {
+    try {
+        Spinnaker::GenApi::CBooleanPtr p = nm.GetNode("BlackLevelEnabled");
+        if (!Spinnaker::GenApi::IsWritable(p)) return;
+        p->SetValue(false);
+    } catch (...) {}
+}
+
+// Caller holds the nodemap mutex.
+CameraSettingsValues apply_patch_locked(Spinnaker::GenApi::INodeMap&   nm,
+                                        const CameraSettingsPatch&     patch) {
+    CameraSettingsValues out;
+
+    auto apply_auto_block = [&](const char*               auto_node,
+                                const char*               value_node,
+                                std::optional<bool>       auto_in,
+                                std::optional<double>     value_in,
+                                std::optional<bool>&      out_auto,
+                                std::optional<double>&    out_value) {
+        // Going auto→manual without an explicit value: seed the manual value
+        // from the current converged reading so we don't snap to a stale one.
+        std::optional<double> seeded_value = value_in;
+        if (auto_in && !*auto_in && !value_in) {
+            seeded_value = try_read_float(nm, value_node);
+        }
+        if (auto_in) {
+            out_auto = try_write_auto_enum(nm, auto_node, *auto_in);
+        }
+        if (seeded_value) {
+            out_value = try_write_float(nm, value_node, *seeded_value);
+            if (!out_value) {
+                out_value = try_read_float(nm, value_node);
+            }
+        } else {
+            out_value = try_read_float(nm, value_node);
+        }
+    };
+
+    apply_auto_block("GainAuto",     "Gain",
+                     patch.gain_auto,     patch.gain,
+                     out.gain_auto,       out.gain);
+    apply_auto_block("ExposureAuto", "ExposureTime",
+                     patch.exposure_auto, patch.exposure,
+                     out.exposure_auto,   out.exposure);
+
+    return out;
+}
+
+bool patch_is_empty(const CameraSettingsPatch& p) {
+    return !p.gain_auto && !p.gain && !p.exposure_auto && !p.exposure;
+}
+
 }  // namespace
 
 // -------------------------------------------------------------------------
@@ -65,8 +203,10 @@ struct SpinnakerProducer::Impl {
     std::string                              name;
     std::string                              serial;
     std::optional<std::string>               mode;
+    CameraSettingsValues                     initial_settings;
     FrameFormat                              format{};
     VideoModeList                            cached_modes;
+    CameraSettingsLimits                     cached_limits;
     std::optional<SpinnakerUserBufferPool>   user_pool;
     FrameChannel                             channel;
     std::unique_ptr<SpinnakerCameraBinding>  binding;       // system + cam smart ptrs
@@ -75,13 +215,20 @@ struct SpinnakerProducer::Impl {
     std::atomic<bool>                        owner_user{false};
     std::thread                              worker;
     uint64_t                                 sequence_counter = 0;
+    // Serializes nodemap writes between apply_settings_live() and the start()
+    // initial-apply path. The capture loop does NOT take this mutex —
+    // GetNextImage is independent of nodemap state and we must not stall a
+    // slider write behind a frame timeout.
+    std::mutex                               nodemap_mu;
 
     std::atomic<uint64_t>                    total_published{0};
     std::atomic<uint64_t>                    total_dropped{0};
     std::atomic<uint64_t>                    total_incomplete{0};
 
-    Impl(std::string n, std::string s, std::optional<std::string> m)
-        : name(std::move(n)), serial(std::move(s)), mode(std::move(m)) {}
+    Impl(std::string n, std::string s,
+         std::optional<std::string> m, CameraSettingsValues init)
+        : name(std::move(n)), serial(std::move(s)), mode(std::move(m)),
+          initial_settings(std::move(init)) {}
 
     void capture_loop();
 };
@@ -92,8 +239,10 @@ struct SpinnakerProducer::Impl {
 
 SpinnakerProducer::SpinnakerProducer(std::string                name,
                                      std::string                serial,
-                                     std::optional<std::string> mode)
-    : impl_(std::make_unique<Impl>(std::move(name), std::move(serial), std::move(mode))) {}
+                                     std::optional<std::string> mode,
+                                     CameraSettingsValues       initial_settings)
+    : impl_(std::make_unique<Impl>(std::move(name), std::move(serial),
+                                   std::move(mode), std::move(initial_settings))) {}
 
 SpinnakerProducer::~SpinnakerProducer() {
     try {
@@ -109,6 +258,28 @@ FrameFormat          SpinnakerProducer::format() const { return impl_->format; }
 FrameChannel&        SpinnakerProducer::channel()      { return impl_->channel; }
 const VideoModeList& SpinnakerProducer::cached_video_modes() const {
     return impl_->cached_modes;
+}
+
+const CameraSettingsLimits& SpinnakerProducer::cached_settings_limits() const {
+    return impl_->cached_limits;
+}
+
+CameraSettingsValues SpinnakerProducer::apply_settings_live(const CameraSettingsPatch& patch) {
+    if (!impl_->streaming.load() || !impl_->binding || !impl_->binding->cam) {
+        throw std::runtime_error("apply_settings_live: producer not streaming");
+    }
+    std::lock_guard<std::mutex> lk(impl_->nodemap_mu);
+    Spinnaker::GenApi::INodeMap& nm = impl_->binding->cam->GetNodeMap();
+    return apply_patch_locked(nm, patch);
+}
+
+CameraSettingsValues SpinnakerProducer::current_settings() {
+    if (!impl_->streaming.load() || !impl_->binding || !impl_->binding->cam) {
+        throw std::runtime_error("current_settings: producer not streaming");
+    }
+    std::lock_guard<std::mutex> lk(impl_->nodemap_mu);
+    Spinnaker::GenApi::INodeMap& nm = impl_->binding->cam->GetNodeMap();
+    return read_all_settings(nm);
 }
 
 void SpinnakerProducer::bind_camera(std::unique_ptr<SpinnakerCameraBinding> binding) {
@@ -180,6 +351,22 @@ void SpinnakerProducer::start() {
 
         cam->BeginAcquisition();
         impl_->streaming.store(true);
+
+        // Best-effort initial setup against a now-streaming camera. A
+        // partial-support camera should still stream if any of this fails.
+        {
+            std::lock_guard<std::mutex> lk(impl_->nodemap_mu);
+            impl_->cached_limits = read_all_limits(dev_nm);
+            try_disable_black_level(dev_nm);
+            if (!patch_is_empty(impl_->initial_settings)) {
+                try {
+                    (void)apply_patch_locked(dev_nm, impl_->initial_settings);
+                } catch (const Spinnaker::Exception& e) {
+                    std::cerr << "[" << impl_->name << "] initial settings apply failed: "
+                              << e.what() << "\n";
+                }
+            }
+        }
     } catch (const Spinnaker::Exception& e) {
         // Best-effort cleanup so a retry of start() (or destructor) is safe.
         try { cam->DeInit(); } catch (...) {}

@@ -24,11 +24,15 @@ void exec_or_throw(sqlite3* db, const char* sql) {
 // (or call Database::remove_files) to start over.
 constexpr const char* kSchemaCameras =
     "CREATE TABLE IF NOT EXISTS cameras ("
-    "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  name       TEXT    NOT NULL UNIQUE,"
-    "  serial     TEXT    NOT NULL UNIQUE,"
-    "  mode       TEXT,"
-    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name          TEXT    NOT NULL UNIQUE,"
+    "  serial        TEXT    NOT NULL UNIQUE,"
+    "  mode          TEXT,"
+    "  gain_auto     INTEGER,"
+    "  gain          REAL,"
+    "  exposure_auto INTEGER,"
+    "  exposure      REAL,"
+    "  created_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 
 }  // namespace

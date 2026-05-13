@@ -8,6 +8,7 @@
 
 #include "core/frame_channel.hpp"
 #include "core/frame_format.hpp"
+#include "producer/camera_settings.hpp"
 #include "producer/producer.hpp"
 #include "producer/spinnaker_video_modes.hpp"
 
@@ -33,7 +34,8 @@ class SpinnakerProducer final : public IProducer {
 public:
     SpinnakerProducer(std::string                name,
                       std::string                serial,
-                      std::optional<std::string> mode = std::nullopt);
+                      std::optional<std::string> mode             = std::nullopt,
+                      CameraSettingsValues       initial_settings = {});
     ~SpinnakerProducer() override;
 
     SpinnakerProducer(const SpinnakerProducer&)            = delete;
@@ -56,6 +58,21 @@ public:
     // Modes enumerated during start(). Returns an empty {supported=false,...}
     // if start() hasn't run or failed before the cache was populated.
     const VideoModeList& cached_video_modes() const;
+
+    // Min/max/unit for each settable node, populated during start(). Returns
+    // an all-nullopt struct if start() hasn't run yet.
+    const CameraSettingsLimits& cached_settings_limits() const;
+
+    // Apply a settings patch to the running camera. Performs auto→manual
+    // value seeding when an auto flag goes false without an accompanying
+    // explicit value. Returns the actually-applied values (which the caller
+    // should persist to the DB to keep the stored state in sync with reality).
+    // Throws if start() has not been called or the camera is gone.
+    CameraSettingsValues apply_settings_live(const CameraSettingsPatch& patch);
+
+    // Re-reads every settable node from the camera and returns the current
+    // applied state.
+    CameraSettingsValues current_settings();
 
 private:
     struct Impl;

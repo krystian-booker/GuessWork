@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchStatus, type Status } from '../api/status'
 import Stream from '../Stream'
+import CameraSettingsPanel from '../components/CameraSettingsPanel'
 
 const inputStyle: React.CSSProperties = {
   padding: '6px 10px',
@@ -79,7 +80,22 @@ export default function StreamPage() {
       </div>
 
       {selectedId !== null ? (
-        <Stream cameraId={selectedId} />
+        <div
+          style={{
+            display: 'flex',
+            gap: 16,
+            alignItems: 'flex-start',
+            flexWrap: 'wrap',
+            marginBottom: 24,
+          }}
+        >
+          <div style={{ flex: '0 1 auto' }}>
+            <Stream cameraId={selectedId} />
+          </div>
+          <div style={{ flex: '1 1 320px', maxWidth: 360 }}>
+            <CameraSettingsPanel cameraId={selectedId} />
+          </div>
+        </div>
       ) : (
         <p style={{ color: '#666' }}>
           No cameras online. Add one on the <a href="/cameras">Cameras</a> page or plug a camera in.

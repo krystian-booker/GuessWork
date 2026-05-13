@@ -120,7 +120,8 @@ TEST_F(CameraRepositoryTest, FindBySerialMissingReturnsNullopt) {
 
 TEST_F(CameraRepositoryTest, UpdateChangesName) {
     const auto c       = repo_->create("front", "SN001");
-    const auto updated = repo_->update(c.id, std::string_view("front-left"), std::nullopt);
+    CameraUpdate u; u.name = "front-left";
+    const auto updated = repo_->update(c.id, u);
     ASSERT_TRUE(updated.has_value());
     EXPECT_EQ(updated->name,   "front-left");
     EXPECT_EQ(updated->serial, "SN001");
@@ -132,20 +133,21 @@ TEST_F(CameraRepositoryTest, UpdateChangesName) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateMissingIdReturnsNullopt) {
-    EXPECT_FALSE(
-        repo_->update(9999, std::string_view("ghost"), std::nullopt).has_value());
+    CameraUpdate u; u.name = "ghost";
+    EXPECT_FALSE(repo_->update(9999, u).has_value());
 }
 
 TEST_F(CameraRepositoryTest, UpdateToExistingNameThrows) {
     repo_->create("front", "SN001");
     const auto rear = repo_->create("rear", "SN002");
-    EXPECT_THROW(repo_->update(rear.id, std::string_view("front"), std::nullopt),
-                 DuplicateNameError);
+    CameraUpdate u; u.name = "front";
+    EXPECT_THROW(repo_->update(rear.id, u), DuplicateNameError);
 }
 
 TEST_F(CameraRepositoryTest, UpdateModeOnly) {
     const auto c = repo_->create("front", "SN001");
-    const auto updated = repo_->update(c.id, std::nullopt, std::string_view("Mode1"));
+    CameraUpdate u; u.mode = "Mode1";
+    const auto updated = repo_->update(c.id, u);
     ASSERT_TRUE(updated.has_value());
     EXPECT_EQ(updated->name, "front");        // unchanged
     ASSERT_TRUE(updated->mode.has_value());
@@ -154,8 +156,8 @@ TEST_F(CameraRepositoryTest, UpdateModeOnly) {
 
 TEST_F(CameraRepositoryTest, UpdateNameAndMode) {
     const auto c = repo_->create("front", "SN001");
-    const auto updated = repo_->update(
-        c.id, std::string_view("front-left"), std::string_view("Mode5"));
+    CameraUpdate u; u.name = "front-left"; u.mode = "Mode5";
+    const auto updated = repo_->update(c.id, u);
     ASSERT_TRUE(updated.has_value());
     EXPECT_EQ(updated->name, "front-left");
     ASSERT_TRUE(updated->mode.has_value());
@@ -164,12 +166,92 @@ TEST_F(CameraRepositoryTest, UpdateNameAndMode) {
 
 TEST_F(CameraRepositoryTest, UpdateNeitherIsNoOpReturningCurrentRow) {
     const auto c = repo_->create("front", "SN001", std::string_view("Mode0"));
-    const auto unchanged = repo_->update(c.id, std::nullopt, std::nullopt);
+    const auto unchanged = repo_->update(c.id, CameraUpdate{});
     ASSERT_TRUE(unchanged.has_value());
     EXPECT_EQ(unchanged->id, c.id);
     EXPECT_EQ(unchanged->name, "front");
     ASSERT_TRUE(unchanged->mode.has_value());
     EXPECT_EQ(*unchanged->mode, "Mode0");
+}
+
+TEST_F(CameraRepositoryTest, CreateLeavesSettingsNull) {
+    const auto c = repo_->create("front", "SN001");
+    EXPECT_FALSE(c.gain_auto.has_value());
+    EXPECT_FALSE(c.gain.has_value());
+    EXPECT_FALSE(c.exposure_auto.has_value());
+    EXPECT_FALSE(c.exposure.has_value());
+}
+
+TEST_F(CameraRepositoryTest, UpdateGainAutoOnlyRoundTrips) {
+    const auto c = repo_->create("front", "SN001");
+    CameraUpdate u; u.gain_auto = true;
+    const auto upd = repo_->update(c.id, u);
+    ASSERT_TRUE(upd.has_value());
+    ASSERT_TRUE(upd->gain_auto.has_value());
+    EXPECT_TRUE(*upd->gain_auto);
+    EXPECT_FALSE(upd->gain.has_value());
+}
+
+TEST_F(CameraRepositoryTest, UpdateGainAutoAndValueRoundTrips) {
+    const auto c = repo_->create("front", "SN001");
+    CameraUpdate u; u.gain_auto = false; u.gain = 12.5;
+    const auto upd = repo_->update(c.id, u);
+    ASSERT_TRUE(upd.has_value());
+    ASSERT_TRUE(upd->gain_auto.has_value());
+    EXPECT_FALSE(*upd->gain_auto);
+    ASSERT_TRUE(upd->gain.has_value());
+    EXPECT_DOUBLE_EQ(*upd->gain, 12.5);
+}
+
+TEST_F(CameraRepositoryTest, UpdateExposureRoundTrips) {
+    const auto c = repo_->create("front", "SN001");
+    CameraUpdate u; u.exposure_auto = false; u.exposure = 8333.0;
+    const auto upd = repo_->update(c.id, u);
+    ASSERT_TRUE(upd.has_value());
+    ASSERT_TRUE(upd->exposure_auto.has_value());
+    EXPECT_FALSE(*upd->exposure_auto);
+    ASSERT_TRUE(upd->exposure.has_value());
+    EXPECT_DOUBLE_EQ(*upd->exposure, 8333.0);
+}
+
+TEST_F(CameraRepositoryTest, UpdateAllSettingsAtOnce) {
+    const auto c = repo_->create("front", "SN001");
+    CameraUpdate u;
+    u.gain_auto     = false;
+    u.gain          = 6.0;
+    u.exposure_auto = false;
+    u.exposure      = 16666.0;
+    const auto upd = repo_->update(c.id, u);
+    ASSERT_TRUE(upd.has_value());
+    EXPECT_EQ(*upd->gain_auto,     false);
+    EXPECT_DOUBLE_EQ(*upd->gain,          6.0);
+    EXPECT_EQ(*upd->exposure_auto, false);
+    EXPECT_DOUBLE_EQ(*upd->exposure,      16666.0);
+
+    const auto refetched = repo_->get(c.id);
+    ASSERT_TRUE(refetched.has_value());
+    EXPECT_DOUBLE_EQ(*refetched->gain,     6.0);
+    EXPECT_DOUBLE_EQ(*refetched->exposure, 16666.0);
+}
+
+TEST_F(CameraRepositoryTest, UpdatePartialSettingsLeavesOthersUntouched) {
+    const auto c = repo_->create("front", "SN001");
+    {
+        CameraUpdate u; u.gain = 10.0; u.exposure = 5000.0;
+        repo_->update(c.id, u);
+    }
+    {
+        CameraUpdate u; u.gain_auto = true;
+        const auto upd = repo_->update(c.id, u);
+        ASSERT_TRUE(upd.has_value());
+        ASSERT_TRUE(upd->gain_auto.has_value());
+        EXPECT_TRUE(*upd->gain_auto);
+        // gain + exposure from the previous update must survive.
+        ASSERT_TRUE(upd->gain.has_value());
+        EXPECT_DOUBLE_EQ(*upd->gain, 10.0);
+        ASSERT_TRUE(upd->exposure.has_value());
+        EXPECT_DOUBLE_EQ(*upd->exposure, 5000.0);
+    }
 }
 
 TEST_F(CameraRepositoryTest, ListAllReturnsMode) {
