@@ -25,7 +25,6 @@ The vendored libdatachannel stack (libsrtp, libjuice, mbedtls/plog) is configure
 ## Run
 
 - `./build/guesswork` — headless: starts the camera pipeline, the WebRTC stream encoder, and the Crow HTTP server. Flags: `--port`, `--stream-width`, `--stream-height`, `--stream-fps`, `--stream-bitrate`. SQLite DB at `$HOME/.guesswork/guesswork.db` (auto-created).
-- `./build/test_preview` — the windowed AppKit/Metal preview app; useful for verifying the camera path without the HTTP/WebRTC layer.
 - `cd web && npm run dev` — Vite on :5173, proxies `/api` → `:8080`. Use this for frontend dev against a separately-running `guesswork`.
 
 ## Test

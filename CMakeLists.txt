@@ -99,15 +99,6 @@ target_link_libraries(gw_consumer PUBLIC gw_core
     "-framework CoreVideo"
 )
 
-add_library(gw_app
-    src/app/preview_window.mm
-)
-target_link_libraries(gw_app PUBLIC gw_core
-    "-framework AppKit"
-    "-framework QuartzCore"
-    "-framework Metal"
-)
-
 # ----------------------------------------------------------------------------
 # Video encoder (Mono8 -> NV12 + H.264 via VideoToolbox)
 # ----------------------------------------------------------------------------
@@ -202,18 +193,6 @@ target_link_libraries(guesswork PRIVATE
     gw_server
     gw_producer
     gw_core
-)
-
-# ----------------------------------------------------------------------------
-# Test preview app (windowed Metal preview, equivalent to the old main.mm)
-# ----------------------------------------------------------------------------
-add_executable(test_preview apps/test_preview/main.mm)
-target_link_libraries(test_preview PRIVATE
-    gw_app
-    gw_consumer
-    gw_producer
-    gw_core
-    "-framework AppKit"
 )
 
 # ----------------------------------------------------------------------------
