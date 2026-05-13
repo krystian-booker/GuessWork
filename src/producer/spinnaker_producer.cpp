@@ -1,25 +1,16 @@
 #include "producer/spinnaker_producer.hpp"
+#include "producer/spinnaker_producer_internal.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
 #include <CoreVideo/CoreVideo.h>
 
-// Spinnaker's SPINNAKER_DEPRECATED_CLASS macro emits
-//   [[deprecated(...)]] __attribute__((visibility("default"))) class
-// which recent Apple Clang rejects as "misplaced attributes". We don't use
-// any deprecated APIs, so we pre-include the SDK's platform header (which
-// defines the macro), then redefine it to strip the deprecation attribute
-// before the rest of the SDK headers are pulled in.
-#include <SpinnakerPlatform.h>
-#undef  SPINNAKER_DEPRECATED_CLASS
-#define SPINNAKER_DEPRECATED_CLASS(msg) class SPINNAKER_API
-
-#include <Spinnaker.h>
 #include <SpinGenApi/SpinnakerGenApi.h>
 
 #include "core/clock.hpp"
@@ -35,8 +26,6 @@ namespace {
 // or two consumer in-flight frames.
 constexpr uint32_t kPoolCapacity = 6;
 constexpr uint64_t kGetNextImageTimeoutMs = 1000;
-
-// Helpers ------------------------------------------------------------------
 
 void set_enum_node(Spinnaker::GenApi::INodeMap& nm,
                    const char*                 node_name,
@@ -68,16 +57,19 @@ int64_t read_int_node(Spinnaker::GenApi::INodeMap& nm, const char* node_name) {
 // -------------------------------------------------------------------------
 
 struct SpinnakerProducer::Impl {
+    // Declaration order is load-bearing: `channel` must be destroyed BEFORE
+    // `user_pool` because the channel may hold a Frame whose recycle callback
+    // points back into the pool. C++ destroys members in reverse declaration
+    // order, so user_pool is listed first.
     std::string                              name;
+    std::string                              serial;
     FrameFormat                              format{};
-    FrameChannel                             channel;
     std::optional<SpinnakerUserBufferPool>   user_pool;
-    Spinnaker::SystemPtr                     system;
-    Spinnaker::CameraList                    cam_list;
-    Spinnaker::CameraPtr                     cam;
+    FrameChannel                             channel;
+    std::unique_ptr<SpinnakerCameraBinding>  binding;       // system + cam smart ptrs
     std::atomic<bool>                        stop_requested{false};
     std::atomic<bool>                        streaming{false};
-    std::atomic<bool>                        owner_user{false};   // true once SetBufferOwnership(USER) succeeds
+    std::atomic<bool>                        owner_user{false};
     std::thread                              worker;
     uint64_t                                 sequence_counter = 0;
 
@@ -85,7 +77,7 @@ struct SpinnakerProducer::Impl {
     std::atomic<uint64_t>                    total_dropped{0};
     std::atomic<uint64_t>                    total_incomplete{0};
 
-    explicit Impl(std::string n) : name(std::move(n)) {}
+    Impl(std::string n, std::string s) : name(std::move(n)), serial(std::move(s)) {}
 
     void capture_loop();
 };
@@ -94,8 +86,8 @@ struct SpinnakerProducer::Impl {
 // Public API
 // -------------------------------------------------------------------------
 
-SpinnakerProducer::SpinnakerProducer(std::string name)
-    : impl_(std::make_unique<Impl>(std::move(name))) {}
+SpinnakerProducer::SpinnakerProducer(std::string name, std::string serial)
+    : impl_(std::make_unique<Impl>(std::move(name), std::move(serial))) {}
 
 SpinnakerProducer::~SpinnakerProducer() {
     try {
@@ -105,47 +97,35 @@ SpinnakerProducer::~SpinnakerProducer() {
     }
 }
 
-std::string_view SpinnakerProducer::name() const   { return impl_->name; }
+std::string_view SpinnakerProducer::name()   const { return impl_->name; }
+std::string_view SpinnakerProducer::serial() const { return impl_->serial; }
 FrameFormat      SpinnakerProducer::format() const { return impl_->format; }
 FrameChannel&    SpinnakerProducer::channel()      { return impl_->channel; }
 
+void SpinnakerProducer::bind_camera(std::unique_ptr<SpinnakerCameraBinding> binding) {
+    if (impl_->streaming.load()) {
+        throw std::runtime_error("SpinnakerProducer::bind_camera called while streaming");
+    }
+    impl_->binding = std::move(binding);
+}
+
 void SpinnakerProducer::start() {
     if (impl_->streaming.load()) return;
-
-    impl_->system = Spinnaker::System::GetInstance();
-    const Spinnaker::LibraryVersion v = impl_->system->GetLibraryVersion();
-    std::cout << "Spinnaker library version: " << v.major << "." << v.minor << "." << v.type
-              << "." << v.build << "\n";
-
-    impl_->cam_list = impl_->system->GetCameras();
-    const unsigned int n = impl_->cam_list.GetSize();
-    std::cout << "Cameras detected: " << n << "\n";
-    if (n == 0) {
-        impl_->cam_list.Clear();
-        impl_->system->ReleaseInstance();
-        impl_->system = nullptr;
-        throw std::runtime_error("No Spinnaker cameras detected.");
+    if (!impl_->binding || !impl_->binding->cam) {
+        throw std::runtime_error("SpinnakerProducer::start without bound camera");
     }
 
-    impl_->cam = impl_->cam_list.GetByIndex(0);
+    Spinnaker::CameraPtr& cam = impl_->binding->cam;
 
     try {
-        // Read serial from the TL-device nodemap (available before Init()).
-        Spinnaker::GenApi::INodeMap& tl_dev_nm = impl_->cam->GetTLDeviceNodeMap();
-        Spinnaker::GenApi::CStringPtr serial   = tl_dev_nm.GetNode("DeviceSerialNumber");
-        if (Spinnaker::GenApi::IsReadable(serial)) {
-            std::cout << "Camera serial: " << serial->GetValue() << "\n";
-        }
-
-        impl_->cam->Init();
+        cam->Init();
 
         // Force NewestOnly buffer mode on the TL stream.
-        Spinnaker::GenApi::INodeMap& tl_stream_nm = impl_->cam->GetTLStreamNodeMap();
+        Spinnaker::GenApi::INodeMap& tl_stream_nm = cam->GetTLStreamNodeMap();
         set_enum_node(tl_stream_nm, "StreamBufferHandlingMode", "NewestOnly");
-        std::cout << "Stream buffer handling mode: NewestOnly\n";
 
         // Force Mono8 on the device.
-        Spinnaker::GenApi::INodeMap& dev_nm = impl_->cam->GetNodeMap();
+        Spinnaker::GenApi::INodeMap& dev_nm = cam->GetNodeMap();
         set_enum_node(dev_nm, "PixelFormat", "Mono8");
 
         const int64_t w = read_int_node(dev_nm, "Width");
@@ -156,15 +136,13 @@ void SpinnakerProducer::start() {
             .pixel_format = kCVPixelFormatType_OneComponent8,
         };
         const int64_t payload = read_int_node(dev_nm, "PayloadSize");
-        std::cout << "Resolution: " << w << "x" << h << " Mono8 (payload " << payload << " B)\n";
+        std::cout << "[" << impl_->name << "/" << impl_->serial << "] "
+                  << w << "x" << h << " Mono8 (payload " << payload << " B)\n";
 
-        // Allocate the user-buffer pool. Buffers are 1024-byte rounded; their
-        // IOSurface base addresses go straight to Spinnaker.
         impl_->user_pool.emplace(impl_->format, kPoolCapacity, static_cast<uint64_t>(payload));
 
         // Stride sanity: for Mono8 with no row padding, Spinnaker writes
-        // `width` bytes/row and our IOSurface must match. PayloadSize == w*h
-        // also confirms no per-row Spinnaker padding.
+        // `width` bytes/row and our IOSurface must match.
         const size_t bpr = impl_->user_pool->bytes_per_row();
         if (bpr != static_cast<size_t>(w)) {
             throw std::runtime_error(
@@ -177,26 +155,19 @@ void SpinnakerProducer::start() {
                 ") does not match width*height (" + std::to_string(w * h) + ")");
         }
 
-        // Hand our IOSurface base addresses to Spinnaker as DMA targets.
         auto addrs = impl_->user_pool->base_addresses();
-        impl_->cam->SetBufferOwnership(Spinnaker::SPINNAKER_BUFFER_OWNERSHIP_USER);
+        cam->SetBufferOwnership(Spinnaker::SPINNAKER_BUFFER_OWNERSHIP_USER);
         impl_->owner_user.store(true);
-        impl_->cam->SetUserBuffers(addrs.data(),
-                                   static_cast<uint64_t>(addrs.size()),
-                                   impl_->user_pool->buffer_size());
-        std::cout << "User-buffer DMA enabled (" << addrs.size() << " buffers x "
-                  << impl_->user_pool->buffer_size() << " B)\n";
+        cam->SetUserBuffers(addrs.data(),
+                            static_cast<uint64_t>(addrs.size()),
+                            impl_->user_pool->buffer_size());
 
-        impl_->cam->BeginAcquisition();
+        cam->BeginAcquisition();
         impl_->streaming.store(true);
-        std::cout << "Streaming...\n";
     } catch (const Spinnaker::Exception& e) {
-        // Best-effort cleanup so a retry of start() (or main's destructor) is safe.
-        try { impl_->cam->DeInit(); } catch (...) {}
-        impl_->cam = nullptr;
-        impl_->cam_list.Clear();
-        impl_->system->ReleaseInstance();
-        impl_->system = nullptr;
+        // Best-effort cleanup so a retry of start() (or destructor) is safe.
+        try { cam->DeInit(); } catch (...) {}
+        impl_->user_pool.reset();
         throw std::runtime_error(std::string("Spinnaker error during start(): ") + e.what());
     }
 
@@ -210,27 +181,23 @@ void SpinnakerProducer::stop() {
         impl_->stop_requested.store(true);
         impl_->worker.join();
     }
-    if (impl_->streaming.exchange(false)) {
-        try { impl_->cam->EndAcquisition(); } catch (...) {}
+    if (impl_->binding && impl_->binding->cam) {
+        Spinnaker::CameraPtr& cam = impl_->binding->cam;
+        if (impl_->streaming.exchange(false)) {
+            try { cam->EndAcquisition(); } catch (...) {}
+        }
+        if (impl_->owner_user.exchange(false)) {
+            try {
+                cam->SetBufferOwnership(Spinnaker::SPINNAKER_BUFFER_OWNERSHIP_SYSTEM);
+            } catch (...) {}
+        }
+        try { cam->DeInit(); } catch (...) {}
     }
-    // Restore default buffer ownership BEFORE DeInit so the camera comes back
-    // clean on the next launch (otherwise Spinnaker may complain about stale
-    // user buffers from a previous session).
-    if (impl_->owner_user.exchange(false)) {
-        try {
-            impl_->cam->SetBufferOwnership(Spinnaker::SPINNAKER_BUFFER_OWNERSHIP_SYSTEM);
-        } catch (...) {}
-    }
-    if (impl_->cam) {
-        try { impl_->cam->DeInit(); } catch (...) {}
-    }
-    impl_->user_pool.reset();
-    impl_->cam = nullptr;
-    impl_->cam_list.Clear();
-    if (impl_->system) {
-        impl_->system->ReleaseInstance();
-        impl_->system = nullptr;
-    }
+    // Do NOT reset user_pool here: the FrameChannel may still hold a Frame
+    // whose recycle callback points back into the pool. Pool destruction is
+    // deferred to ~Impl, where the channel is destroyed first (member
+    // declaration order is load-bearing).
+    impl_->binding.reset();   // releases CameraPtr/SystemPtr refcounts
 }
 
 // -------------------------------------------------------------------------
@@ -238,12 +205,13 @@ void SpinnakerProducer::stop() {
 // -------------------------------------------------------------------------
 
 void SpinnakerProducer::Impl::capture_loop() {
+    Spinnaker::CameraPtr& cam = binding->cam;
     while (!stop_requested.load(std::memory_order_acquire)) {
         Spinnaker::ImagePtr img;
         try {
             img = cam->GetNextImage(kGetNextImageTimeoutMs);
         } catch (const Spinnaker::Exception& e) {
-            std::cerr << "Spinnaker GetNextImage failed: " << e.what() << "\n";
+            std::cerr << "[" << name << "] Spinnaker GetNextImage failed: " << e.what() << "\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -254,14 +222,10 @@ void SpinnakerProducer::Impl::capture_loop() {
             continue;
         }
 
-        // Read camera-side metadata before transferring the ImagePtr to the
-        // pool — once moved the local `img` is empty.
         const uint64_t camera_ts = static_cast<uint64_t>(img->GetTimeStamp());
 
         Frame* f = user_pool->checkout(std::move(img));
         if (!f) {
-            // Pointer returned by GetNextImage didn't match any of our slots —
-            // would indicate Spinnaker handed us a buffer we don't own.
             total_dropped.fetch_add(1, std::memory_order_relaxed);
             continue;
         }

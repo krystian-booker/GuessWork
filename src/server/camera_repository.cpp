@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "server/database.hpp"
 
@@ -25,7 +26,9 @@ Camera read_row(sqlite3_stmt* stmt) {
     c.id         = sqlite3_column_int64(stmt, 0);
     const auto* name_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
     c.name       = name_text ? name_text : "";
-    c.created_at = sqlite3_column_int64(stmt, 2);
+    const auto* serial_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    c.serial     = serial_text ? serial_text : "";
+    c.created_at = sqlite3_column_int64(stmt, 3);
     return c;
 }
 
@@ -33,13 +36,22 @@ bool is_unique_violation(int rc) {
     return rc == SQLITE_CONSTRAINT_UNIQUE || rc == SQLITE_CONSTRAINT;
 }
 
+// SQLite's error message for a UNIQUE violation names the offending column,
+// e.g. "UNIQUE constraint failed: cameras.name". We use that to map back to
+// either DuplicateNameError or DuplicateSerialError.
+bool err_mentions(sqlite3* h, std::string_view needle) {
+    const char* msg = sqlite3_errmsg(h);
+    return msg && std::string_view(msg).find(needle) != std::string_view::npos;
+}
+
 }  // namespace
 
 std::vector<Camera> CameraRepository::list_all() {
     return db_.with_handle([](sqlite3* h) {
         StmtGuard g;
-        if (sqlite3_prepare_v2(h, "SELECT id, name, created_at FROM cameras ORDER BY id;", -1,
-                               &g.stmt, nullptr) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(h,
+                               "SELECT id, name, serial, created_at FROM cameras ORDER BY id;",
+                               -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "list_all: prepare");
         }
 
@@ -57,8 +69,9 @@ std::vector<Camera> CameraRepository::list_all() {
 std::optional<Camera> CameraRepository::get(int64_t id) {
     return db_.with_handle([id](sqlite3* h) -> std::optional<Camera> {
         StmtGuard g;
-        if (sqlite3_prepare_v2(h, "SELECT id, name, created_at FROM cameras WHERE id = ?;", -1,
-                               &g.stmt, nullptr) != SQLITE_OK) {
+        if (sqlite3_prepare_v2(h,
+                               "SELECT id, name, serial, created_at FROM cameras WHERE id = ?;",
+                               -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "get: prepare");
         }
         sqlite3_bind_int64(g.stmt, 1, id);
@@ -70,21 +83,46 @@ std::optional<Camera> CameraRepository::get(int64_t id) {
     });
 }
 
-Camera CameraRepository::create(std::string_view name) {
+std::optional<Camera> CameraRepository::find_by_serial(std::string_view serial) {
+    const std::string serial_str(serial);
+    return db_.with_handle([&](sqlite3* h) -> std::optional<Camera> {
+        StmtGuard g;
+        if (sqlite3_prepare_v2(
+                h,
+                "SELECT id, name, serial, created_at FROM cameras WHERE serial = ?;",
+                -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "find_by_serial: prepare");
+        }
+        sqlite3_bind_text(g.stmt, 1, serial_str.c_str(), -1, SQLITE_TRANSIENT);
+
+        const int rc = sqlite3_step(g.stmt);
+        if (rc == SQLITE_ROW) return read_row(g.stmt);
+        if (rc == SQLITE_DONE) return std::nullopt;
+        throw_sqlite(h, "find_by_serial: step");
+    });
+}
+
+Camera CameraRepository::create(std::string_view name, std::string_view serial) {
     const std::string name_str(name);
+    const std::string serial_str(serial);
     return db_.with_handle([&](sqlite3* h) {
         StmtGuard g;
         if (sqlite3_prepare_v2(
                 h,
-                "INSERT INTO cameras (name) VALUES (?) RETURNING id, name, created_at;",
+                "INSERT INTO cameras (name, serial) VALUES (?, ?) "
+                "RETURNING id, name, serial, created_at;",
                 -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "create: prepare");
         }
-        sqlite3_bind_text(g.stmt, 1, name_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(g.stmt, 1, name_str.c_str(),   -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(g.stmt, 2, serial_str.c_str(), -1, SQLITE_TRANSIENT);
 
         const int rc = sqlite3_step(g.stmt);
         if (rc == SQLITE_ROW) return read_row(g.stmt);
-        if (is_unique_violation(rc)) throw DuplicateNameError(name_str);
+        if (is_unique_violation(rc)) {
+            if (err_mentions(h, "serial")) throw DuplicateSerialError(serial_str);
+            throw DuplicateNameError(name_str);
+        }
         throw_sqlite(h, "create: step");
     });
 }
@@ -95,7 +133,8 @@ std::optional<Camera> CameraRepository::update(int64_t id, std::string_view name
         StmtGuard g;
         if (sqlite3_prepare_v2(
                 h,
-                "UPDATE cameras SET name = ? WHERE id = ? RETURNING id, name, created_at;",
+                "UPDATE cameras SET name = ? WHERE id = ? "
+                "RETURNING id, name, serial, created_at;",
                 -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "update: prepare");
         }

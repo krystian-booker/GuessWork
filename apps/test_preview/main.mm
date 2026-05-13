@@ -9,6 +9,7 @@
 #include "app/preview_window.hpp"
 #include "consumer/preview_consumer.hpp"
 #include "producer/spinnaker_producer.hpp"
+#include "producer/spinnaker_producer_internal.hpp"
 
 namespace {
 
@@ -34,7 +35,24 @@ int main() {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-        gw::SpinnakerProducer producer{"cam0"};
+        // Debug binary — grab whichever Spinnaker camera is plugged in first.
+        Spinnaker::SystemPtr  system = Spinnaker::System::GetInstance();
+        Spinnaker::CameraList cams   = system->GetCameras();
+        if (cams.GetSize() == 0) {
+            std::cerr << "No Spinnaker cameras detected.\n";
+            cams.Clear();
+            system->ReleaseInstance();
+            return 1;
+        }
+        Spinnaker::CameraPtr cam = cams.GetByIndex(0);
+        cams.Clear();
+
+        auto binding    = std::make_unique<gw::SpinnakerCameraBinding>();
+        binding->system = system;
+        binding->cam    = cam;
+
+        gw::SpinnakerProducer producer{"cam0", "preview"};
+        producer.bind_camera(std::move(binding));
         try {
             producer.start();
         } catch (const std::exception& e) {

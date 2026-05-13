@@ -32,6 +32,12 @@ public:
     // Resolves $HOME/.guesswork/guesswork.db. Throws if $HOME is unset.
     static std::filesystem::path default_path();
 
+    // Deletes the database file and its WAL/SHM sidecars (if any). No-op if
+    // they don't exist. The next Database(...) call will create a fresh DB.
+    // Useful in early development where schema churn outpaces migrations:
+    // bump the schema and call this to start clean.
+    static void remove_files(const std::filesystem::path& db_path);
+
 private:
     sqlite3*   db_ = nullptr;
     std::mutex mu_;

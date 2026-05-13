@@ -19,10 +19,14 @@ void exec_or_throw(sqlite3* db, const char* sql) {
     }
 }
 
+// Schema is the source of truth. While the project is in early development we
+// don't write migrations - bump the schema here and run `guesswork --reset-db`
+// (or call Database::remove_files) to start over.
 constexpr const char* kSchemaCameras =
     "CREATE TABLE IF NOT EXISTS cameras ("
     "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  name       TEXT    NOT NULL UNIQUE,"
+    "  serial     TEXT    NOT NULL UNIQUE,"
     "  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 
@@ -44,6 +48,13 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, "PRAGMA foreign_keys = ON;");
     exec_or_throw(db_, "PRAGMA busy_timeout = 2000;");
     exec_or_throw(db_, kSchemaCameras);
+}
+
+void Database::remove_files(const std::filesystem::path& db_path) {
+    std::error_code ec;
+    std::filesystem::remove(db_path, ec);
+    std::filesystem::remove(db_path.string() + "-wal", ec);
+    std::filesystem::remove(db_path.string() + "-shm", ec);
 }
 
 Database::~Database() {

@@ -4,8 +4,8 @@
 
 namespace gw::server {
 
-class StreamConsumer;
+class CameraSupervisor;
 
-void register_stream_routes(crow::SimpleApp& app, StreamConsumer& stream);
+void register_stream_routes(crow::SimpleApp& app, CameraSupervisor& supervisor);
 
 }  // namespace gw::server

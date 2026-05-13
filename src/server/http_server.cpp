@@ -13,20 +13,23 @@ struct HttpServer::Impl {
     crow::SimpleApp app;
     uint16_t        port;
 
-    Impl(uint16_t p, PipelineStatsView& stats, StreamConsumer& stream, CameraRepository& cameras)
+    Impl(uint16_t                              p,
+         CameraSupervisor&                     supervisor,
+         CameraRepository&                     cameras,
+         std::chrono::steady_clock::time_point started_at)
         : port(p) {
-        register_status_routes(app, stats);
-        register_stream_routes(app, stream);
-        register_camera_routes(app, cameras);
+        register_status_routes(app, supervisor, started_at);
+        register_stream_routes(app, supervisor);
+        register_camera_routes(app, cameras, supervisor);
         register_static_routes(app);
     }
 };
 
-HttpServer::HttpServer(uint16_t           port,
-                       PipelineStatsView& stats,
-                       StreamConsumer&    stream,
-                       CameraRepository&  cameras)
-    : impl_(std::make_unique<Impl>(port, stats, stream, cameras)) {}
+HttpServer::HttpServer(uint16_t                              port,
+                       CameraSupervisor&                     supervisor,
+                       CameraRepository&                     cameras,
+                       std::chrono::steady_clock::time_point started_at)
+    : impl_(std::make_unique<Impl>(port, supervisor, cameras, started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

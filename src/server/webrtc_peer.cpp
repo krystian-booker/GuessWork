@@ -7,6 +7,7 @@
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -26,6 +27,10 @@ constexpr uint8_t  kVideoPayload    = 109;
 constexpr auto     kIceGatherTimeout = std::chrono::seconds(5);
 }  // namespace
 
+// Impl is shared_ptr-owned so libdatachannel callbacks can capture a
+// std::weak_ptr<Impl> and lock it before use. Without that, pc->close() is
+// async — a callback firing after ~WebRtcPeer has freed Impl would UAF and (in
+// our case) corrupt libusb mutex state that Spinnaker later trips over.
 struct WebRtcPeer::Impl {
     std::shared_ptr<rtc::PeerConnection>          pc;
     std::shared_ptr<rtc::Track>                   track;
@@ -47,18 +52,20 @@ struct WebRtcPeer::Impl {
     }
 };
 
-WebRtcPeer::WebRtcPeer() : impl_(std::make_unique<Impl>()) {
+WebRtcPeer::WebRtcPeer() : impl_(std::make_shared<Impl>()) {
     rtc::Configuration cfg;
     // Empty ICE servers — localhost works on host candidates alone.
     cfg.disableAutoNegotiation = false;
 
     impl_->pc = std::make_shared<rtc::PeerConnection>(cfg);
 
-    auto* impl_raw = impl_.get();
-    impl_->pc->onStateChange([impl_raw](rtc::PeerConnection::State state) {
+    std::weak_ptr<Impl> weak_impl = impl_;
+    impl_->pc->onStateChange([weak_impl](rtc::PeerConnection::State state) {
         using S = rtc::PeerConnection::State;
         if (state == S::Closed || state == S::Failed || state == S::Disconnected) {
-            impl_raw->notify_closed();
+            if (auto strong = weak_impl.lock()) {
+                strong->notify_closed();
+            }
         }
     });
 
@@ -88,11 +95,26 @@ WebRtcPeer::WebRtcPeer() : impl_(std::make_unique<Impl>()) {
 }
 
 WebRtcPeer::~WebRtcPeer() {
-    try {
-        if (impl_ && impl_->pc) {
-            impl_->pc->close();
-        }
-    } catch (...) {}
+    if (!impl_) return;
+
+    // Block any future close_cb invocation BEFORE we release Impl. The
+    // close_cb installed by StreamConsumer::add_peer captures a raw pointer
+    // back to the StreamConsumer, and the StreamConsumer is being destroyed
+    // alongside us — so a late callback would UAF its closed_pending_ vector.
+    {
+        std::lock_guard lk(impl_->cb_mu);
+        impl_->fired_close = true;
+        impl_->close_cb    = nullptr;
+    }
+
+    if (impl_->pc) {
+        try { impl_->pc->close(); } catch (...) {}
+    }
+    // The onStateChange/onGatheringStateChange lambdas capture weak_ptr<Impl>,
+    // so any callback firing on a libdatachannel thread after this point will
+    // see weak.lock() == nullptr once we drop our strong ref and exit. While
+    // the lambda is still mid-flight, weak.lock() keeps Impl alive for the
+    // duration of its strong ref.
 }
 
 std::string WebRtcPeer::create_answer(const std::string& offer_sdp) {

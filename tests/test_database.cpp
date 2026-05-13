@@ -68,6 +68,39 @@ TEST(DatabaseTest, ReopenIsIdempotent) {
     cleanup(path);
 }
 
+TEST(DatabaseTest, RemoveFilesWipesDbAndSidecars) {
+    const auto path = make_temp_db_path("wipe");
+    cleanup(path);
+
+    {
+        Database db(path);
+        db.with_handle([](sqlite3* h) {
+            ASSERT_EQ(SQLITE_OK, sqlite3_exec(h, "INSERT INTO cameras(name, serial) "
+                                                 "VALUES('a','SN1');",
+                                              nullptr, nullptr, nullptr));
+        });
+    }
+    EXPECT_TRUE(std::filesystem::exists(path));
+
+    Database::remove_files(path);
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_FALSE(std::filesystem::exists(path.string() + "-wal"));
+    EXPECT_FALSE(std::filesystem::exists(path.string() + "-shm"));
+
+    // Reopening creates a fresh, empty DB.
+    Database db2(path);
+    db2.with_handle([](sqlite3* h) {
+        sqlite3_stmt* stmt = nullptr;
+        ASSERT_EQ(SQLITE_OK, sqlite3_prepare_v2(h, "SELECT COUNT(*) FROM cameras;", -1,
+                                                &stmt, nullptr));
+        ASSERT_EQ(SQLITE_ROW, sqlite3_step(stmt));
+        EXPECT_EQ(0, sqlite3_column_int(stmt, 0));
+        sqlite3_finalize(stmt);
+    });
+
+    cleanup(path);
+}
+
 TEST(DatabaseTest, DefaultPathHonoursHome) {
     const char* old_home = std::getenv("HOME");
     setenv("HOME", "/tmp/gw_home_for_test", 1);

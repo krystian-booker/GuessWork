@@ -56,6 +56,7 @@ compile_commands.json
 # React frontend
 web/node_modules/
 web/dist/
+web/test-results/
 
 # Playwright MCP scratch dir (snapshots, console logs)
 .playwright-mcp/

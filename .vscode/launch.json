@@ -23,6 +23,19 @@
             "preLaunchTask": "CMake: Build (Debug)"
         },
         {
+            "name": "Debug guesswork (--reset-db)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/guesswork",
+            "args": ["--reset-db"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: Build (Debug)"
+        },
+        {
             "name": "Debug gw_tests (all)",
             "type": "cppdbg",
             "request": "launch",

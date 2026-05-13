@@ -1,26 +1,42 @@
 #include "server/routes_status.hpp"
 
+#include <chrono>
+
 #include <crow.h>
 
-#include "server/pipeline_stats.hpp"
+#include "server/camera_supervisor.hpp"
 
 namespace gw::server {
 
-void register_status_routes(crow::SimpleApp& app, PipelineStatsView& view) {
-    CROW_ROUTE(app, "/api/status")([&view] {
-        const auto s = view.snapshot();
+void register_status_routes(crow::SimpleApp&                       app,
+                            CameraSupervisor&                      supervisor,
+                            std::chrono::steady_clock::time_point  started_at) {
+    CROW_ROUTE(app, "/api/status")([&supervisor, started_at] {
+        const auto cams = supervisor.snapshot_all();
 
-        crow::json::wvalue pipeline;
-        pipeline["camera_connected"]  = s.camera_connected;
-        pipeline["frames_produced"]   = s.frames_produced;
-        pipeline["frames_dropped"]    = s.frames_dropped;
-        pipeline["frames_incomplete"] = s.frames_incomplete;
-        pipeline["fps_1s"]            = s.fps_1s;
+        crow::json::wvalue::list items;
+        items.reserve(cams.size());
+        for (const auto& c : cams) {
+            crow::json::wvalue j;
+            j["id"]                = c.id;
+            j["name"]              = c.name;
+            j["serial"]            = c.serial;
+            j["online"]            = c.online;
+            j["frames_produced"]   = c.frames_produced;
+            j["frames_dropped"]    = c.frames_dropped;
+            j["frames_incomplete"] = c.frames_incomplete;
+            j["fps_1s"]            = c.fps_1s;
+            items.emplace_back(std::move(j));
+        }
+
+        const auto uptime = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - started_at)
+                                .count();
 
         crow::json::wvalue body;
         body["ok"]       = true;
-        body["uptime_s"] = s.uptime_s;
-        body["pipeline"] = std::move(pipeline);
+        body["uptime_s"] = uptime;
+        body["cameras"]  = std::move(items);
 
         crow::response res(body);
         res.add_header("Cache-Control", "no-store");

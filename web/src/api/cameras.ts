@@ -1,33 +1,32 @@
+import { asJson, readError } from './http'
+
 export interface Camera {
   id: number
   name: string
+  serial: string
+  online: boolean
   created_at: number
 }
 
-async function readError(res: Response): Promise<string> {
-  try {
-    const body = await res.json()
-    if (body && typeof body.error === 'string') return body.error
-  } catch {
-    // fall through
-  }
-  return `HTTP ${res.status}`
-}
-
-async function asJson<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(await readError(res))
-  return (await res.json()) as T
+export interface AvailableCamera {
+  serial: string
+  model: string
+  vendor: string
 }
 
 export async function listCameras(): Promise<Camera[]> {
   return asJson<Camera[]>(await fetch('/api/cameras'))
 }
 
-export async function createCamera(name: string): Promise<Camera> {
+export async function listAvailableCameras(): Promise<AvailableCamera[]> {
+  return asJson<AvailableCamera[]>(await fetch('/api/cameras/available'))
+}
+
+export async function createCamera(name: string, serial: string): Promise<Camera> {
   const res = await fetch('/api/cameras', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, serial }),
   })
   return asJson<Camera>(res)
 }

@@ -20,7 +20,11 @@ function waitForIceComplete(pc: RTCPeerConnection): Promise<void> {
   })
 }
 
-export default function Stream() {
+interface StreamProps {
+  cameraId: number
+}
+
+export default function Stream({ cameraId }: StreamProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [state, setState] = useState<ConnState>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -58,7 +62,7 @@ export default function Stream() {
         await waitForIceComplete(pc)
         if (cancelled) return
 
-        const answerSdp = await postOffer(pc.localDescription!.sdp)
+        const answerSdp = await postOffer(cameraId, pc.localDescription!.sdp)
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       } catch (e) {
         if (!cancelled) {
@@ -80,7 +84,7 @@ export default function Stream() {
         pc = null
       }
     }
-  }, [])
+  }, [cameraId])
 
   return (
     <div style={{ marginBottom: 24 }}>

@@ -157,7 +157,7 @@ find_package(SQLite3 REQUIRED)
 # HTTP server library
 # ----------------------------------------------------------------------------
 add_library(gw_server
-    src/server/pipeline_stats.cpp
+    src/server/camera_supervisor.cpp
     src/server/routes_status.cpp
     src/server/routes_stream.cpp
     src/server/routes_camera.cpp

@@ -34,7 +34,10 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // shared_ptr so libdatachannel callbacks can capture a weak_ptr<Impl>
+    // and lock it safely (close() is async; raw-pointer capture UAFs after
+    // ~WebRtcPeer).
+    std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace gw::server

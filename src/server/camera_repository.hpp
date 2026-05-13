@@ -14,6 +14,7 @@ class Database;
 struct Camera {
     int64_t     id         = 0;
     std::string name;
+    std::string serial;
     int64_t     created_at = 0;  // unix seconds
 };
 
@@ -25,16 +26,26 @@ public:
         : std::runtime_error("camera name already exists: " + name) {}
 };
 
+// Thrown when an insert violates the UNIQUE index on `serial`. The route layer
+// maps this to HTTP 409 Conflict.
+class DuplicateSerialError : public std::runtime_error {
+public:
+    explicit DuplicateSerialError(const std::string& serial)
+        : std::runtime_error("camera serial already mapped: " + serial) {}
+};
+
 class CameraRepository {
 public:
     explicit CameraRepository(Database& db) : db_(db) {}
 
     std::vector<Camera>   list_all();
     std::optional<Camera> get(int64_t id);
+    std::optional<Camera> find_by_serial(std::string_view serial);
 
-    // Throws DuplicateNameError if name is already taken.
-    Camera                create(std::string_view name);
+    // Throws DuplicateNameError or DuplicateSerialError on UNIQUE conflict.
+    Camera                create(std::string_view name, std::string_view serial);
 
+    // Renames a camera. Serial cannot be changed (delete + re-add instead).
     // Returns the updated row, or std::nullopt if id does not exist.
     // Throws DuplicateNameError on UNIQUE conflict.
     std::optional<Camera> update(int64_t id, std::string_view name);
