@@ -5,6 +5,7 @@
 #include <crow.h>
 
 #include "server/camera_supervisor.hpp"
+#include "server/route_helpers.hpp"
 
 namespace gw::server {
 
@@ -38,9 +39,7 @@ void register_status_routes(crow::SimpleApp&                       app,
         body["uptime_s"] = uptime;
         body["cameras"]  = std::move(items);
 
-        crow::response res(body);
-        res.add_header("Cache-Control", "no-store");
-        return res;
+        return json_response(200, std::move(body));
     });
 }
 

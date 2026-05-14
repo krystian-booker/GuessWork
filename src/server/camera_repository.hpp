@@ -22,6 +22,10 @@ struct Camera {
     std::optional<double>      gain;
     std::optional<bool>        exposure_auto;
     std::optional<double>      exposure;
+    // Last uploaded basalt_calibrate output (intrinsic calibration JSON) and
+    // the wall-clock second at which it was stored. Both unset = uncalibrated.
+    std::optional<std::string> calibration_json;
+    std::optional<int64_t>     calibrated_at;
     int64_t                    created_at = 0;  // unix seconds
 };
 
@@ -77,6 +81,15 @@ public:
 
     // Returns true if a row was deleted.
     bool                  remove(int64_t id);
+
+    // Stores the intrinsic calibration JSON against the camera row and stamps
+    // calibrated_at with the current unix second. Returns the updated row, or
+    // nullopt if id doesn't exist.
+    std::optional<Camera> set_calibration(int64_t id, std::string_view json);
+
+    // Clears both calibration_json and calibrated_at. Returns true if a row was
+    // touched; false if id doesn't exist.
+    bool                  clear_calibration(int64_t id);
 
 private:
     Database& db_;

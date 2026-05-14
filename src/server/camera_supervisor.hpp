@@ -9,6 +9,10 @@
 #include "producer/camera_settings.hpp"
 #include "producer/spinnaker_video_modes.hpp"
 
+namespace gw {
+class FrameChannel;
+}
+
 namespace gw::server {
 
 class CameraRepository;
@@ -70,6 +74,13 @@ public:
     // camera is not currently online. Holding the shared_ptr keeps the
     // consumer alive even if the slot is torn down concurrently.
     std::shared_ptr<StreamConsumer> stream_consumer_for(int64_t camera_id);
+
+    // Returns the live FrameChannel for the camera's producer, or nullptr if
+    // the camera is offline. Callers must not retain the pointer past a
+    // subsequent on_camera_removed / device-removal event — the channel lives
+    // only as long as the producer. The intended use is to attach() a consumer
+    // (e.g. RecordingConsumer) under the same lock that observes online state.
+    FrameChannel* frame_channel_for(int64_t camera_id);
 
     // O(1) online check without allocating a full snapshot.
     bool is_online(int64_t camera_id);

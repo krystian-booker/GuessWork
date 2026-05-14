@@ -32,6 +32,11 @@ public:
     // Resolves $HOME/.guesswork/guesswork.db. Throws if $HOME is unset.
     static std::filesystem::path default_path();
 
+    // Resolves $HOME/.guesswork — the app's per-user data root. Shared with
+    // non-DB state (e.g. calibration recording sessions under "calibrations/").
+    // Throws if $HOME is unset.
+    static std::filesystem::path data_dir();
+
     // Deletes the database file and its WAL/SHM sidecars (if any). No-op if
     // they don't exist. The next Database(...) call will create a fresh DB.
     // Useful in early development where schema churn outpaces migrations:

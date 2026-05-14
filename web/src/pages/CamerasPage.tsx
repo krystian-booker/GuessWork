@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   CameraOfflineError,
   createCamera,
@@ -13,6 +14,7 @@ import {
   type CameraMode,
 } from '../api/cameras'
 import ModeSelect from '../components/ModeSelect'
+import { dangerButtonStyle, neutralButtonStyle, primaryButtonStyle } from '../components/buttonStyles'
 
 const inputStyle: React.CSSProperties = {
   padding: '6px 10px',
@@ -21,22 +23,6 @@ const inputStyle: React.CSSProperties = {
   borderRadius: 6,
   minWidth: 0,
 }
-
-const buttonStyle = (color: string, fill: string, text: string): React.CSSProperties => ({
-  padding: '6px 12px',
-  fontSize: 14,
-  borderWidth: 1,
-  borderStyle: 'solid',
-  borderColor: color,
-  borderRadius: 6,
-  background: fill,
-  color: text,
-  cursor: 'pointer',
-})
-
-const neutralButtonStyle = buttonStyle('#ccc', '#fafafa', '#222')
-const primaryButtonStyle = buttonStyle('#2563eb', '#2563eb', '#fff')
-const dangerButtonStyle = buttonStyle('#dc2626', '#fff', '#dc2626')
 
 const modalOverlay: React.CSSProperties = {
   position: 'fixed',
@@ -334,7 +320,7 @@ export default function CamerasPage() {
               <th style={{ padding: 8 }}>Name</th>
               <th style={{ padding: 8, width: 180 }}>Serial</th>
               <th style={{ padding: 8, width: 220 }}>Mode</th>
-              <th style={{ padding: 8, width: 220 }}>Actions</th>
+              <th style={{ padding: 8, width: 280 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -371,6 +357,16 @@ export default function CamerasPage() {
                     >
                       Edit
                     </button>
+                    <Link
+                      to={`/cameras/${c.id}/calibrate`}
+                      style={{
+                        ...neutralButtonStyle,
+                        textDecoration: 'none',
+                        display: 'inline-block',
+                      }}
+                    >
+                      Calibrate
+                    </Link>
                     <button
                       type="button"
                       style={dangerButtonStyle}

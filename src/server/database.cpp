@@ -24,15 +24,17 @@ void exec_or_throw(sqlite3* db, const char* sql) {
 // (or call Database::remove_files) to start over.
 constexpr const char* kSchemaCameras =
     "CREATE TABLE IF NOT EXISTS cameras ("
-    "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  name          TEXT    NOT NULL UNIQUE,"
-    "  serial        TEXT    NOT NULL UNIQUE,"
-    "  mode          TEXT,"
-    "  gain_auto     INTEGER,"
-    "  gain          REAL,"
-    "  exposure_auto INTEGER,"
-    "  exposure      REAL,"
-    "  created_at    INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name             TEXT    NOT NULL UNIQUE,"
+    "  serial           TEXT    NOT NULL UNIQUE,"
+    "  mode             TEXT,"
+    "  gain_auto        INTEGER,"
+    "  gain             REAL,"
+    "  exposure_auto    INTEGER,"
+    "  exposure         REAL,"
+    "  calibration_json TEXT,"      // basalt_calibrate output, NULL = uncalibrated
+    "  calibrated_at    INTEGER,"   // unix seconds when calibration was uploaded
+    "  created_at       INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 
 }  // namespace
@@ -69,11 +71,15 @@ Database::~Database() {
 }
 
 std::filesystem::path Database::default_path() {
+    return data_dir() / "guesswork.db";
+}
+
+std::filesystem::path Database::data_dir() {
     const char* home = std::getenv("HOME");
     if (!home || !*home) {
-        throw std::runtime_error("Database::default_path: $HOME is not set");
+        throw std::runtime_error("Database::data_dir: $HOME is not set");
     }
-    return std::filesystem::path(home) / ".guesswork" / "guesswork.db";
+    return std::filesystem::path(home) / ".guesswork";
 }
 
 }  // namespace gw::server

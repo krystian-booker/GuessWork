@@ -19,8 +19,13 @@ Important CMake options:
 - `-DGW_ENABLE_TSAN=ON` / `-DGW_ENABLE_ASAN=ON` — sanitizers (configure into separate build dirs).
 - `-DGW_BUILD_WEB=ON` — runs `npm install && npm run build` in `web/` at configure time and embeds `web/dist/` into the `guesswork` binary via CMakeRC, defining `GW_HAS_EMBEDDED_WEB=1`. Defaults to ON for Release, OFF otherwise. In Debug builds without this flag the server exposes only `/api/*` and the React app is served by the Vite dev server.
 - `-DGW_BUILD_TESTS=OFF` — disable gtest fetch + `gw_tests` target.
+- `-DGW_BUILD_BASALT=ON` — clone and build the Basalt calibration / VIO toolchain via `ExternalProject_Add` (see `cmake/basalt.cmake`). **Default OFF.** Adds 15–30 min to the first configure/build because Basalt bootstraps its bundled vcpkg and builds the full transitive dep tree (Eigen / Sophus / TBB / Pangolin / OpenCV / fmt …). Requires `cmake ≥ 3.24` and `ninja` on PATH. The build installs into `build/basalt-install/`; the resulting `bin/basalt_calibrate` path is baked into `gw_server` as `GW_BASALT_CALIBRATE_BIN`, which the calibration route uses to construct a copy-pasteable command for the user. Leave OFF if you don't need calibration locally — the suggested command then falls back to bare `basalt_calibrate` (assumes PATH), or install Basalt via upstream's `curl -LsSf https://gitlab.com/VladyslavUsenko/basalt/-/raw/master/scripts/install.sh | sh`.
 
-The vendored libdatachannel stack (libsrtp, libjuice, mbedtls/plog) is configured in `cmake/libdatachannel.cmake`; `cmake/embed_web.cmake` drives the React embed.
+The vendored libdatachannel stack (libsrtp, libjuice, mbedtls/plog) is configured in `cmake/libdatachannel.cmake`; `cmake/embed_web.cmake` drives the React embed; `cmake/basalt.cmake` drives the optional Basalt source build.
+
+## Database schema
+
+The cameras table schema is `CREATE TABLE IF NOT EXISTS` only — we don't write migrations during early development. **When you bump the schema, pull, or branch-switch and the existing DB lacks new columns, run `./build/guesswork --reset-db` to start fresh.** The DB lives at `~/.guesswork/guesswork.db`; calibration recordings under `~/.guesswork/calibrations/<session>/`.
 
 ## Run
 
@@ -64,13 +69,19 @@ WebRTC signaling is non-trickle HTTP: browser POSTs an SDP offer to `/api/stream
 
 ### HTTP server (`src/server`)
 
-Crow (Pimpl'd in `http_server.cpp`) with three route groups: `/api/status` (`PipelineStatsView`, rolling 1s FPS), `/api/stream/offer` (WebRTC signaling), `/api/cameras` (CRUD, talks to `CameraRepository` → `Database`). In `GW_HAS_EMBEDDED_WEB` builds, `static_assets.cpp` serves the embedded React bundle with an SPA fallback (unknown non-`/api/*` paths return `index.html`). In non-embedded builds the static route is a no-op.
+Crow (Pimpl'd in `http_server.cpp`) with four route groups: `/api/status` (`PipelineStatsView`, rolling 1s FPS), `/api/stream/offer` (WebRTC signaling), `/api/cameras` (CRUD, talks to `CameraRepository` → `Database`), and `/api/cameras/<id>/calibration*` (recording sessions + uploaded intrinsics JSON). In `GW_HAS_EMBEDDED_WEB` builds, `static_assets.cpp` serves the embedded React bundle with an SPA fallback (unknown non-`/api/*` paths return `index.html`). In non-embedded builds the static route is a no-op.
 
 `Database` is a thread-safe SQLite handle; concurrent HTTP workers serialize through `with_handle()`. Schema (`cameras` table) is created on open via `CREATE TABLE IF NOT EXISTS`. `CameraRepository` throws `DuplicateNameError` on `UNIQUE(name)` conflict; the route layer maps it to HTTP 409.
 
+### Calibration (`src/consumer/recording_consumer.*`, `src/server/calibration_supervisor.*`, `src/server/routes_calibration.*`)
+
+Intrinsic camera calibration is driven by Basalt's `basalt_calibrate` tool, which has a Pangolin GUI and cannot be run headless. Our app records a EuRoC-format dataset (`mav0/cam0/data/<host_capture_ns>.png` + `data.csv`) into `~/.guesswork/calibrations/<session_id>/`, then shows the user a copy-pasteable command (built from `GW_BASALT_CALIBRATE_BIN`); after they run it, the user uploads the resulting `calibration.json` back through `PUT /api/cameras/<id>/calibration` to be stored against the camera row.
+
+`RecordingConsumer` is a regular `IConsumer` (lives in `gw_consumer`) that uses Homebrew **libspng** to encode Mono8 → PNG (linked via `pkg-config`-style `find_library`/`find_path` in CMake). `CalibrationSupervisor` owns at most one `RecordingConsumer` per camera, subscribed to that camera's `FrameChannel` via `CameraSupervisor::frame_channel_for(id)`. The EuRoC layout is forward-compatible with IMU (`mav0/imu0/data.csv`) and with linking Basalt as a library for VIO later.
+
 ### React frontend (`web/`)
 
-Vite + React 18 + react-router. Two pages: `/` (StreamPage, the WebRTC video) and `/cameras` (CRUD UI). API client wrappers live in `web/src/api/`. The dev server proxies `/api` to `:8080`; the production build is embedded into the binary by CMake — there is no separate static-file deploy step.
+Vite + React 18 + react-router. Three pages: `/` (StreamPage, the WebRTC video), `/cameras` (CRUD UI), and `/cameras/:id/calibrate` (CalibratePage — live preview + record/stop, suggested basalt command, calibration.json upload). API client wrappers live in `web/src/api/`. The dev server proxies `/api` to `:8080`; the production build is embedded into the binary by CMake — there is no separate static-file deploy step.
 
 ## Conventions worth knowing
 

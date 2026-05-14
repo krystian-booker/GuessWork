@@ -1,5 +1,6 @@
 import { Route, Routes } from 'react-router-dom'
 import Nav from './Nav'
+import CalibratePage from './pages/CalibratePage'
 import CamerasPage from './pages/CamerasPage'
 import StreamPage from './pages/StreamPage'
 
@@ -11,6 +12,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<StreamPage />} />
         <Route path="/cameras" element={<CamerasPage />} />
+        <Route path="/cameras/:id/calibrate" element={<CalibratePage />} />
       </Routes>
     </div>
   )

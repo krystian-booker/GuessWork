@@ -316,6 +316,13 @@ std::shared_ptr<StreamConsumer> CameraSupervisor::stream_consumer_for(int64_t ca
     return it->second.stream;
 }
 
+gw::FrameChannel* CameraSupervisor::frame_channel_for(int64_t camera_id) {
+    std::lock_guard lk(impl_->mu);
+    auto it = impl_->slots_by_id.find(camera_id);
+    if (it == impl_->slots_by_id.end() || !it->second.producer) return nullptr;
+    return &it->second.producer->channel();
+}
+
 bool CameraSupervisor::is_online(int64_t camera_id) {
     std::lock_guard lk(impl_->mu);
     auto it = impl_->slots_by_id.find(camera_id);

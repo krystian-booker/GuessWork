@@ -8,6 +8,7 @@
 
 #include <rtc/rtc.hpp>
 
+#include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
@@ -76,6 +77,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const auto calibration_root = gw::server::Database::data_dir() / "calibrations";
+    gw::server::CalibrationSupervisor calibration(supervisor, calibration_root);
+    std::cerr << "guesswork: calibration recordings at " << calibration_root << "\n";
+
     const auto started_at = std::chrono::steady_clock::now();
     std::cerr << "guesswork: stream defaults "
               << cli.stream_width << "x" << cli.stream_height
@@ -83,7 +88,7 @@ int main(int argc, char** argv) {
               << (cli.stream_bitrate / 1000) << " kbps\n";
     std::cerr << "guesswork: listening on http://localhost:" << cli.port << "\n";
 
-    gw::server::HttpServer server(cli.port, supervisor, cameras, started_at);
+    gw::server::HttpServer server(cli.port, supervisor, cameras, calibration, started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;

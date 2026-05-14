@@ -37,6 +37,14 @@ if(NOT DEFINED GW_BUILD_WEB)
 endif()
 option(GW_BUILD_WEB "Build and embed the React bundle into the binary" ${GW_BUILD_WEB})
 
+# Whether to clone and build the Basalt camera calibration / VIO toolchain
+# as part of our build. OFF by default because the first-time build is
+# 15-30 min (vcpkg bootstraps the full transitive dep tree); flip ON when
+# you need basalt_calibrate, or install upstream's prebuilt binary via
+# `curl -LsSf https://gitlab.com/VladyslavUsenko/basalt/-/raw/master/scripts/install.sh | sh`
+# and leave the suggested-command fallback to use bare `basalt_calibrate`.
+option(GW_BUILD_BASALT "Clone and build Basalt for camera calibration / VIO" OFF)
+
 if(GW_ENABLE_TSAN)
     add_compile_options(-fsanitize=thread -g -O1 -fno-omit-frame-pointer)
     add_link_options(-fsanitize=thread)
@@ -90,14 +98,28 @@ add_library(gw_producer
 )
 target_link_libraries(gw_producer PUBLIC gw_core gw_spinnaker)
 
+# libspng (Homebrew install) — fast PNG encoder used by RecordingConsumer.
+find_path(SPNG_INCLUDE_DIR spng.h
+    PATHS /opt/homebrew/include /usr/local/include
+    REQUIRED
+)
+find_library(SPNG_LIBRARY NAMES spng
+    PATHS /opt/homebrew/lib /usr/local/lib
+    REQUIRED
+)
+
 add_library(gw_consumer
     src/consumer/preview_consumer.mm
+    src/consumer/recording_consumer.cpp
+    src/consumer/recording_png.cpp
 )
+target_include_directories(gw_consumer PRIVATE ${SPNG_INCLUDE_DIR})
 target_link_libraries(gw_consumer PUBLIC gw_core
     "-framework Metal"
     "-framework QuartzCore"
     "-framework CoreVideo"
 )
+target_link_libraries(gw_consumer PRIVATE ${SPNG_LIBRARY})
 
 # ----------------------------------------------------------------------------
 # Video encoder (Mono8 -> NV12 + H.264 via VideoToolbox)
@@ -150,9 +172,11 @@ find_package(SQLite3 REQUIRED)
 # ----------------------------------------------------------------------------
 add_library(gw_server
     src/server/camera_supervisor.cpp
+    src/server/calibration_supervisor.cpp
     src/server/routes_status.cpp
     src/server/routes_stream.cpp
     src/server/routes_camera.cpp
+    src/server/routes_calibration.cpp
     src/server/static_assets.cpp
     src/server/http_server.cpp
     src/server/stream_consumer.cpp
@@ -160,7 +184,7 @@ add_library(gw_server
     src/server/database.cpp
     src/server/camera_repository.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -168,6 +192,27 @@ target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder Crow::Crow
 target_compile_options(gw_server PRIVATE
     -Wno-pedantic
     -Wno-deprecated-literal-operator
+)
+
+# ----------------------------------------------------------------------------
+# Basalt camera calibration / VIO (opt-in source build via ExternalProject)
+# ----------------------------------------------------------------------------
+# Cache vars used by the suggested-command builder. Defaulted empty so the
+# server falls back to bare `basalt_calibrate` (assuming the user installed
+# upstream's prebuilt binary on PATH).
+set(GW_BASALT_CALIBRATE_BIN     "" CACHE FILEPATH
+    "Path to basalt_calibrate; empty = assume on PATH")
+set(GW_BASALT_APRILGRID_DEFAULT "" CACHE FILEPATH
+    "Path to default AprilGrid config; empty = leave as placeholder")
+
+if(GW_BUILD_BASALT)
+    include(${CMAKE_SOURCE_DIR}/cmake/basalt.cmake)
+    # basalt.cmake reassigns the cache vars above to the built install paths.
+endif()
+
+target_compile_definitions(gw_server PRIVATE
+    GW_BASALT_CALIBRATE_BIN="${GW_BASALT_CALIBRATE_BIN}"
+    GW_BASALT_APRILGRID_DEFAULT="${GW_BASALT_APRILGRID_DEFAULT}"
 )
 
 # ----------------------------------------------------------------------------
@@ -216,8 +261,10 @@ if(GW_BUILD_TESTS)
         tests/test_h264_encoder.cpp
         tests/test_database.cpp
         tests/test_camera_repository.cpp
+        tests/test_camera_repository_calibration.cpp
+        tests/test_recording_consumer.cpp
     )
-    target_link_libraries(gw_tests PRIVATE gw_core gw_encoder gw_server GTest::gtest_main)
+    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server GTest::gtest_main)
     include(GoogleTest)
     gtest_discover_tests(gw_tests)
 endif()

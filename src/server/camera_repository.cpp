@@ -34,7 +34,19 @@ std::optional<bool> column_bool_opt(sqlite3_stmt* stmt, int idx) {
 // Standard SELECT projection — keep column order in sync with read_row().
 constexpr const char* kSelectColumns =
     "id, name, serial, mode, "
-    "gain_auto, gain, exposure_auto, exposure, created_at";
+    "gain_auto, gain, exposure_auto, exposure, "
+    "calibration_json, calibrated_at, created_at";
+
+std::optional<std::string> column_text_opt(sqlite3_stmt* stmt, int idx) {
+    if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, idx));
+    return text ? std::string(text) : std::string();
+}
+
+std::optional<int64_t> column_int64_opt(sqlite3_stmt* stmt, int idx) {
+    if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
+    return sqlite3_column_int64(stmt, idx);
+}
 
 Camera read_row(sqlite3_stmt* stmt) {
     Camera c;
@@ -49,11 +61,13 @@ Camera read_row(sqlite3_stmt* stmt) {
         const auto* mode_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
         c.mode = mode_text ? std::string(mode_text) : std::string();
     }
-    c.gain_auto     = column_bool_opt(stmt, 4);
-    c.gain          = column_real_opt(stmt, 5);
-    c.exposure_auto = column_bool_opt(stmt, 6);
-    c.exposure      = column_real_opt(stmt, 7);
-    c.created_at    = sqlite3_column_int64(stmt, 8);
+    c.gain_auto        = column_bool_opt (stmt, 4);
+    c.gain             = column_real_opt (stmt, 5);
+    c.exposure_auto    = column_bool_opt (stmt, 6);
+    c.exposure         = column_real_opt (stmt, 7);
+    c.calibration_json = column_text_opt (stmt, 8);
+    c.calibrated_at    = column_int64_opt(stmt, 9);
+    c.created_at       = sqlite3_column_int64(stmt, 10);
     return c;
 }
 
@@ -221,6 +235,47 @@ bool CameraRepository::remove(int64_t id) {
 
         const int rc = sqlite3_step(g.stmt);
         if (rc != SQLITE_DONE) throw_sqlite(h, "remove: step");
+        return sqlite3_changes(h) > 0;
+    });
+}
+
+std::optional<Camera> CameraRepository::set_calibration(int64_t id, std::string_view json) {
+    const std::string json_str(json);
+    return db_.with_handle([&](sqlite3* h) -> std::optional<Camera> {
+        StmtGuard g;
+        const std::string sql =
+            std::string("UPDATE cameras "
+                        "SET calibration_json = ?, "
+                        "    calibrated_at    = strftime('%s', 'now') "
+                        "WHERE id = ? "
+                        "RETURNING ") + kSelectColumns + ";";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "set_calibration: prepare");
+        }
+        sqlite3_bind_text (g.stmt, 1, json_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(g.stmt, 2, id);
+
+        const int rc = sqlite3_step(g.stmt);
+        if (rc == SQLITE_ROW)  return read_row(g.stmt);
+        if (rc == SQLITE_DONE) return std::nullopt;
+        throw_sqlite(h, "set_calibration: step");
+    });
+}
+
+bool CameraRepository::clear_calibration(int64_t id) {
+    return db_.with_handle([id](sqlite3* h) {
+        StmtGuard g;
+        const char* sql =
+            "UPDATE cameras "
+            "SET calibration_json = NULL, calibrated_at = NULL "
+            "WHERE id = ?;";
+        if (sqlite3_prepare_v2(h, sql, -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "clear_calibration: prepare");
+        }
+        sqlite3_bind_int64(g.stmt, 1, id);
+
+        const int rc = sqlite3_step(g.stmt);
+        if (rc != SQLITE_DONE) throw_sqlite(h, "clear_calibration: step");
         return sqlite3_changes(h) > 0;
     });
 }
