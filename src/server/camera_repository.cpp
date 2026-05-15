@@ -33,7 +33,7 @@ std::optional<bool> column_bool_opt(sqlite3_stmt* stmt, int idx) {
 
 // Standard SELECT projection — keep column order in sync with read_row().
 constexpr const char* kSelectColumns =
-    "id, name, serial, mode, "
+    "id, name, serial, lens_type, mode, "
     "gain_auto, gain, exposure_auto, exposure, "
     "calibration_json, calibrated_at, created_at";
 
@@ -55,19 +55,21 @@ Camera read_row(sqlite3_stmt* stmt) {
     c.name       = name_text ? name_text : "";
     const auto* serial_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
     c.serial     = serial_text ? serial_text : "";
-    if (sqlite3_column_type(stmt, 3) == SQLITE_NULL) {
+    const auto* lens_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+    c.lens_type  = lens_text ? lens_text : "";
+    if (sqlite3_column_type(stmt, 4) == SQLITE_NULL) {
         c.mode = std::nullopt;
     } else {
-        const auto* mode_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const auto* mode_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
         c.mode = mode_text ? std::string(mode_text) : std::string();
     }
-    c.gain_auto        = column_bool_opt (stmt, 4);
-    c.gain             = column_real_opt (stmt, 5);
-    c.exposure_auto    = column_bool_opt (stmt, 6);
-    c.exposure         = column_real_opt (stmt, 7);
-    c.calibration_json = column_text_opt (stmt, 8);
-    c.calibrated_at    = column_int64_opt(stmt, 9);
-    c.created_at       = sqlite3_column_int64(stmt, 10);
+    c.gain_auto        = column_bool_opt (stmt, 5);
+    c.gain             = column_real_opt (stmt, 6);
+    c.exposure_auto    = column_bool_opt (stmt, 7);
+    c.exposure         = column_real_opt (stmt, 8);
+    c.calibration_json = column_text_opt (stmt, 9);
+    c.calibrated_at    = column_int64_opt(stmt, 10);
+    c.created_at       = sqlite3_column_int64(stmt, 11);
     return c;
 }
 
@@ -142,25 +144,28 @@ std::optional<Camera> CameraRepository::find_by_serial(std::string_view serial) 
 
 Camera CameraRepository::create(std::string_view                name,
                                 std::string_view                serial,
+                                std::string_view                lens_type,
                                 std::optional<std::string_view> mode) {
     const std::string name_str(name);
     const std::string serial_str(serial);
+    const std::string lens_str(lens_type);
     const std::optional<std::string> mode_str =
         mode ? std::optional<std::string>(std::string(*mode)) : std::nullopt;
     return db_.with_handle([&](sqlite3* h) {
         StmtGuard g;
         const std::string sql =
-            std::string("INSERT INTO cameras (name, serial, mode) VALUES (?, ?, ?) "
-                        "RETURNING ") + kSelectColumns + ";";
+            std::string("INSERT INTO cameras (name, serial, lens_type, mode) "
+                        "VALUES (?, ?, ?, ?) RETURNING ") + kSelectColumns + ";";
         if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "create: prepare");
         }
         sqlite3_bind_text(g.stmt, 1, name_str.c_str(),   -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(g.stmt, 2, serial_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(g.stmt, 3, lens_str.c_str(),   -1, SQLITE_TRANSIENT);
         if (mode_str) {
-            sqlite3_bind_text(g.stmt, 3, mode_str->c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(g.stmt, 4, mode_str->c_str(), -1, SQLITE_TRANSIENT);
         } else {
-            sqlite3_bind_null(g.stmt, 3);
+            sqlite3_bind_null(g.stmt, 4);
         }
 
         const int rc = sqlite3_step(g.stmt);
@@ -190,6 +195,7 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
             first = false;
         };
         if (patch.name)          add_col("name = ?");
+        if (patch.lens_type)     add_col("lens_type = ?");
         if (patch.mode)          add_col("mode = ?");
         if (patch.gain_auto)     add_col("gain_auto = ?");
         if (patch.gain)          add_col("gain = ?");
@@ -205,6 +211,9 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
         int idx = 1;
         if (patch.name) {
             sqlite3_bind_text(g.stmt, idx++, patch.name->c_str(), -1, SQLITE_TRANSIENT);
+        }
+        if (patch.lens_type) {
+            sqlite3_bind_text(g.stmt, idx++, patch.lens_type->c_str(), -1, SQLITE_TRANSIENT);
         }
         if (patch.mode) {
             if (patch.mode->empty()) sqlite3_bind_null(g.stmt, idx++);

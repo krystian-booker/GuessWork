@@ -197,13 +197,25 @@ target_compile_options(gw_server PRIVATE
 # ----------------------------------------------------------------------------
 # Basalt camera calibration / VIO (opt-in source build via ExternalProject)
 # ----------------------------------------------------------------------------
-# Cache vars used by the suggested-command builder. Defaulted empty so the
-# server falls back to bare `basalt_calibrate` (assuming the user installed
-# upstream's prebuilt binary on PATH).
+# Cache vars used by the suggested-command builder.
+#   GW_BASALT_CALIBRATE_BIN — empty falls back to bare `basalt_calibrate` on
+#                             PATH; basalt.cmake forces it to the built binary
+#                             when GW_BUILD_BASALT=ON.
+#   GW_BASALT_APRILGRID_DEFAULT — defaults to the committed grid at
+#                                 `data/aprilgrid_6x6.json` (6x6, 88mm tag,
+#                                 0.3 spacing ratio). Override with
+#                                 -D... to point at your own. basalt.cmake
+#                                 forces the bundled grid when GW_BUILD_BASALT.
 set(GW_BASALT_CALIBRATE_BIN     "" CACHE FILEPATH
     "Path to basalt_calibrate; empty = assume on PATH")
-set(GW_BASALT_APRILGRID_DEFAULT "" CACHE FILEPATH
-    "Path to default AprilGrid config; empty = leave as placeholder")
+set(GW_BASALT_APRILGRID_DEFAULT "${CMAKE_SOURCE_DIR}/data/aprilgrid_6x6.json"
+    CACHE FILEPATH "Path to default AprilGrid config")
+# Heal stale empty cache entries from before the in-repo default existed, so
+# `cmake -S . -B build` on an old build tree picks up the committed file.
+if(NOT GW_BASALT_APRILGRID_DEFAULT)
+    set(GW_BASALT_APRILGRID_DEFAULT "${CMAKE_SOURCE_DIR}/data/aprilgrid_6x6.json"
+        CACHE FILEPATH "Path to default AprilGrid config" FORCE)
+endif()
 
 if(GW_BUILD_BASALT)
     include(${CMAKE_SOURCE_DIR}/cmake/basalt.cmake)

@@ -75,8 +75,8 @@ TEST(DatabaseTest, RemoveFilesWipesDbAndSidecars) {
     {
         Database db(path);
         db.with_handle([](sqlite3* h) {
-            ASSERT_EQ(SQLITE_OK, sqlite3_exec(h, "INSERT INTO cameras(name, serial) "
-                                                 "VALUES('a','SN1');",
+            ASSERT_EQ(SQLITE_OK, sqlite3_exec(h, "INSERT INTO cameras(name, serial, lens_type) "
+                                                 "VALUES('a','SN1','pinhole');",
                                               nullptr, nullptr, nullptr));
         });
     }

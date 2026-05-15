@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,43 @@
 #include "core/frame.hpp"
 
 namespace gw {
+
+namespace {
+
+// Writes a EuRoC-format sensor.yaml. Only `resolution` is strictly required
+// by Basalt's EuRoC loader (without it `initCamIntrinsics()` aborts on the
+// w > 0 && h > 0 assertion). Remaining fields are placeholders that the
+// calibrator overwrites during optimization; we include them so the file is
+// recognizable to any other EuRoC consumer that may grow into this dataset.
+void write_sensor_yaml(const std::filesystem::path& path,
+                       uint32_t                     width,
+                       uint32_t                     height) {
+    std::ofstream out(path, std::ios::out | std::ios::trunc);
+    if (!out.is_open()) {
+        std::cerr << "RecordingConsumer: cannot write sensor.yaml at " << path << "\n";
+        return;
+    }
+    const double cx = static_cast<double>(width)  / 2.0;
+    const double cy = static_cast<double>(height) / 2.0;
+    out << "%YAML:1.0\n"
+        << "sensor_type: camera\n"
+        << "comment: GuessWork camera (mono)\n"
+        << "T_BS:\n"
+        << "  cols: 4\n"
+        << "  rows: 4\n"
+        << "  data: [1.0, 0.0, 0.0, 0.0,\n"
+        << "         0.0, 1.0, 0.0, 0.0,\n"
+        << "         0.0, 0.0, 1.0, 0.0,\n"
+        << "         0.0, 0.0, 0.0, 1.0]\n"
+        << "rate_hz: 20\n"
+        << "resolution: [" << width << ", " << height << "]\n"
+        << "camera_model: pinhole\n"
+        << "intrinsics: [600.0, 600.0, " << cx << ", " << cy << "]\n"
+        << "distortion_model: radial-tangential\n"
+        << "distortion_coefficients: [0.0, 0.0, 0.0, 0.0]\n";
+}
+
+}  // namespace
 
 RecordingConsumer::RecordingConsumer(std::filesystem::path root_dir,
                                      std::string           name)
@@ -35,6 +73,14 @@ void RecordingConsumer::attach(FrameChannel& ch) {
                                  ec.message());
     }
 
+    // Basalt's EuRoC loader hardcodes num_cams=2 and tries to read cam1/data/.
+    // Pointing cam1 at cam0 with a relative symlink keeps mono recordings
+    // self-contained (the session directory remains movable).
+    std::error_code lnk_ec;
+    std::filesystem::create_directory_symlink(
+        "cam0", root_dir_ / "mav0" / "cam1", lnk_ec);
+    // Ignore lnk_ec: pre-existing symlink from a prior attach() is fine.
+
     {
         std::lock_guard lk(csv_mu_);
         csv_.open(cam0_dir_ / "data.csv", std::ios::out | std::ios::trunc);
@@ -44,6 +90,7 @@ void RecordingConsumer::attach(FrameChannel& ch) {
         csv_ << "#timestamp [ns],filename\n";
         csv_.flush();
     }
+    wrote_sensor_yaml_.store(false, std::memory_order_release);
 
     channel_ = &ch;
     sub_     = ch.subscribe();
@@ -182,6 +229,16 @@ void RecordingConsumer::run_worker() {
             std::cerr << "RecordingConsumer: write failed for " << path << "\n";
             frames_dropped_.fetch_add(1, std::memory_order_relaxed);
             continue;
+        }
+
+        // First successful write: stamp sensor.yaml with the now-known
+        // dimensions. compare_exchange ensures exactly one worker wins.
+        bool expected = false;
+        if (wrote_sensor_yaml_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            write_sensor_yaml(cam0_dir_ / "sensor.yaml", task.width, task.height);
         }
 
         {

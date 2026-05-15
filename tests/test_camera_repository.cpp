@@ -47,16 +47,33 @@ TEST_F(CameraRepositoryTest, ListAllEmptyByDefault) {
 }
 
 TEST_F(CameraRepositoryTest, CreateReturnsRowWithIdAndSerial) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     EXPECT_GT(c.id, 0);
     EXPECT_EQ(c.name, "front");
     EXPECT_EQ(c.serial, "SN001");
+    EXPECT_EQ(c.lens_type, "pinhole");
     EXPECT_FALSE(c.mode.has_value());
     EXPECT_GT(c.created_at, 0);
 }
 
+TEST_F(CameraRepositoryTest, CreateRoundTripsFisheyeLensType) {
+    const auto c = repo_->create("front", "SN001", "fisheye");
+    EXPECT_EQ(c.lens_type, "fisheye");
+    const auto fetched = repo_->get(c.id);
+    ASSERT_TRUE(fetched.has_value());
+    EXPECT_EQ(fetched->lens_type, "fisheye");
+}
+
+TEST_F(CameraRepositoryTest, UpdateLensType) {
+    const auto c = repo_->create("front", "SN001", "pinhole");
+    CameraUpdate u; u.lens_type = "fisheye";
+    const auto upd = repo_->update(c.id, u);
+    ASSERT_TRUE(upd.has_value());
+    EXPECT_EQ(upd->lens_type, "fisheye");
+}
+
 TEST_F(CameraRepositoryTest, CreateWithModeRoundTrips) {
-    const auto c = repo_->create("front", "SN001", std::string_view("Mode1"));
+    const auto c = repo_->create("front", "SN001", "pinhole", std::string_view("Mode1"));
     ASSERT_TRUE(c.mode.has_value());
     EXPECT_EQ(*c.mode, "Mode1");
 
@@ -67,15 +84,15 @@ TEST_F(CameraRepositoryTest, CreateWithModeRoundTrips) {
 }
 
 TEST_F(CameraRepositoryTest, CreateWithoutModeStoresNull) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     const auto fetched = repo_->get(c.id);
     ASSERT_TRUE(fetched.has_value());
     EXPECT_FALSE(fetched->mode.has_value());
 }
 
 TEST_F(CameraRepositoryTest, CreateThenListReturnsRow) {
-    repo_->create("front", "SN001");
-    repo_->create("rear",  "SN002");
+    repo_->create("front", "SN001", "pinhole");
+    repo_->create("rear",  "SN002", "pinhole");
     const auto rows = repo_->list_all();
     ASSERT_EQ(rows.size(), 2u);
     EXPECT_EQ(rows[0].name,   "front");
@@ -85,17 +102,17 @@ TEST_F(CameraRepositoryTest, CreateThenListReturnsRow) {
 }
 
 TEST_F(CameraRepositoryTest, CreateDuplicateNameThrows) {
-    repo_->create("front", "SN001");
-    EXPECT_THROW(repo_->create("front", "SN002"), DuplicateNameError);
+    repo_->create("front", "SN001", "pinhole");
+    EXPECT_THROW(repo_->create("front", "SN002", "pinhole"), DuplicateNameError);
 }
 
 TEST_F(CameraRepositoryTest, CreateDuplicateSerialThrows) {
-    repo_->create("front", "SN001");
-    EXPECT_THROW(repo_->create("rear", "SN001"), DuplicateSerialError);
+    repo_->create("front", "SN001", "pinhole");
+    EXPECT_THROW(repo_->create("rear", "SN001", "pinhole"), DuplicateSerialError);
 }
 
 TEST_F(CameraRepositoryTest, GetReturnsRowById) {
-    const auto created = repo_->create("front", "SN001");
+    const auto created = repo_->create("front", "SN001", "pinhole");
     const auto fetched = repo_->get(created.id);
     ASSERT_TRUE(fetched.has_value());
     EXPECT_EQ(fetched->name,   "front");
@@ -108,7 +125,7 @@ TEST_F(CameraRepositoryTest, GetMissingIdReturnsNullopt) {
 }
 
 TEST_F(CameraRepositoryTest, FindBySerialReturnsRow) {
-    repo_->create("front", "SN001");
+    repo_->create("front", "SN001", "pinhole");
     const auto found = repo_->find_by_serial("SN001");
     ASSERT_TRUE(found.has_value());
     EXPECT_EQ(found->name, "front");
@@ -119,7 +136,7 @@ TEST_F(CameraRepositoryTest, FindBySerialMissingReturnsNullopt) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateChangesName) {
-    const auto c       = repo_->create("front", "SN001");
+    const auto c       = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u; u.name = "front-left";
     const auto updated = repo_->update(c.id, u);
     ASSERT_TRUE(updated.has_value());
@@ -138,14 +155,14 @@ TEST_F(CameraRepositoryTest, UpdateMissingIdReturnsNullopt) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateToExistingNameThrows) {
-    repo_->create("front", "SN001");
-    const auto rear = repo_->create("rear", "SN002");
+    repo_->create("front", "SN001", "pinhole");
+    const auto rear = repo_->create("rear", "SN002", "pinhole");
     CameraUpdate u; u.name = "front";
     EXPECT_THROW(repo_->update(rear.id, u), DuplicateNameError);
 }
 
 TEST_F(CameraRepositoryTest, UpdateModeOnly) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u; u.mode = "Mode1";
     const auto updated = repo_->update(c.id, u);
     ASSERT_TRUE(updated.has_value());
@@ -155,7 +172,7 @@ TEST_F(CameraRepositoryTest, UpdateModeOnly) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateNameAndMode) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u; u.name = "front-left"; u.mode = "Mode5";
     const auto updated = repo_->update(c.id, u);
     ASSERT_TRUE(updated.has_value());
@@ -165,7 +182,7 @@ TEST_F(CameraRepositoryTest, UpdateNameAndMode) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateNeitherIsNoOpReturningCurrentRow) {
-    const auto c = repo_->create("front", "SN001", std::string_view("Mode0"));
+    const auto c = repo_->create("front", "SN001", "pinhole", std::string_view("Mode0"));
     const auto unchanged = repo_->update(c.id, CameraUpdate{});
     ASSERT_TRUE(unchanged.has_value());
     EXPECT_EQ(unchanged->id, c.id);
@@ -175,7 +192,7 @@ TEST_F(CameraRepositoryTest, UpdateNeitherIsNoOpReturningCurrentRow) {
 }
 
 TEST_F(CameraRepositoryTest, CreateLeavesSettingsNull) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     EXPECT_FALSE(c.gain_auto.has_value());
     EXPECT_FALSE(c.gain.has_value());
     EXPECT_FALSE(c.exposure_auto.has_value());
@@ -183,7 +200,7 @@ TEST_F(CameraRepositoryTest, CreateLeavesSettingsNull) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateGainAutoOnlyRoundTrips) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u; u.gain_auto = true;
     const auto upd = repo_->update(c.id, u);
     ASSERT_TRUE(upd.has_value());
@@ -193,7 +210,7 @@ TEST_F(CameraRepositoryTest, UpdateGainAutoOnlyRoundTrips) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateGainAutoAndValueRoundTrips) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u; u.gain_auto = false; u.gain = 12.5;
     const auto upd = repo_->update(c.id, u);
     ASSERT_TRUE(upd.has_value());
@@ -204,7 +221,7 @@ TEST_F(CameraRepositoryTest, UpdateGainAutoAndValueRoundTrips) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateExposureRoundTrips) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u; u.exposure_auto = false; u.exposure = 8333.0;
     const auto upd = repo_->update(c.id, u);
     ASSERT_TRUE(upd.has_value());
@@ -215,7 +232,7 @@ TEST_F(CameraRepositoryTest, UpdateExposureRoundTrips) {
 }
 
 TEST_F(CameraRepositoryTest, UpdateAllSettingsAtOnce) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     CameraUpdate u;
     u.gain_auto     = false;
     u.gain          = 6.0;
@@ -235,7 +252,7 @@ TEST_F(CameraRepositoryTest, UpdateAllSettingsAtOnce) {
 }
 
 TEST_F(CameraRepositoryTest, UpdatePartialSettingsLeavesOthersUntouched) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     {
         CameraUpdate u; u.gain = 10.0; u.exposure = 5000.0;
         repo_->update(c.id, u);
@@ -255,8 +272,8 @@ TEST_F(CameraRepositoryTest, UpdatePartialSettingsLeavesOthersUntouched) {
 }
 
 TEST_F(CameraRepositoryTest, ListAllReturnsMode) {
-    repo_->create("front", "SN001", std::string_view("Mode1"));
-    repo_->create("rear",  "SN002");
+    repo_->create("front", "SN001", "pinhole", std::string_view("Mode1"));
+    repo_->create("rear",  "SN002", "pinhole");
     const auto rows = repo_->list_all();
     ASSERT_EQ(rows.size(), 2u);
     ASSERT_TRUE(rows[0].mode.has_value());
@@ -265,7 +282,7 @@ TEST_F(CameraRepositoryTest, ListAllReturnsMode) {
 }
 
 TEST_F(CameraRepositoryTest, RemoveReturnsTrueWhenRowDeleted) {
-    const auto c = repo_->create("front", "SN001");
+    const auto c = repo_->create("front", "SN001", "pinhole");
     EXPECT_TRUE(repo_->remove(c.id));
     EXPECT_FALSE(repo_->get(c.id).has_value());
 }

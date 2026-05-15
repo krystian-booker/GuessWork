@@ -17,6 +17,7 @@ class RecordingConsumer;
 namespace gw::server {
 
 class CameraSupervisor;
+class CameraRepository;
 
 // Status snapshot of an in-progress recording session.
 struct CalibrationSessionStatus {
@@ -54,8 +55,11 @@ public:
 class CalibrationSupervisor {
 public:
     // calibrations_root is the directory under which session subdirectories
-    // are created (typically ~/.guesswork/calibrations).
+    // are created (typically ~/.guesswork/calibrations). The repository is
+    // consulted at session start to read the camera's lens_type, which drives
+    // the basalt cam-types in the suggested command.
     CalibrationSupervisor(CameraSupervisor&     cameras,
+                          CameraRepository&     repository,
                           std::filesystem::path calibrations_root);
     ~CalibrationSupervisor();
 
@@ -79,15 +83,18 @@ private:
     struct Session {
         std::string                                  session_id;
         std::filesystem::path                        root;
+        std::string                                  lens_type;  // captured at start
         std::unique_ptr<RecordingConsumer>           consumer;
         std::chrono::steady_clock::time_point        started_at;
     };
 
     CalibrationSessionStatus status_locked(const Session& s) const;
     std::string              build_suggested_command(
-                                 const std::filesystem::path& dataset_root) const;
+                                 const std::filesystem::path& dataset_root,
+                                 std::string_view             lens_type) const;
 
     CameraSupervisor&                 cameras_;
+    CameraRepository&                 repository_;
     std::filesystem::path             root_;
     std::mutex                        mu_;
     std::map<int64_t, Session>        sessions_;

@@ -52,6 +52,16 @@ int64_t read_int_node(Spinnaker::GenApi::INodeMap& nm, const char* node_name) {
     return ptr->GetValue();
 }
 
+void set_int_node(Spinnaker::GenApi::INodeMap& nm,
+                  const char*                  node_name,
+                  int64_t                      value) {
+    Spinnaker::GenApi::CIntegerPtr ptr = nm.GetNode(node_name);
+    if (!Spinnaker::GenApi::IsWritable(ptr)) {
+        throw std::runtime_error(std::string("Spinnaker node not writable: ") + node_name);
+    }
+    ptr->SetValue(value);
+}
+
 // Per-node helpers for the live-settings path. Each tolerates the node being
 // absent or non-readable so partial-support cameras drop fields silently
 // rather than fail the whole apply.
@@ -300,9 +310,21 @@ void SpinnakerProducer::start() {
     try {
         cam->Init();
 
-        // Force NewestOnly buffer mode on the TL stream.
+        // Force NewestOnly buffer mode on the TL stream. The buffer count must
+        // also be pinned to the size of the user pool we're about to register:
+        // - In Auto count mode Spinnaker sizes its internal queue independently
+        //   of SetUserBuffers — typically 3 — which causes the acquisition
+        //   engine to starve on DMA after a few hundred frames whenever the
+        //   application holds even one buffer briefly.
+        // - In Manual count mode the count defaults to the camera's prior value
+        //   (often still 3), so we must explicitly set StreamBufferCountManual
+        //   to match kPoolCapacity, otherwise Spinnaker silently uses fewer
+        //   slots than we provided in SetUserBuffers and the acquisition engine
+        //   wedges once the steady-state in-flight count exceeds its quota.
         Spinnaker::GenApi::INodeMap& tl_stream_nm = cam->GetTLStreamNodeMap();
         set_enum_node(tl_stream_nm, "StreamBufferHandlingMode", "NewestOnly");
+        set_enum_node(tl_stream_nm, "StreamBufferCountMode",    "Manual");
+        set_int_node (tl_stream_nm, "StreamBufferCountManual",  kPoolCapacity);
 
         // Cache the available modes for this camera while we hold Init.
         impl_->cached_modes = enumerate_video_modes_initialized(cam);
@@ -313,7 +335,8 @@ void SpinnakerProducer::start() {
         if (impl_->mode && !impl_->mode->empty()) {
             set_enum_node(dev_nm, "VideoMode", impl_->mode->c_str());
         }
-        set_enum_node(dev_nm, "PixelFormat", "Mono8");
+        set_enum_node(dev_nm, "PixelFormat",     "Mono8");
+        set_enum_node(dev_nm, "AcquisitionMode", "Continuous");  // belt-and-suspenders, default on Chameleon3
 
         const int64_t w = read_int_node(dev_nm, "Width");
         const int64_t h = read_int_node(dev_nm, "Height");

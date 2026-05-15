@@ -1,9 +1,12 @@
 import { asJson, readError } from './http'
 
+export type LensType = 'pinhole' | 'fisheye'
+
 export interface Camera {
   id: number
   name: string
   serial: string
+  lens_type: LensType
   mode: string | null
   // Geometry + max FPS for the currently-running mode. null when the camera is
   // offline or its producer didn't report a value.
@@ -82,9 +85,14 @@ export async function listAvailableCameras(): Promise<AvailableCamera[]> {
 export async function createCamera(input: {
   name: string
   serial: string
+  lens_type: LensType
   mode?: string
 }): Promise<Camera> {
-  const body: Record<string, unknown> = { name: input.name, serial: input.serial }
+  const body: Record<string, unknown> = {
+    name: input.name,
+    serial: input.serial,
+    lens_type: input.lens_type,
+  }
   if (input.mode) body.mode = input.mode
   const res = await fetch('/api/cameras', {
     method: 'POST',
@@ -96,7 +104,7 @@ export async function createCamera(input: {
 
 export async function updateCamera(
   id: number,
-  patch: { name?: string; mode?: string } & CameraSettingsPatch,
+  patch: { name?: string; mode?: string; lens_type?: LensType } & CameraSettingsPatch,
 ): Promise<Camera> {
   const res = await fetch(`/api/cameras/${id}`, {
     method: 'PUT',

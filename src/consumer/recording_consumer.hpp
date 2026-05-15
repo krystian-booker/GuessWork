@@ -105,6 +105,10 @@ private:
     std::atomic<uint64_t>      frames_written_{0};
     std::atomic<uint64_t>      frames_dropped_{0};
     uint64_t                   last_seq_ = 0;
+
+    // sensor.yaml is written once the first frame's dimensions are known.
+    // Latched to prevent later workers from rewriting it.
+    std::atomic<bool>          wrote_sensor_yaml_{false};
 };
 
 }  // namespace gw

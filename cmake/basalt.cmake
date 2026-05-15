@@ -40,8 +40,8 @@ ExternalProject_Add(basalt_external
         -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_INSTALL_PREFIX=${BASALT_INSTALL_DIR}
         # Use Basalt's bundled vcpkg manifest. Path is relative to the cloned
-        # source tree (Basalt vendors vcpkg as `external/vcpkg`).
-        -DCMAKE_TOOLCHAIN_FILE=<SOURCE_DIR>/external/vcpkg/scripts/buildsystems/vcpkg.cmake
+        # source tree (Basalt vendors vcpkg as `thirdparty/vcpkg`).
+        -DCMAKE_TOOLCHAIN_FILE=<SOURCE_DIR>/thirdparty/vcpkg/scripts/buildsystems/vcpkg.cmake
     INSTALL_DIR            ${BASALT_INSTALL_DIR}
     BUILD_BYPRODUCTS       ${BASALT_INSTALL_DIR}/bin/basalt_calibrate
 )

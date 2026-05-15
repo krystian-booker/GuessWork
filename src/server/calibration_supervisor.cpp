@@ -8,6 +8,7 @@
 
 #include "consumer/recording_consumer.hpp"
 #include "core/frame_channel.hpp"
+#include "server/camera_repository.hpp"
 #include "server/camera_supervisor.hpp"
 
 #ifndef GW_BASALT_CALIBRATE_BIN
@@ -54,8 +55,9 @@ std::string sh_quote(const std::filesystem::path& p) {
 }  // namespace
 
 CalibrationSupervisor::CalibrationSupervisor(CameraSupervisor&     cameras,
+                                             CameraRepository&     repository,
                                              std::filesystem::path root)
-    : cameras_(cameras), root_(std::move(root)) {
+    : cameras_(cameras), repository_(repository), root_(std::move(root)) {
     std::error_code ec;
     std::filesystem::create_directories(root_, ec);
     // Don't throw on construction — start() will surface a clearer error if
@@ -74,6 +76,10 @@ CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
     if (sessions_.count(camera_id)) {
         throw CalibrationError("session already active for this camera");
     }
+    const auto row = repository_.get(camera_id);
+    if (!row) {
+        throw CalibrationError("camera not found");
+    }
     gw::FrameChannel* ch = cameras_.frame_channel_for(camera_id);
     if (!ch) {
         throw CalibrationError("camera is offline");
@@ -82,6 +88,7 @@ CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
     Session s;
     s.session_id = make_session_id();
     s.root       = root_ / s.session_id;
+    s.lens_type  = row->lens_type;
     s.consumer   = std::make_unique<gw::RecordingConsumer>(s.root, "calibration");
     s.started_at = std::chrono::steady_clock::now();
     s.consumer->attach(*ch);  // may throw on filesystem error — that's the desired surface
@@ -117,7 +124,7 @@ CalibrationSessionResult CalibrationSupervisor::stop(int64_t camera_id) {
     r.frames_dropped    = consumer ? consumer->frames_dropped() : 0;
     r.elapsed_ms        = std::chrono::duration_cast<std::chrono::milliseconds>(
                               now - s.started_at).count();
-    r.suggested_command = build_suggested_command(s.root);
+    r.suggested_command = build_suggested_command(s.root, s.lens_type);
     return r;
 }
 
@@ -142,7 +149,8 @@ CalibrationSupervisor::status_locked(const Session& s) const {
 }
 
 std::string CalibrationSupervisor::build_suggested_command(
-    const std::filesystem::path& dataset_root) const {
+    const std::filesystem::path& dataset_root,
+    std::string_view             lens_type) const {
     const std::string bin       = GW_BASALT_CALIBRATE_BIN;
     const std::string aprilgrid = GW_BASALT_APRILGRID_DEFAULT;
 
@@ -153,13 +161,19 @@ std::string CalibrationSupervisor::build_suggested_command(
     const std::string dataset_part   = sh_quote(dataset_root);
     const std::string result_part    = sh_quote(dataset_root / "result");
 
+    // Basalt's EuRoC loader hardcodes num_cams=2, so --cam-types must be passed
+    // twice even for mono setups (the recording supervisor symlinks cam1->cam0
+    // for the same reason). pinhole-radtan8 fits typical machine-vision lenses;
+    // ds (double-sphere) handles fisheye / wide-FOV optics.
+    const std::string model = (lens_type == "fisheye") ? "ds" : "pinhole-radtan8";
+
     std::ostringstream os;
     os << bin_part
        << " --dataset-path "  << dataset_part
        << " --dataset-type euroc"
        << " --aprilgrid "     << aprilgrid_part
        << " --result-path "   << result_part
-       << " --cam-types ds";
+       << " --cam-types "     << model << ' ' << model;
     return os.str();
 }
 

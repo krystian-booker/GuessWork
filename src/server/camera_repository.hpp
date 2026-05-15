@@ -15,6 +15,7 @@ struct Camera {
     int64_t                    id         = 0;
     std::string                name;
     std::string                serial;
+    std::string                lens_type;  // 'pinhole' or 'fisheye' — drives basalt cam-types
     std::optional<std::string> mode;       // GenICam VideoMode symbolic, or unset
     // Live-tunable settings. Each unset (nullopt) means "use camera default" —
     // we don't touch the corresponding GenICam node at start.
@@ -33,6 +34,7 @@ struct Camera {
 // a no-op. The repository preserves any field left at nullopt.
 struct CameraUpdate {
     std::optional<std::string> name;
+    std::optional<std::string> lens_type;
     std::optional<std::string> mode;
     std::optional<bool>        gain_auto;
     std::optional<double>      gain;
@@ -40,7 +42,8 @@ struct CameraUpdate {
     std::optional<double>      exposure;
 
     bool empty() const {
-        return !name && !mode && !gain_auto && !gain && !exposure_auto && !exposure;
+        return !name && !lens_type && !mode
+            && !gain_auto && !gain && !exposure_auto && !exposure;
     }
 };
 
@@ -69,8 +72,11 @@ public:
     std::optional<Camera> find_by_serial(std::string_view serial);
 
     // Throws DuplicateNameError or DuplicateSerialError on UNIQUE conflict.
+    // lens_type is required ('pinhole' or 'fisheye'); validation lives in the
+    // route layer.
     Camera                create(std::string_view                name,
                                  std::string_view                serial,
+                                 std::string_view                lens_type,
                                  std::optional<std::string_view> mode = std::nullopt);
 
     // Partial update. Any field of CameraUpdate may be nullopt to leave it

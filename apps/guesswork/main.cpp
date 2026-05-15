@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
     }
 
     const auto calibration_root = gw::server::Database::data_dir() / "calibrations";
-    gw::server::CalibrationSupervisor calibration(supervisor, calibration_root);
+    gw::server::CalibrationSupervisor calibration(supervisor, cameras, calibration_root);
     std::cerr << "guesswork: calibration recordings at " << calibration_root << "\n";
 
     const auto started_at = std::chrono::steady_clock::now();

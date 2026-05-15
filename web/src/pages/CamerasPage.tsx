@@ -12,6 +12,7 @@ import {
   type AvailableCamera,
   type Camera,
   type CameraMode,
+  type LensType,
 } from '../api/cameras'
 import ModeSelect from '../components/ModeSelect'
 import { dangerButtonStyle, neutralButtonStyle, primaryButtonStyle } from '../components/buttonStyles'
@@ -107,6 +108,7 @@ export default function CamerasPage() {
   const [addLoading, setAddLoading] = useState(false)
   const [addModes, setAddModes] = useState<ModesState>(emptyModes)
   const [addSelectedMode, setAddSelectedMode] = useState<string | null>(null)
+  const [addLensType, setAddLensType] = useState<LensType | null>(null)
 
   // --- Edit modal state ---
   const [editCamera, setEditCamera] = useState<Camera | null>(null)
@@ -114,6 +116,7 @@ export default function CamerasPage() {
   const [editError, setEditError] = useState<string | null>(null)
   const [editModes, setEditModes] = useState<ModesState>(emptyModes)
   const [editSelectedMode, setEditSelectedMode] = useState<string | null>(null)
+  const [editLensType, setEditLensType] = useState<LensType>('pinhole')
 
   const refresh = async () => {
     try {
@@ -140,6 +143,7 @@ export default function CamerasPage() {
     setAvailable(null)
     setAddModes(emptyModes)
     setAddSelectedMode(null)
+    setAddLensType(null)
     try {
       const list = await listAvailableCameras()
       setAvailable(list)
@@ -190,13 +194,14 @@ export default function CamerasPage() {
 
   const onSubmitAdd = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!addName.trim() || !addSerial || busy) return
+    if (!addName.trim() || !addSerial || !addLensType || busy) return
     setBusy(true)
     setAddError(null)
     try {
       await createCamera({
         name: addName.trim(),
         serial: addSerial,
+        lens_type: addLensType,
         mode:
           addModes.supported && addSelectedMode ? addSelectedMode : undefined,
       })
@@ -217,6 +222,7 @@ export default function CamerasPage() {
     setEditError(null)
     setEditModes({ ...emptyModes, loading: true })
     setEditSelectedMode(c.mode)
+    setEditLensType(c.lens_type)
     try {
       const r = await getCameraModes(c.id)
       setEditModes({
@@ -252,7 +258,7 @@ export default function CamerasPage() {
     if (!trimmedName) return
 
     // Build a partial body containing only changed fields.
-    const patch: { name?: string; mode?: string } = {}
+    const patch: { name?: string; mode?: string; lens_type?: LensType } = {}
     if (trimmedName !== editCamera.name) patch.name = trimmedName
     if (
       editModes.supported &&
@@ -262,7 +268,8 @@ export default function CamerasPage() {
     ) {
       patch.mode = editSelectedMode
     }
-    if (!patch.name && !patch.mode) {
+    if (editLensType !== editCamera.lens_type) patch.lens_type = editLensType
+    if (!patch.name && !patch.mode && !patch.lens_type) {
       setEditCamera(null)
       return
     }
@@ -319,6 +326,7 @@ export default function CamerasPage() {
               <th style={{ padding: 8, width: 120 }}>Status</th>
               <th style={{ padding: 8 }}>Name</th>
               <th style={{ padding: 8, width: 180 }}>Serial</th>
+              <th style={{ padding: 8, width: 100 }}>Lens</th>
               <th style={{ padding: 8, width: 220 }}>Mode</th>
               <th style={{ padding: 8, width: 280 }}>Actions</th>
             </tr>
@@ -334,6 +342,9 @@ export default function CamerasPage() {
                 <td style={{ padding: 8 }}>{c.name}</td>
                 <td style={{ padding: 8, fontFamily: 'monospace', color: '#374151' }}>
                   {c.serial}
+                </td>
+                <td style={{ padding: 8, color: '#4b5563', textTransform: 'capitalize' }}>
+                  {c.lens_type}
                 </td>
                 <td style={{ padding: 8, color: '#4b5563' }}>
                   {c.mode ? (
@@ -442,6 +453,25 @@ export default function CamerasPage() {
                   />
                 </label>
               )}
+              <label style={{ display: 'block', marginBottom: 12 }}>
+                <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                  Lens type
+                </span>
+                <select
+                  aria-label="Lens type"
+                  value={addLensType ?? ''}
+                  onChange={(e) =>
+                    setAddLensType(e.target.value === '' ? null : (e.target.value as LensType))
+                  }
+                  style={{ ...inputStyle, width: '100%', background: '#fff' }}
+                >
+                  <option value="" disabled>
+                    Select a lens type…
+                  </option>
+                  <option value="pinhole">Pinhole (normal lens)</option>
+                  <option value="fisheye">Fisheye / wide-FOV</option>
+                </select>
+              </label>
               {addError && (
                 <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{addError}</p>
               )}
@@ -457,7 +487,8 @@ export default function CamerasPage() {
                     addLoading ||
                     addModes.loading ||
                     !addName.trim() ||
-                    !addSerial
+                    !addSerial ||
+                    !addLensType
                   }
                 >
                   Add
@@ -509,6 +540,20 @@ export default function CamerasPage() {
                   }
                   disabledHint="Camera must be online to change Mode."
                 />
+              </label>
+              <label style={{ display: 'block', marginBottom: 12 }}>
+                <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                  Lens type
+                </span>
+                <select
+                  aria-label="Lens type"
+                  value={editLensType}
+                  onChange={(e) => setEditLensType(e.target.value as LensType)}
+                  style={{ ...inputStyle, width: '100%', background: '#fff' }}
+                >
+                  <option value="pinhole">Pinhole (normal lens)</option>
+                  <option value="fisheye">Fisheye / wide-FOV</option>
+                </select>
               </label>
               {editError && (
                 <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{editError}</p>
