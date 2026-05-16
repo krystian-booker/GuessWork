@@ -12,14 +12,30 @@ export interface RecordingResult extends RecordingStatus {
   suggested_command: string
 }
 
-// basalt_calibrate's output JSON. We don't enforce the full schema on the
-// client — the server stores whatever we PUT and parses it back on GET.
-export type CalibrationDocument = Record<string, unknown>
+// Raw Kalibr camchain YAML text. The server stores and returns it verbatim;
+// the UI parses with js-yaml on demand for display purposes.
+export type CalibrationYaml = string
 
 export interface CameraCalibration {
   camera_id: number
   calibrated_at: number | null
-  calibration: CalibrationDocument | string | null
+  calibration: CalibrationYaml | null
+}
+
+// Subset of a Kalibr camchain.yaml that the UI displays. The on-disk shape
+// can include more cameras, baselines, etc. — we only read cam0 for the
+// mono-intrinsic PoC.
+export interface KalibrCameraEntry {
+  camera_model?: string                            // e.g. "pinhole"
+  distortion_model?: string                        // e.g. "radtan", "equidistant"
+  intrinsics?: [number, number, number, number]    // fx, fy, cx, cy
+  distortion_coeffs?: number[]
+  resolution?: [number, number]
+  rostopic?: string
+}
+
+export interface KalibrCamchain {
+  cam0?: KalibrCameraEntry
 }
 
 export async function startRecording(
@@ -62,12 +78,12 @@ export async function getCalibration(
 
 export async function uploadCalibration(
   cameraId: number,
-  document: CalibrationDocument,
+  yaml: string,
 ): Promise<CameraCalibration> {
   const res = await fetch(`/api/cameras/${cameraId}/calibration`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(document),
+    headers: { 'Content-Type': 'application/x-yaml' },
+    body: yaml,
   })
   return asJson<CameraCalibration>(res)
 }

@@ -33,7 +33,7 @@ constexpr const char* kSchemaCameras =
     "  gain             REAL,"
     "  exposure_auto    INTEGER,"
     "  exposure         REAL,"
-    "  calibration_json TEXT,"      // basalt_calibrate output, NULL = uncalibrated
+    "  calibration_json TEXT,"      // Kalibr camchain YAML, NULL = uncalibrated
     "  calibrated_at    INTEGER,"   // unix seconds when calibration was uploaded
     "  created_at       INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";

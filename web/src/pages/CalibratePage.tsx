@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import yaml from 'js-yaml'
 import {
   deleteCalibration,
   getCalibration,
@@ -7,8 +8,9 @@ import {
   startRecording,
   stopRecording,
   uploadCalibration,
-  type CalibrationDocument,
+  type CalibrationYaml,
   type CameraCalibration,
+  type KalibrCamchain,
   type RecordingResult,
   type RecordingStatus,
 } from '../api/calibration'
@@ -42,36 +44,42 @@ function formatMs(ms: number): string {
   return `${m}m ${s.toString().padStart(2, '0')}s`
 }
 
-// Best-effort intrinsics summary for the "current calibration" card. Walks the
-// basalt_calibrate JSON for a recognisable shape; falls back to a row count.
-function summariseCalibration(doc: CalibrationDocument | string | null): {
+// Best-effort intrinsics summary for the "current calibration" card. Parses
+// Kalibr's camchain YAML (cam0 entry only — stereo entries are out of scope
+// for the mono-intrinsic PoC).
+function summariseCamchain(text: CalibrationYaml | null): {
   model?: string
+  distortion_model?: string
   width?: number
   height?: number
   fx?: number
   fy?: number
   cx?: number
   cy?: number
+  distortion?: number[]
 } | null {
-  if (!doc || typeof doc === 'string') return null
-  // Basalt wraps everything under "value0" via cereal.
-  const v0 = (doc as Record<string, unknown>)['value0']
-  const root = (v0 && typeof v0 === 'object') ? (v0 as Record<string, unknown>) : doc
-  const intrinsics = (root['intrinsics'] as unknown[]) || []
-  const resolution = (root['resolution'] as unknown[]) || []
-  if (!Array.isArray(intrinsics) || intrinsics.length === 0) return null
-  const first = intrinsics[0] as Record<string, unknown> | undefined
-  if (!first || typeof first !== 'object') return null
-  const intr = (first['intrinsics'] as Record<string, unknown> | undefined) || first
-  const cam0Res = Array.isArray(resolution) && Array.isArray(resolution[0]) ? resolution[0] : null
+  if (!text) return null
+  let doc: KalibrCamchain
+  try {
+    doc = yaml.load(text) as KalibrCamchain
+  } catch {
+    return null
+  }
+  const c = doc?.cam0
+  if (!c) return null
+  const intr = c.intrinsics ?? []
+  const res  = c.resolution ?? []
+  const dist = Array.isArray(c.distortion_coeffs) ? c.distortion_coeffs : undefined
   return {
-    model: typeof first['camera_type'] === 'string' ? (first['camera_type'] as string) : undefined,
-    width: cam0Res ? Number(cam0Res[0]) : undefined,
-    height: cam0Res ? Number(cam0Res[1]) : undefined,
-    fx: typeof intr['fx'] === 'number' ? (intr['fx'] as number) : undefined,
-    fy: typeof intr['fy'] === 'number' ? (intr['fy'] as number) : undefined,
-    cx: typeof intr['cx'] === 'number' ? (intr['cx'] as number) : undefined,
-    cy: typeof intr['cy'] === 'number' ? (intr['cy'] as number) : undefined,
+    model:            c.camera_model,
+    distortion_model: c.distortion_model,
+    width:            typeof res[0] === 'number' ? res[0] : undefined,
+    height:           typeof res[1] === 'number' ? res[1] : undefined,
+    fx: typeof intr[0] === 'number' ? intr[0] : undefined,
+    fy: typeof intr[1] === 'number' ? intr[1] : undefined,
+    cx: typeof intr[2] === 'number' ? intr[2] : undefined,
+    cy: typeof intr[3] === 'number' ? intr[3] : undefined,
+    distortion: dist,
   }
 }
 
@@ -185,8 +193,8 @@ export default function CalibratePage() {
   const onUploadFile = (file: File) => {
     if (calibBusy) return
     runCalib(async () => {
-      const parsed = JSON.parse(await file.text()) as CalibrationDocument
-      setCalibration(await uploadCalibration(cameraId, parsed))
+      const text = await file.text()
+      setCalibration(await uploadCalibration(cameraId, text))
       if (fileRef.current) fileRef.current.value = ''
     })
   }
@@ -200,7 +208,7 @@ export default function CalibratePage() {
   }
 
   const summary = useMemo(
-    () => (calibration ? summariseCalibration(calibration.calibration) : null),
+    () => (calibration ? summariseCamchain(calibration.calibration) : null),
     [calibration],
   )
 
@@ -268,10 +276,12 @@ export default function CalibratePage() {
 
       {lastResult && (
         <div style={cardStyle}>
-          <h3 style={{ marginTop: 0 }}>2. Run Basalt</h3>
+          <h3 style={{ marginTop: 0 }}>2. Run Kalibr</h3>
           <p style={{ color: '#4b5563', marginTop: 0 }}>
-            Run this command in a terminal. Basalt's calibration GUI will open; follow the
-            on-screen steps until it writes <code>calibration.json</code> to the result path.
+            Run this command in a terminal. It starts Colima, runs Kalibr in a Docker
+            container, and stops Colima again when it's done — so the VM isn't left
+            sitting around. Typically takes 1–5 minutes; on completion it writes
+            {' '}<code>camchain-calibration.yaml</code> next to the bag.
           </p>
           <pre style={codeBlockStyle}>{lastResult.suggested_command}</pre>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
@@ -287,15 +297,15 @@ export default function CalibratePage() {
       )}
 
       <div style={cardStyle}>
-        <h3 style={{ marginTop: 0 }}>3. Upload calibration.json</h3>
+        <h3 style={{ marginTop: 0 }}>3. Upload camchain YAML</h3>
         <p style={{ color: '#4b5563', marginTop: 0 }}>
-          After <code>basalt_calibrate</code> finishes, pick the resulting
-          {' '}<code>calibration.json</code> from the result directory.
+          After Kalibr finishes, pick the resulting
+          {' '}<code>camchain-calibration.yaml</code> from the dataset directory.
         </p>
         <input
           ref={fileRef}
           type="file"
-          accept="application/json,.json"
+          accept=".yaml,.yml,text/yaml,application/x-yaml"
           onChange={(e) => {
             const f = e.target.files?.[0]
             if (f) onUploadFile(f)
@@ -327,6 +337,12 @@ export default function CalibratePage() {
               <p style={{ color: '#4b5563', marginTop: 4 }}>
                 fx={summary.fx?.toFixed(2)}, fy={summary.fy?.toFixed(2)},
                 cx={summary.cx?.toFixed(2)}, cy={summary.cy?.toFixed(2)}
+              </p>
+            )}
+            {summary?.distortion && summary.distortion.length > 0 && (
+              <p style={{ color: '#4b5563', marginTop: 4 }}>
+                distortion ({summary.distortion_model ?? 'unknown'}):
+                {' '}[{summary.distortion.map((d) => d.toFixed(4)).join(', ')}]
               </p>
             )}
             <button

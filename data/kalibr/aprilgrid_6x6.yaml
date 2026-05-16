@@ -1,0 +1,12 @@
+# Default Kalibr AprilGrid target — 6×6 tags, 88 mm per tag, 0.3 inter-tag
+# spacing ratio. Matches the dimensions of the legacy Basalt aprilgrid_6x6.json
+# so a previously-printed board is still usable.
+#
+# Print at 100% scale on a rigid backing. Verify the printed tag edge length
+# with a ruler before recording — a 1 mm error here scales straight into the
+# intrinsics.
+target_type: 'aprilgrid'
+tagCols: 6
+tagRows: 6
+tagSize: 0.088
+tagSpacing: 0.3

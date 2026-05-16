@@ -6,16 +6,19 @@
 #include <sstream>
 #include <utility>
 
-#include "consumer/recording_consumer.hpp"
+#include "consumer/rosbag_recording_consumer.hpp"
 #include "core/frame_channel.hpp"
 #include "server/camera_repository.hpp"
 #include "server/camera_supervisor.hpp"
 
-#ifndef GW_BASALT_CALIBRATE_BIN
-#define GW_BASALT_CALIBRATE_BIN ""
+#ifndef GW_KALIBR_DOCKER_IMAGE
+#define GW_KALIBR_DOCKER_IMAGE "guesswork/kalibr:latest"
 #endif
-#ifndef GW_BASALT_APRILGRID_DEFAULT
-#define GW_BASALT_APRILGRID_DEFAULT ""
+#ifndef GW_KALIBR_TARGET_DEFAULT
+#define GW_KALIBR_TARGET_DEFAULT ""
+#endif
+#ifndef GW_KALIBR_CALIBRATE_SCRIPT
+#define GW_KALIBR_CALIBRATE_SCRIPT "docker/kalibr/calibrate.sh"
 #endif
 
 namespace gw::server {
@@ -89,7 +92,9 @@ CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
     s.session_id = make_session_id();
     s.root       = root_ / s.session_id;
     s.lens_type  = row->lens_type;
-    s.consumer   = std::make_unique<gw::RecordingConsumer>(s.root, "calibration");
+    s.consumer   = std::make_unique<gw::RosbagRecordingConsumer>(
+                       s.root,
+                       std::filesystem::path(GW_KALIBR_TARGET_DEFAULT));
     s.started_at = std::chrono::steady_clock::now();
     s.consumer->attach(*ch);  // may throw on filesystem error — that's the desired surface
 
@@ -98,7 +103,7 @@ CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
 }
 
 CalibrationSessionResult CalibrationSupervisor::stop(int64_t camera_id) {
-    std::unique_ptr<RecordingConsumer> consumer;
+    std::unique_ptr<RosbagRecordingConsumer> consumer;
     Session s;
     {
         std::lock_guard lk(mu_);
@@ -151,29 +156,20 @@ CalibrationSupervisor::status_locked(const Session& s) const {
 std::string CalibrationSupervisor::build_suggested_command(
     const std::filesystem::path& dataset_root,
     std::string_view             lens_type) const {
-    const std::string bin       = GW_BASALT_CALIBRATE_BIN;
-    const std::string aprilgrid = GW_BASALT_APRILGRID_DEFAULT;
+    // We wrap the docker invocation in calibrate.sh so the user gets a single
+    // command that brings Colima up, runs Kalibr, and brings Colima back down
+    // afterward (only if calibrate.sh started it). The script is bash, so the
+    // path needs shell quoting only when it contains spaces.
+    const std::filesystem::path script = GW_KALIBR_CALIBRATE_SCRIPT;
 
-    const std::string bin_part       = bin.empty()       ? "basalt_calibrate"
-                                                         : sh_quote(bin);
-    const std::string aprilgrid_part = aprilgrid.empty() ? "<path-to-aprilgrid.json>"
-                                                         : sh_quote(aprilgrid);
-    const std::string dataset_part   = sh_quote(dataset_root);
-    const std::string result_part    = sh_quote(dataset_root / "result");
-
-    // Basalt's EuRoC loader hardcodes num_cams=2, so --cam-types must be passed
-    // twice even for mono setups (the recording supervisor symlinks cam1->cam0
-    // for the same reason). pinhole-radtan8 fits typical machine-vision lenses;
-    // ds (double-sphere) handles fisheye / wide-FOV optics.
-    const std::string model = (lens_type == "fisheye") ? "ds" : "pinhole-radtan8";
+    // Kalibr --models for a single mono camera:
+    //   pinhole-radtan  — standard radial + tangential (most machine-vision optics)
+    //   pinhole-equi    — Kannala-Brandt equidistant (fisheye / wide-FOV)
+    const std::string model = (lens_type == "fisheye") ? "pinhole-equi"
+                                                       : "pinhole-radtan";
 
     std::ostringstream os;
-    os << bin_part
-       << " --dataset-path "  << dataset_part
-       << " --dataset-type euroc"
-       << " --aprilgrid "     << aprilgrid_part
-       << " --result-path "   << result_part
-       << " --cam-types "     << model << ' ' << model;
+    os << sh_quote(script) << " " << sh_quote(dataset_root) << " " << model;
     return os.str();
 }
 

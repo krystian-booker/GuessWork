@@ -37,13 +37,11 @@ if(NOT DEFINED GW_BUILD_WEB)
 endif()
 option(GW_BUILD_WEB "Build and embed the React bundle into the binary" ${GW_BUILD_WEB})
 
-# Whether to clone and build the Basalt camera calibration / VIO toolchain
-# as part of our build. OFF by default because the first-time build is
-# 15-30 min (vcpkg bootstraps the full transitive dep tree); flip ON when
-# you need basalt_calibrate, or install upstream's prebuilt binary via
-# `curl -LsSf https://gitlab.com/VladyslavUsenko/basalt/-/raw/master/scripts/install.sh | sh`
-# and leave the suggested-command fallback to use bare `basalt_calibrate`.
-option(GW_BUILD_BASALT "Clone and build Basalt for camera calibration / VIO" OFF)
+# Whether to clone and build the Basalt VIO toolchain as part of our build.
+# OFF by default because the first-time build is 15-30 min (vcpkg bootstraps
+# the full transitive dep tree). Calibration moved to Kalibr (Dockerized);
+# this option only exists for future VIO experimentation with basalt_vio.
+option(GW_BUILD_BASALT "Clone and build Basalt for VIO" OFF)
 
 if(GW_ENABLE_TSAN)
     add_compile_options(-fsanitize=thread -g -O1 -fno-omit-frame-pointer)
@@ -98,28 +96,16 @@ add_library(gw_producer
 )
 target_link_libraries(gw_producer PUBLIC gw_core gw_spinnaker)
 
-# libspng (Homebrew install) — fast PNG encoder used by RecordingConsumer.
-find_path(SPNG_INCLUDE_DIR spng.h
-    PATHS /opt/homebrew/include /usr/local/include
-    REQUIRED
-)
-find_library(SPNG_LIBRARY NAMES spng
-    PATHS /opt/homebrew/lib /usr/local/lib
-    REQUIRED
-)
-
 add_library(gw_consumer
     src/consumer/preview_consumer.mm
-    src/consumer/recording_consumer.cpp
-    src/consumer/recording_png.cpp
+    src/consumer/rosbag_writer.cpp
+    src/consumer/rosbag_recording_consumer.cpp
 )
-target_include_directories(gw_consumer PRIVATE ${SPNG_INCLUDE_DIR})
 target_link_libraries(gw_consumer PUBLIC gw_core
     "-framework Metal"
     "-framework QuartzCore"
     "-framework CoreVideo"
 )
-target_link_libraries(gw_consumer PRIVATE ${SPNG_LIBRARY})
 
 # ----------------------------------------------------------------------------
 # Video encoder (Mono8 -> NV12 + H.264 via VideoToolbox)
@@ -195,36 +181,41 @@ target_compile_options(gw_server PRIVATE
 )
 
 # ----------------------------------------------------------------------------
-# Basalt camera calibration / VIO (opt-in source build via ExternalProject)
+# Basalt VIO (opt-in source build via ExternalProject)
 # ----------------------------------------------------------------------------
-# Cache vars used by the suggested-command builder.
-#   GW_BASALT_CALIBRATE_BIN — empty falls back to bare `basalt_calibrate` on
-#                             PATH; basalt.cmake forces it to the built binary
-#                             when GW_BUILD_BASALT=ON.
-#   GW_BASALT_APRILGRID_DEFAULT — defaults to the committed grid at
-#                                 `data/aprilgrid_6x6.json` (6x6, 88mm tag,
-#                                 0.3 spacing ratio). Override with
-#                                 -D... to point at your own. basalt.cmake
-#                                 forces the bundled grid when GW_BUILD_BASALT.
-set(GW_BASALT_CALIBRATE_BIN     "" CACHE FILEPATH
-    "Path to basalt_calibrate; empty = assume on PATH")
-set(GW_BASALT_APRILGRID_DEFAULT "${CMAKE_SOURCE_DIR}/data/aprilgrid_6x6.json"
-    CACHE FILEPATH "Path to default AprilGrid config")
-# Heal stale empty cache entries from before the in-repo default existed, so
-# `cmake -S . -B build` on an old build tree picks up the committed file.
-if(NOT GW_BASALT_APRILGRID_DEFAULT)
-    set(GW_BASALT_APRILGRID_DEFAULT "${CMAKE_SOURCE_DIR}/data/aprilgrid_6x6.json"
-        CACHE FILEPATH "Path to default AprilGrid config" FORCE)
-endif()
-
+# Calibration moved to Kalibr (Dockerized) — this option only exists so a
+# future VIO experiment can pull basalt's `basalt_vio` binary without doing
+# a separate install. No app code reads anything basalt.cmake produces today.
 if(GW_BUILD_BASALT)
     include(${CMAKE_SOURCE_DIR}/cmake/basalt.cmake)
-    # basalt.cmake reassigns the cache vars above to the built install paths.
+endif()
+
+# ----------------------------------------------------------------------------
+# Kalibr (Dockerized) — compile-time defines for the suggested-command builder.
+# The image is built out-of-band (docker/kalibr/build.sh, invoked from
+# install.sh); the supervisor suggests `docker/kalibr/calibrate.sh <session>
+# <model>`, which manages the Colima lifecycle so the VM is only up while
+# Kalibr is actually running.
+# ----------------------------------------------------------------------------
+set(GW_KALIBR_DOCKER_IMAGE     "guesswork/kalibr:latest"
+    CACHE STRING   "Docker image tag for the Kalibr container")
+set(GW_KALIBR_TARGET_DEFAULT   "${CMAKE_SOURCE_DIR}/data/kalibr/aprilgrid_6x6.yaml"
+    CACHE FILEPATH "Default Kalibr AprilGrid target YAML")
+set(GW_KALIBR_CALIBRATE_SCRIPT "${CMAKE_SOURCE_DIR}/docker/kalibr/calibrate.sh"
+    CACHE FILEPATH "Script that wraps colima start + docker run + colima stop")
+if(NOT EXISTS "${GW_KALIBR_TARGET_DEFAULT}")
+    message(FATAL_ERROR
+        "GW_KALIBR_TARGET_DEFAULT not found at ${GW_KALIBR_TARGET_DEFAULT}")
+endif()
+if(NOT EXISTS "${GW_KALIBR_CALIBRATE_SCRIPT}")
+    message(FATAL_ERROR
+        "GW_KALIBR_CALIBRATE_SCRIPT not found at ${GW_KALIBR_CALIBRATE_SCRIPT}")
 endif()
 
 target_compile_definitions(gw_server PRIVATE
-    GW_BASALT_CALIBRATE_BIN="${GW_BASALT_CALIBRATE_BIN}"
-    GW_BASALT_APRILGRID_DEFAULT="${GW_BASALT_APRILGRID_DEFAULT}"
+    GW_KALIBR_DOCKER_IMAGE="${GW_KALIBR_DOCKER_IMAGE}"
+    GW_KALIBR_TARGET_DEFAULT="${GW_KALIBR_TARGET_DEFAULT}"
+    GW_KALIBR_CALIBRATE_SCRIPT="${GW_KALIBR_CALIBRATE_SCRIPT}"
 )
 
 # ----------------------------------------------------------------------------
@@ -274,7 +265,8 @@ if(GW_BUILD_TESTS)
         tests/test_database.cpp
         tests/test_camera_repository.cpp
         tests/test_camera_repository_calibration.cpp
-        tests/test_recording_consumer.cpp
+        tests/test_rosbag_writer.cpp
+        tests/test_rosbag_recording_consumer.cpp
     )
     target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server GTest::gtest_main)
     include(GoogleTest)

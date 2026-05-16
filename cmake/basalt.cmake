@@ -1,17 +1,15 @@
-# Build the Basalt VIO / camera calibration toolchain from source as part of
-# our CMake build. Driven entirely via ExternalProject_Add so that Basalt's
-# vcpkg-managed dependencies (Eigen, Sophus, TBB, Pangolin, OpenCV, fmt, ...)
-# do NOT pollute our target tree — we only consume the installed artifacts.
+# Build the Basalt VIO toolchain from source as part of our CMake build.
+# Driven entirely via ExternalProject_Add so that Basalt's vcpkg-managed
+# dependencies (Eigen, Sophus, TBB, Pangolin, OpenCV, fmt, ...) do NOT
+# pollute our target tree — we only consume the installed artifacts.
 #
-# For the calibration milestone we use only the basalt_calibrate executable.
-# When we later integrate Basalt's library for VIO, this module already
-# installs headers + libs under ${BASALT_INSTALL_DIR}; downstream code can
-# `find_package(basalt CONFIG PATHS ${BASALT_INSTALL_DIR})` without changes
-# here.
+# Calibration moved to Kalibr (Dockerized); the app no longer reads anything
+# this module produces. The option exists so a future VIO experiment can
+# pull in basalt_vio without a separate install.
 #
 # First-time build cost: 15-30 min (vcpkg bootstraps and builds the whole
 # transitive dep tree). Cached for subsequent builds; pass
-# `-DGW_BUILD_BASALT=OFF` to skip the build entirely.
+# `-DGW_BUILD_BASALT=OFF` (the default) to skip the build entirely.
 
 include(ExternalProject)
 
@@ -43,13 +41,5 @@ ExternalProject_Add(basalt_external
         # source tree (Basalt vendors vcpkg as `thirdparty/vcpkg`).
         -DCMAKE_TOOLCHAIN_FILE=<SOURCE_DIR>/thirdparty/vcpkg/scripts/buildsystems/vcpkg.cmake
     INSTALL_DIR            ${BASALT_INSTALL_DIR}
-    BUILD_BYPRODUCTS       ${BASALT_INSTALL_DIR}/bin/basalt_calibrate
+    BUILD_BYPRODUCTS       ${BASALT_INSTALL_DIR}/bin/basalt_vio
 )
-
-# Paths we pass through to the server as compile-time defines. These are
-# baked into the binary at build time and embedded in the suggested
-# basalt_calibrate command the UI shows the user.
-set(GW_BASALT_CALIBRATE_BIN  "${BASALT_INSTALL_DIR}/bin/basalt_calibrate"
-    CACHE FILEPATH "Path to the built basalt_calibrate binary" FORCE)
-set(GW_BASALT_APRILGRID_DEFAULT "${BASALT_INSTALL_DIR}/etc/basalt/aprilgrid_6x6.json"
-    CACHE FILEPATH "Default AprilGrid config bundled with Basalt" FORCE)

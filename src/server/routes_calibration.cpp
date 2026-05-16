@@ -34,22 +34,13 @@ crow::json::wvalue result_to_json(const CalibrationSessionResult& r) {
 
 crow::json::wvalue calibration_summary_to_json(const Camera& c) {
     crow::json::wvalue j;
-    j["camera_id"]        = c.id;
-    j["calibrated_at"]    = c.calibrated_at ? crow::json::wvalue(*c.calibrated_at)
+    j["camera_id"]     = c.id;
+    j["calibrated_at"] = c.calibrated_at ? crow::json::wvalue(*c.calibrated_at)
+                                         : crow::json::wvalue(nullptr);
+    // calibration_json now holds raw Kalibr camchain YAML. The frontend
+    // parses it with js-yaml; we just pass the string through.
+    j["calibration"]   = c.calibration_json ? crow::json::wvalue(*c.calibration_json)
                                             : crow::json::wvalue(nullptr);
-    // Re-parse the stored JSON so the client receives a structured object,
-    // not a JSON-encoded string. If parsing fails (shouldn't, we wrote it),
-    // fall back to the raw string.
-    if (c.calibration_json) {
-        const auto parsed = crow::json::load(*c.calibration_json);
-        if (parsed) {
-            j["calibration"] = crow::json::wvalue(parsed);
-        } else {
-            j["calibration"] = *c.calibration_json;
-        }
-    } else {
-        j["calibration"] = nullptr;
-    }
     return j;
 }
 
@@ -98,7 +89,7 @@ void register_calibration_routes(crow::SimpleApp&       app,
         }
     });
 
-    // ---- Stored calibration (intrinsics JSON) ----
+    // ---- Stored calibration (Kalibr camchain YAML) ----
 
     CROW_ROUTE(app, "/api/cameras/<int>/calibration").methods("GET"_method)
     ([&repo](int64_t id) {
@@ -112,25 +103,40 @@ void register_calibration_routes(crow::SimpleApp&       app,
         }
     });
 
-    // PUT body is the parsed contents of basalt_calibrate's calibration.json.
-    // We only enforce a minimal shape check ("value" or "intrinsics" must be
-    // present at top level) — Basalt's exact schema can drift; we'll tighten
-    // when we link the library for VIO.
+    // PUT body is Kalibr's camchain YAML.
+    //
+    // Content-Type negotiation: text/yaml or application/x-yaml (preferred,
+    // and what the web UI sends) stores req.body verbatim. application/json
+    // accepts a transport wrapper `{ "yaml": "<camchain text>" }` so curl
+    // users on JSON-only clients aren't surprised.
+    //
+    // Shape check: Kalibr camchains always start with a top-level `cam0:`
+    // map. We grep for that substring rather than parsing YAML server-side
+    // (yaml-cpp would be the only consumer of a YAML parser here).
     CROW_ROUTE(app, "/api/cameras/<int>/calibration").methods("PUT"_method)
     ([&repo](const crow::request& req, int64_t id) {
         try {
-            const auto body = crow::json::load(req.body);
-            if (!body) {
-                return error_response(400, "invalid JSON body");
+            std::string yaml_text;
+            const auto  ctype = req.get_header_value("Content-Type");
+            const bool  looks_json =
+                ctype.find("application/json") != std::string::npos;
+            if (looks_json) {
+                const auto body = crow::json::load(req.body);
+                if (!body || !body.has("yaml") ||
+                    body["yaml"].t() != crow::json::type::String) {
+                    return error_response(400,
+                        "JSON body must contain string field \"yaml\"");
+                }
+                yaml_text = body["yaml"].s();
+            } else {
+                yaml_text = req.body;
             }
-            // Basalt's calibration.json wraps everything under a top-level
-            // "value0" key (cereal serialization). Accept either that or a
-            // bare intrinsics shape so the front-end can be permissive.
-            if (!body.has("value0") && !body.has("intrinsics") && !body.has("T_imu_cam")) {
+
+            if (yaml_text.find("cam0:") == std::string::npos) {
                 return error_response(400,
-                    "calibration JSON must contain 'value0', 'intrinsics', or 'T_imu_cam'");
+                    "calibration YAML must contain a top-level 'cam0:' key (Kalibr camchain)");
             }
-            const auto c = repo.set_calibration(id, req.body);
+            const auto c = repo.set_calibration(id, yaml_text);
             if (!c) return error_response(404, "camera not found");
             return json_response(200, calibration_summary_to_json(*c));
         } catch (const std::exception& e) {

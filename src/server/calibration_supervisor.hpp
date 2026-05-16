@@ -11,7 +11,7 @@
 #include <string>
 
 namespace gw {
-class RecordingConsumer;
+class RosbagRecordingConsumer;
 }
 
 namespace gw::server {
@@ -29,7 +29,7 @@ struct CalibrationSessionStatus {
 };
 
 // Result returned to the client after a session is stopped. Adds a copy-
-// pasteable basalt_calibrate command line; the path/counters mirror the
+// pasteable Kalibr docker command line; the path/counters mirror the
 // snapshot fields.
 struct CalibrationSessionResult {
     std::string             session_id;
@@ -46,18 +46,19 @@ public:
 };
 
 // Owns per-camera recording sessions for camera calibration. Each session
-// writes a EuRoC-format dataset under <root>/<session_id>/, which the user
-// hands off to basalt_calibrate manually. Single session per camera at a time.
+// writes a ROS1 bag + target.yaml under <root>/<session_id>/, which the user
+// hands off to Kalibr (running in a Docker container) manually. Single session
+// per camera at a time.
 //
 // Thread-safety: a mutex serialises mutations to the session map; the
-// RecordingConsumer attached inside each session does its own work on its own
-// worker thread, independent of this lock.
+// RosbagRecordingConsumer attached inside each session does its own work on
+// its own worker thread, independent of this lock.
 class CalibrationSupervisor {
 public:
     // calibrations_root is the directory under which session subdirectories
     // are created (typically ~/.guesswork/calibrations). The repository is
     // consulted at session start to read the camera's lens_type, which drives
-    // the basalt cam-types in the suggested command.
+    // the Kalibr camera model in the suggested command.
     CalibrationSupervisor(CameraSupervisor&     cameras,
                           CameraRepository&     repository,
                           std::filesystem::path calibrations_root);
@@ -72,8 +73,8 @@ public:
     CalibrationSessionStatus start(int64_t camera_id);
 
     // Stops the active session. Throws CalibrationError if no session exists.
-    // The on-disk recording is left in place for the user to feed into
-    // basalt_calibrate.
+    // The on-disk recording is left in place for the user to feed into the
+    // Kalibr container.
     CalibrationSessionResult stop(int64_t camera_id);
 
     // Snapshot of an active session, or nullopt if none.
@@ -84,7 +85,7 @@ private:
         std::string                                  session_id;
         std::filesystem::path                        root;
         std::string                                  lens_type;  // captured at start
-        std::unique_ptr<RecordingConsumer>           consumer;
+        std::unique_ptr<RosbagRecordingConsumer>     consumer;
         std::chrono::steady_clock::time_point        started_at;
     };
 

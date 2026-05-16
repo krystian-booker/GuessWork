@@ -146,8 +146,8 @@ bool parse_optional_number(const crow::json::rvalue& body, const char* field,
 }
 
 // lens_type must be one of the two values the calibration command builder knows
-// how to map to a Basalt cam-type. Reject anything else at the route boundary
-// so the DB and downstream code can trust the value.
+// how to map to a Kalibr camera model. Reject anything else at the route
+// boundary so the DB and downstream code can trust the value.
 bool is_valid_lens_type(std::string_view v) {
     return v == "pinhole" || v == "fisheye";
 }
