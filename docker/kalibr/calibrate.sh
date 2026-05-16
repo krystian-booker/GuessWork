@@ -15,6 +15,18 @@
 # keeps per-worker memory well under the Colima VM's allocation. Pass 0 to
 # pass every frame through (only useful with a beefier VM and slow capture).
 #
+# Env vars:
+#   GW_KALIBR_FOCAL_HINT=<pixels>
+#     Optional focal-length hint in pixels for Kalibr's optimizer. Kalibr's
+#     auto-init via Zhang's method occasionally fails on real-world bags
+#     even with healthy detections; when it does, calibration falls back to
+#     all-NaN intrinsics. Setting this env var enables Kalibr's manual-init
+#     fallback (which the entrypoint otherwise leaves off because docker
+#     run --rm has no TTY for the prompt). A rough estimate is fine — the
+#     optimizer refines from there.
+#       focal_px ≈ (image_width / 2) / tan(HFOV_deg / 2 * π / 180)
+#     e.g. 2048-wide sensor + ~70° HFOV → ~1450 pixels.
+#
 # Behavior:
 #   - If the Docker socket is reachable already (Colima or Docker Desktop is
 #     up), we use it and leave it as-is afterward.
@@ -32,6 +44,7 @@ SESSION="${1:-}"
 MODEL="${2:-pinhole-radtan}"
 BAG_FREQ="${3:-4}"
 IMAGE="${GW_KALIBR_IMAGE:-guesswork/kalibr:latest}"
+FOCAL_HINT="${GW_KALIBR_FOCAL_HINT:-}"
 # Colima VM resources if we end up starting the VM ourselves. Only applied on
 # the *first* `colima start` — an existing profile keeps whatever it was
 # created with. Match install.sh so a fresh user gets one consistent VM.
@@ -64,6 +77,14 @@ esac
 # target rate in Hz that Kalibr subsamples the bag to).
 if ! [[ "$BAG_FREQ" =~ ^[0-9]+$ ]]; then
     echo "bag-freq-hz must be a non-negative integer (got: $BAG_FREQ)" >&2; exit 2
+fi
+
+# Focal hint: positive number (allow decimals). Empty = no hint, use auto-init.
+if [[ -n "$FOCAL_HINT" ]]; then
+    if ! [[ "$FOCAL_HINT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "GW_KALIBR_FOCAL_HINT must be a positive number (got: $FOCAL_HINT)" >&2
+        exit 2
+    fi
 fi
 
 # Resolve to an absolute path so the docker -v mount is unambiguous regardless
@@ -104,25 +125,46 @@ fi
 FREQ_ARGS=()
 if [[ "$BAG_FREQ" -gt 0 ]]; then
     FREQ_ARGS=(--bag-freq "$BAG_FREQ")
-    log "running Kalibr on $SESSION_ABS (model=$MODEL, subsampled to ${BAG_FREQ} Hz)…"
+    desc="model=$MODEL, subsampled to ${BAG_FREQ} Hz"
 else
-    log "running Kalibr on $SESSION_ABS (model=$MODEL, full bag)…"
+    desc="model=$MODEL, full bag"
 fi
-docker run --rm \
-    -v "$SESSION_ABS":/data \
-    -w /data \
-    "$IMAGE" \
-    rosrun kalibr kalibr_calibrate_cameras \
-        --bag /data/calibration.bag \
-        --topics /cam0/image_raw \
-        --models "$MODEL" \
-        --target /data/target.yaml \
-        "${FREQ_ARGS[@]}"
 
-# Kalibr writes camchain-<bag-basename>.yaml; for calibration.bag that's
-# camchain-calibration.yaml. Surface it explicitly so the user can copy the
+# Manual focal-length init path: when a hint is provided we run docker with
+# `-i` (keep stdin open) and pipe the hint into Kalibr's manual-init prompt.
+# The env var inside the container is what activates the prompt; otherwise
+# the entrypoint leaves it unset and Kalibr's auto-init is the only path.
+if [[ -n "$FOCAL_HINT" ]]; then
+    log "running Kalibr on $SESSION_ABS ($desc, focal-hint=${FOCAL_HINT} px)…"
+    printf '%s\n' "$FOCAL_HINT" | docker run --rm -i \
+        -e KALIBR_MANUAL_FOCAL_LENGTH_INIT=1 \
+        -v "$SESSION_ABS":/data \
+        -w /data \
+        "$IMAGE" \
+        rosrun kalibr kalibr_calibrate_cameras \
+            --bag /data/calibration.bag \
+            --topics /cam0/image_raw \
+            --models "$MODEL" \
+            --target /data/target.yaml \
+            "${FREQ_ARGS[@]}"
+else
+    log "running Kalibr on $SESSION_ABS ($desc)…"
+    docker run --rm \
+        -v "$SESSION_ABS":/data \
+        -w /data \
+        "$IMAGE" \
+        rosrun kalibr kalibr_calibrate_cameras \
+            --bag /data/calibration.bag \
+            --topics /cam0/image_raw \
+            --models "$MODEL" \
+            --target /data/target.yaml \
+            "${FREQ_ARGS[@]}"
+fi
+
+# Kalibr writes <bag-basename>-camchain.yaml; for calibration.bag that's
+# calibration-camchain.yaml. Surface it explicitly so the user can copy the
 # path straight into the upload button.
-RESULT="$SESSION_ABS/camchain-calibration.yaml"
+RESULT="$SESSION_ABS/calibration-camchain.yaml"
 if [[ -f "$RESULT" ]]; then
     log "done. camchain: $RESULT"
 else

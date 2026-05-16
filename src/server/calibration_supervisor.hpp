@@ -57,8 +57,9 @@ class CalibrationSupervisor {
 public:
     // calibrations_root is the directory under which session subdirectories
     // are created (typically ~/.guesswork/calibrations). The repository is
-    // consulted at session start to read the camera's lens_type, which drives
-    // the Kalibr camera model in the suggested command.
+    // consulted at session start to read the camera's focal_length_mm, which
+    // drives the Kalibr focal-length hint and the camera model selection in
+    // the suggested command.
     CalibrationSupervisor(CameraSupervisor&     cameras,
                           CameraRepository&     repository,
                           std::filesystem::path calibrations_root);
@@ -84,7 +85,7 @@ private:
     struct Session {
         std::string                                  session_id;
         std::filesystem::path                        root;
-        std::string                                  lens_type;  // captured at start
+        double                                       focal_length_mm = 0.0;  // captured at start
         std::unique_ptr<RosbagRecordingConsumer>     consumer;
         std::chrono::steady_clock::time_point        started_at;
     };
@@ -92,7 +93,7 @@ private:
     CalibrationSessionStatus status_locked(const Session& s) const;
     std::string              build_suggested_command(
                                  const std::filesystem::path& dataset_root,
-                                 std::string_view             lens_type) const;
+                                 double                       focal_length_mm) const;
 
     CameraSupervisor&                 cameras_;
     CameraRepository&                 repository_;

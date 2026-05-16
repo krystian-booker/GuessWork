@@ -1,12 +1,14 @@
 import { asJson, readError } from './http'
 
-export type LensType = 'pinhole' | 'fisheye'
-
 export interface Camera {
   id: number
   name: string
   serial: string
-  lens_type: LensType
+  // Lens focal length in millimeters. Drives the Kalibr focal-length hint
+  // and the auto-selected camera model (pinhole-radtan vs pinhole-equi) in
+  // the calibration command. Server-side conversion via the fixed sensor
+  // pixel pitch.
+  focal_length_mm: number
   mode: string | null
   // Geometry + max FPS for the currently-running mode. null when the camera is
   // offline or its producer didn't report a value.
@@ -85,13 +87,13 @@ export async function listAvailableCameras(): Promise<AvailableCamera[]> {
 export async function createCamera(input: {
   name: string
   serial: string
-  lens_type: LensType
+  focal_length_mm: number
   mode?: string
 }): Promise<Camera> {
   const body: Record<string, unknown> = {
     name: input.name,
     serial: input.serial,
-    lens_type: input.lens_type,
+    focal_length_mm: input.focal_length_mm,
   }
   if (input.mode) body.mode = input.mode
   const res = await fetch('/api/cameras', {
@@ -104,7 +106,7 @@ export async function createCamera(input: {
 
 export async function updateCamera(
   id: number,
-  patch: { name?: string; mode?: string; lens_type?: LensType } & CameraSettingsPatch,
+  patch: { name?: string; mode?: string; focal_length_mm?: number } & CameraSettingsPatch,
 ): Promise<Camera> {
   const res = await fetch(`/api/cameras/${id}`, {
     method: 'PUT',

@@ -280,8 +280,10 @@ export default function CalibratePage() {
           <p style={{ color: '#4b5563', marginTop: 0 }}>
             Run this command in a terminal. It starts Colima, runs Kalibr in a Docker
             container, and stops Colima again when it's done — so the VM isn't left
-            sitting around. Typically takes 1–5 minutes; on completion it writes
-            {' '}<code>camchain-calibration.yaml</code> next to the bag.
+            sitting around. The focal-length hint and camera model are derived from
+            the lens you set on the camera record. Typically takes 1–5 minutes; on
+            completion it writes <code>calibration-camchain.yaml</code> next to
+            the bag.
           </p>
           <pre style={codeBlockStyle}>{lastResult.suggested_command}</pre>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
@@ -300,7 +302,7 @@ export default function CalibratePage() {
         <h3 style={{ marginTop: 0 }}>3. Upload camchain YAML</h3>
         <p style={{ color: '#4b5563', marginTop: 0 }}>
           After Kalibr finishes, pick the resulting
-          {' '}<code>camchain-calibration.yaml</code> from the dataset directory.
+          {' '}<code>calibration-camchain.yaml</code> from the dataset directory.
         </p>
         <input
           ref={fileRef}

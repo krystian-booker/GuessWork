@@ -12,8 +12,40 @@ import {
   type AvailableCamera,
   type Camera,
   type CameraMode,
-  type LensType,
 } from '../api/cameras'
+
+// Sensor-side constants used for the inline preview of HFOV + auto-selected
+// Kalibr model. Must stay in sync with the server-side build_suggested_command
+// in calibration_supervisor.cpp (the source of truth at calibration time).
+const PIXEL_PITCH_MM = 0.00345
+const SENSOR_WIDTH_PX = 2048
+const FISHEYE_HFOV_THRESHOLD_DEG = 95
+
+function previewLensSpec(focalMm: number) {
+  if (!Number.isFinite(focalMm) || focalMm <= 0) return null
+  const focalPx = focalMm / PIXEL_PITCH_MM
+  const sensorWmm = PIXEL_PITCH_MM * SENSOR_WIDTH_PX
+  const hfovDeg = (2 * Math.atan((sensorWmm / 2) / focalMm) * 180) / Math.PI
+  const model = hfovDeg >= FISHEYE_HFOV_THRESHOLD_DEG ? 'pinhole-equi' : 'pinhole-radtan'
+  return { focalPx, hfovDeg, model }
+}
+
+function LensPreview({ focalMm }: { focalMm: number }) {
+  const preview = previewLensSpec(focalMm)
+  if (!preview) {
+    return (
+      <small style={{ display: 'block', marginTop: 4, color: '#9ca3af' }}>
+        Enter a positive focal length to preview the calibration model.
+      </small>
+    )
+  }
+  return (
+    <small style={{ display: 'block', marginTop: 4, color: '#4b5563' }}>
+      ≈ {preview.hfovDeg.toFixed(0)}° HFOV → <code>{preview.model}</code>
+      {' '}(~{preview.focalPx.toFixed(0)} px focal hint)
+    </small>
+  )
+}
 import ModeSelect from '../components/ModeSelect'
 import { dangerButtonStyle, neutralButtonStyle, primaryButtonStyle } from '../components/buttonStyles'
 
@@ -108,7 +140,9 @@ export default function CamerasPage() {
   const [addLoading, setAddLoading] = useState(false)
   const [addModes, setAddModes] = useState<ModesState>(emptyModes)
   const [addSelectedMode, setAddSelectedMode] = useState<string | null>(null)
-  const [addLensType, setAddLensType] = useState<LensType | null>(null)
+  // String state so the user can type partial decimals like "6." without the
+  // controlled <input type=number> snapping the value mid-edit.
+  const [addFocalMm, setAddFocalMm] = useState<string>('')
 
   // --- Edit modal state ---
   const [editCamera, setEditCamera] = useState<Camera | null>(null)
@@ -116,7 +150,7 @@ export default function CamerasPage() {
   const [editError, setEditError] = useState<string | null>(null)
   const [editModes, setEditModes] = useState<ModesState>(emptyModes)
   const [editSelectedMode, setEditSelectedMode] = useState<string | null>(null)
-  const [editLensType, setEditLensType] = useState<LensType>('pinhole')
+  const [editFocalMm, setEditFocalMm] = useState<string>('')
 
   const refresh = async () => {
     try {
@@ -143,7 +177,7 @@ export default function CamerasPage() {
     setAvailable(null)
     setAddModes(emptyModes)
     setAddSelectedMode(null)
-    setAddLensType(null)
+    setAddFocalMm('')
     try {
       const list = await listAvailableCameras()
       setAvailable(list)
@@ -194,14 +228,15 @@ export default function CamerasPage() {
 
   const onSubmitAdd = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!addName.trim() || !addSerial || !addLensType || busy) return
+    const focalNum = parseFloat(addFocalMm)
+    if (!addName.trim() || !addSerial || !Number.isFinite(focalNum) || focalNum <= 0 || busy) return
     setBusy(true)
     setAddError(null)
     try {
       await createCamera({
         name: addName.trim(),
         serial: addSerial,
-        lens_type: addLensType,
+        focal_length_mm: focalNum,
         mode:
           addModes.supported && addSelectedMode ? addSelectedMode : undefined,
       })
@@ -222,7 +257,7 @@ export default function CamerasPage() {
     setEditError(null)
     setEditModes({ ...emptyModes, loading: true })
     setEditSelectedMode(c.mode)
-    setEditLensType(c.lens_type)
+    setEditFocalMm(c.focal_length_mm.toString())
     try {
       const r = await getCameraModes(c.id)
       setEditModes({
@@ -258,7 +293,7 @@ export default function CamerasPage() {
     if (!trimmedName) return
 
     // Build a partial body containing only changed fields.
-    const patch: { name?: string; mode?: string; lens_type?: LensType } = {}
+    const patch: { name?: string; mode?: string; focal_length_mm?: number } = {}
     if (trimmedName !== editCamera.name) patch.name = trimmedName
     if (
       editModes.supported &&
@@ -268,8 +303,12 @@ export default function CamerasPage() {
     ) {
       patch.mode = editSelectedMode
     }
-    if (editLensType !== editCamera.lens_type) patch.lens_type = editLensType
-    if (!patch.name && !patch.mode && !patch.lens_type) {
+    const editFocalNum = parseFloat(editFocalMm)
+    if (Number.isFinite(editFocalNum) && editFocalNum > 0 &&
+        editFocalNum !== editCamera.focal_length_mm) {
+      patch.focal_length_mm = editFocalNum
+    }
+    if (!patch.name && !patch.mode && patch.focal_length_mm === undefined) {
       setEditCamera(null)
       return
     }
@@ -343,8 +382,8 @@ export default function CamerasPage() {
                 <td style={{ padding: 8, fontFamily: 'monospace', color: '#374151' }}>
                   {c.serial}
                 </td>
-                <td style={{ padding: 8, color: '#4b5563', textTransform: 'capitalize' }}>
-                  {c.lens_type}
+                <td style={{ padding: 8, color: '#4b5563' }}>
+                  {c.focal_length_mm.toFixed(1)} mm
                 </td>
                 <td style={{ padding: 8, color: '#4b5563' }}>
                   {c.mode ? (
@@ -455,22 +494,20 @@ export default function CamerasPage() {
               )}
               <label style={{ display: 'block', marginBottom: 12 }}>
                 <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
-                  Lens type
+                  Lens focal length (mm)
                 </span>
-                <select
-                  aria-label="Lens type"
-                  value={addLensType ?? ''}
-                  onChange={(e) =>
-                    setAddLensType(e.target.value === '' ? null : (e.target.value as LensType))
-                  }
-                  style={{ ...inputStyle, width: '100%', background: '#fff' }}
-                >
-                  <option value="" disabled>
-                    Select a lens type…
-                  </option>
-                  <option value="pinhole">Pinhole (normal lens)</option>
-                  <option value="fisheye">Fisheye / wide-FOV</option>
-                </select>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="200"
+                  aria-label="Lens focal length (mm)"
+                  placeholder="e.g. 6.0"
+                  value={addFocalMm}
+                  onChange={(e) => setAddFocalMm(e.target.value)}
+                  style={{ ...inputStyle, width: '100%' }}
+                />
+                <LensPreview focalMm={parseFloat(addFocalMm)} />
               </label>
               {addError && (
                 <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{addError}</p>
@@ -488,7 +525,7 @@ export default function CamerasPage() {
                     addModes.loading ||
                     !addName.trim() ||
                     !addSerial ||
-                    !addLensType
+                    !(parseFloat(addFocalMm) > 0)
                   }
                 >
                   Add
@@ -543,17 +580,19 @@ export default function CamerasPage() {
               </label>
               <label style={{ display: 'block', marginBottom: 12 }}>
                 <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
-                  Lens type
+                  Lens focal length (mm)
                 </span>
-                <select
-                  aria-label="Lens type"
-                  value={editLensType}
-                  onChange={(e) => setEditLensType(e.target.value as LensType)}
-                  style={{ ...inputStyle, width: '100%', background: '#fff' }}
-                >
-                  <option value="pinhole">Pinhole (normal lens)</option>
-                  <option value="fisheye">Fisheye / wide-FOV</option>
-                </select>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="200"
+                  aria-label="Lens focal length (mm)"
+                  value={editFocalMm}
+                  onChange={(e) => setEditFocalMm(e.target.value)}
+                  style={{ ...inputStyle, width: '100%' }}
+                />
+                <LensPreview focalMm={parseFloat(editFocalMm)} />
               </label>
               {editError && (
                 <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{editError}</p>

@@ -8,8 +8,6 @@
 
 set -e
 
-export KALIBR_MANUAL_FOCAL_LENGTH_INIT=1
-
 saved=("$@")
 set --
 # shellcheck disable=SC1091

@@ -27,7 +27,7 @@ constexpr const char* kSchemaCameras =
     "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  name             TEXT    NOT NULL UNIQUE,"
     "  serial           TEXT    NOT NULL UNIQUE,"
-    "  lens_type        TEXT    NOT NULL,"   // 'pinhole' or 'fisheye'
+    "  focal_length_mm  REAL    NOT NULL,"   // lens focal length, drives Kalibr focal hint + model
     "  mode             TEXT,"
     "  gain_auto        INTEGER,"
     "  gain             REAL,"

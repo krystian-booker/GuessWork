@@ -27,7 +27,7 @@ crow::json::wvalue camera_to_json(const Camera&                              c,
     j["id"]         = c.id;
     j["name"]       = c.name;
     j["serial"]     = c.serial;
-    j["lens_type"]  = c.lens_type;
+    j["focal_length_mm"] = c.focal_length_mm;
     if (c.mode) j["mode"] = *c.mode;
     else        j["mode"] = nullptr;
     if (current && current->width)   j["mode_width"]   = *current->width;
@@ -145,17 +145,29 @@ bool parse_optional_number(const crow::json::rvalue& body, const char* field,
     return false;
 }
 
-// lens_type must be one of the two values the calibration command builder knows
-// how to map to a Kalibr camera model. Reject anything else at the route
-// boundary so the DB and downstream code can trust the value.
-bool is_valid_lens_type(std::string_view v) {
-    return v == "pinhole" || v == "fisheye";
+// Lens focal length in mm — must be positive and within a wide sanity
+// envelope. Typical machine-vision lenses are 1.4–35 mm; we accept up to
+// 1000 mm to leave headroom without inviting bogus inputs.
+bool is_valid_focal_length_mm(double v) {
+    return v > 0.0 && v < 1000.0;
+}
+
+// Reads a number field as a double. Same shape as parse_required_string but
+// for numeric fields where the value is mandatory.
+bool parse_required_number(const crow::json::rvalue& body, const char* field,
+                           double& out, crow::response& err) {
+    if (!body.has(field) || body[field].t() != crow::json::type::Number) {
+        err = error_response(400, std::string("missing number field: ") + field);
+        return false;
+    }
+    out = body[field].d();
+    return true;
 }
 
 struct CreateBody {
     std::string                name;
     std::string                serial;
-    std::string                lens_type;
+    double                     focal_length_mm = 0.0;
     std::optional<std::string> mode;
     crow::response             error;
     bool                       ok = false;
@@ -168,21 +180,21 @@ CreateBody parse_create_body(const crow::request& req) {
         r.error = error_response(400, "invalid JSON body");
         return r;
     }
-    if (!parse_required_string(body, "name", r.name, r.error))           return r;
-    if (!parse_required_string(body, "serial", r.serial, r.error))       return r;
-    if (!parse_required_string(body, "lens_type", r.lens_type, r.error)) return r;
-    if (!is_valid_lens_type(r.lens_type)) {
-        r.error = error_response(400, "lens_type must be 'pinhole' or 'fisheye'");
+    if (!parse_required_string(body, "name", r.name, r.error))                       return r;
+    if (!parse_required_string(body, "serial", r.serial, r.error))                   return r;
+    if (!parse_required_number(body, "focal_length_mm", r.focal_length_mm, r.error)) return r;
+    if (!is_valid_focal_length_mm(r.focal_length_mm)) {
+        r.error = error_response(400, "focal_length_mm must be a positive number in millimeters");
         return r;
     }
-    if (!parse_optional_string(body, "mode", r.mode, r.error))           return r;
+    if (!parse_optional_string(body, "mode", r.mode, r.error))                       return r;
     r.ok = true;
     return r;
 }
 
 struct UpdateBody {
     std::optional<std::string> name;
-    std::optional<std::string> lens_type;
+    std::optional<double>      focal_length_mm;
     std::optional<std::string> mode;
     std::optional<bool>        gain_auto;
     std::optional<double>      gain;
@@ -194,7 +206,7 @@ struct UpdateBody {
     bool has_settings() const {
         return gain_auto || gain || exposure_auto || exposure;
     }
-    bool empty() const { return !name && !lens_type && !mode && !has_settings(); }
+    bool empty() const { return !name && !focal_length_mm && !mode && !has_settings(); }
 };
 
 UpdateBody parse_update_body(const crow::request& req) {
@@ -204,10 +216,10 @@ UpdateBody parse_update_body(const crow::request& req) {
         r.error = error_response(400, "invalid JSON body");
         return r;
     }
-    if (!parse_optional_string(body, "name",      r.name,      r.error)) return r;
-    if (!parse_optional_string(body, "lens_type", r.lens_type, r.error)) return r;
-    if (r.lens_type && !is_valid_lens_type(*r.lens_type)) {
-        r.error = error_response(400, "lens_type must be 'pinhole' or 'fisheye'");
+    if (!parse_optional_string(body, "name",            r.name,            r.error)) return r;
+    if (!parse_optional_number(body, "focal_length_mm", r.focal_length_mm, r.error)) return r;
+    if (r.focal_length_mm && !is_valid_focal_length_mm(*r.focal_length_mm)) {
+        r.error = error_response(400, "focal_length_mm must be a positive number in millimeters");
         return r;
     }
     if (!parse_optional_string(body, "mode", r.mode, r.error)) return r;
@@ -287,7 +299,7 @@ void register_camera_routes(crow::SimpleApp&  app,
                 parsed.mode ? std::optional<std::string_view>(*parsed.mode)
                             : std::nullopt;
             const auto c = repo.create(parsed.name, parsed.serial,
-                                       parsed.lens_type, mode_view);
+                                       parsed.focal_length_mm, mode_view);
             supervisor.on_camera_added(c.id);
             const bool on = supervisor.is_online(c.id);
             return json_response(
@@ -337,9 +349,9 @@ void register_camera_routes(crow::SimpleApp&  app,
             }
 
             CameraUpdate upd;
-            upd.name          = parsed.name;
-            upd.lens_type     = parsed.lens_type;
-            upd.mode          = parsed.mode;
+            upd.name            = parsed.name;
+            upd.focal_length_mm = parsed.focal_length_mm;
+            upd.mode            = parsed.mode;
             upd.gain_auto     = parsed.gain_auto;
             upd.gain          = parsed.gain;
             upd.exposure_auto = parsed.exposure_auto;

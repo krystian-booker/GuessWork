@@ -212,10 +212,17 @@ if(NOT EXISTS "${GW_KALIBR_CALIBRATE_SCRIPT}")
         "GW_KALIBR_CALIBRATE_SCRIPT not found at ${GW_KALIBR_CALIBRATE_SCRIPT}")
 endif()
 
+# Sensor pixel pitch (mm) — used by the supervisor to convert per-camera
+# lens focal length in mm into a pixel focal-length hint for Kalibr. Default
+# matches the Sony IMX264 (1/1.8" @ 2048×1536) this app targets today.
+set(GW_SENSOR_PIXEL_PITCH_MM "0.00345" CACHE STRING
+    "Camera sensor pixel pitch in millimeters (default: Sony IMX264 / 1/1.8\" @ 2048x1536)")
+
 target_compile_definitions(gw_server PRIVATE
     GW_KALIBR_DOCKER_IMAGE="${GW_KALIBR_DOCKER_IMAGE}"
     GW_KALIBR_TARGET_DEFAULT="${GW_KALIBR_TARGET_DEFAULT}"
     GW_KALIBR_CALIBRATE_SCRIPT="${GW_KALIBR_CALIBRATE_SCRIPT}"
+    GW_SENSOR_PIXEL_PITCH_MM=${GW_SENSOR_PIXEL_PITCH_MM}
 )
 
 # ----------------------------------------------------------------------------

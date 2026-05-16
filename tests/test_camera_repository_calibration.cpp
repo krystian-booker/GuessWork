@@ -44,13 +44,13 @@ constexpr const char* kStubCalibrationJson =
 }  // namespace
 
 TEST_F(CameraCalibrationTest, FreshRowHasNoCalibration) {
-    const auto c = repo_->create("front", "SN001", "pinhole");
+    const auto c = repo_->create("front", "SN001", 6.0);
     EXPECT_FALSE(c.calibration_json.has_value());
     EXPECT_FALSE(c.calibrated_at.has_value());
 }
 
 TEST_F(CameraCalibrationTest, SetCalibrationStoresJsonAndTimestamp) {
-    const auto c = repo_->create("front", "SN001", "pinhole");
+    const auto c = repo_->create("front", "SN001", 6.0);
     const auto updated = repo_->set_calibration(c.id, kStubCalibrationJson);
     ASSERT_TRUE(updated.has_value());
     ASSERT_TRUE(updated->calibration_json.has_value());
@@ -60,7 +60,7 @@ TEST_F(CameraCalibrationTest, SetCalibrationStoresJsonAndTimestamp) {
 }
 
 TEST_F(CameraCalibrationTest, SetCalibrationPersistsAcrossGet) {
-    const auto c = repo_->create("front", "SN001", "pinhole");
+    const auto c = repo_->create("front", "SN001", 6.0);
     repo_->set_calibration(c.id, kStubCalibrationJson);
     const auto fetched = repo_->get(c.id);
     ASSERT_TRUE(fetched.has_value());
@@ -73,8 +73,8 @@ TEST_F(CameraCalibrationTest, SetCalibrationOnMissingIdReturnsNullopt) {
 }
 
 TEST_F(CameraCalibrationTest, SetCalibrationOverwrites) {
-    const auto c = repo_->create("front", "SN001", "pinhole");
-    repo_->set_calibration(c.id, R"({"value0":{"intrinsics":[{"camera_type":"pinhole"}]}})");
+    const auto c = repo_->create("front", "SN001", 6.0);
+    repo_->set_calibration(c.id, R"({"value0":{"intrinsics":[{"camera_type":6.0}]}})");
     const auto updated = repo_->set_calibration(c.id, kStubCalibrationJson);
     ASSERT_TRUE(updated.has_value());
     ASSERT_TRUE(updated->calibration_json.has_value());
@@ -82,7 +82,7 @@ TEST_F(CameraCalibrationTest, SetCalibrationOverwrites) {
 }
 
 TEST_F(CameraCalibrationTest, ClearCalibrationResetsBothColumns) {
-    const auto c = repo_->create("front", "SN001", "pinhole");
+    const auto c = repo_->create("front", "SN001", 6.0);
     repo_->set_calibration(c.id, kStubCalibrationJson);
 
     EXPECT_TRUE(repo_->clear_calibration(c.id));
@@ -98,8 +98,8 @@ TEST_F(CameraCalibrationTest, ClearCalibrationOnMissingIdReturnsFalse) {
 }
 
 TEST_F(CameraCalibrationTest, ListAllReturnsCalibrationFields) {
-    const auto a = repo_->create("a", "SN001", "pinhole");
-    repo_->create("b", "SN002", "pinhole");
+    const auto a = repo_->create("a", "SN001", 6.0);
+    repo_->create("b", "SN002", 6.0);
     repo_->set_calibration(a.id, kStubCalibrationJson);
 
     const auto rows = repo_->list_all();
