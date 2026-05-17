@@ -28,10 +28,10 @@ export interface CalibrationJob {
                                       // post-run camchain upload step failed
 }
 
-// Server response when stopping a recording — the previous "RecordingResult"
-// shape lives under `recording_result`, plus an initial CalibrationJob.
-// `job_error` is populated only when start_kalibr_job rejected (e.g. another
-// job is already running for a different camera); in that case `job` is null.
+// Response from DELETE /recording — bundles the stopped session info with the
+// auto-launched Kalibr job. `job` is null only when the launch was rejected
+// (e.g. another job is already running for a different camera), in which
+// case `job_error` carries the reason.
 export interface StopRecordingResponse {
   recording_result: RecordingResult
   job: CalibrationJob | null

@@ -103,11 +103,10 @@ public:
     // layer maps both to 404 — see routes_calibration.cpp).
     std::optional<CalibrationJobStatus> kalibr_job_status(int64_t camera_id);
 
-    // Pointer to the underlying job for SSE handlers that need to call
-    // wait_for_log / log_slice. Returns nullptr if no active job for this
-    // camera. The pointer is valid only while the supervisor's mu_ is held —
-    // but SSE handlers retain it implicitly via the shared_ptr we expose
-    // (see implementation). Use kalibr_job_handle() in callers.
+    // Shared handle to the active job for this camera (or nullptr). The
+    // shared_ptr keeps the job alive past supervisor lock release, so SSE
+    // handlers can hold it for the lifetime of their HTTP response without
+    // any further synchronisation.
     std::shared_ptr<KalibrJob> kalibr_job_handle(int64_t camera_id);
 
     // SIGTERM the job's process group. No-op if no job, or job not for this

@@ -33,8 +33,7 @@ uint64_t now_ms() {
         .count();
 }
 
-// Build a NUL-terminated argv array for execvp(). The returned vector owns
-// the underlying char* by virtue of the input strings staying alive.
+// Returned char*s are non-owning views into `argv`; caller must keep argv alive.
 std::vector<char*> build_argv(const std::vector<std::string>& argv) {
     std::vector<char*> out;
     out.reserve(argv.size() + 1);
@@ -43,16 +42,15 @@ std::vector<char*> build_argv(const std::vector<std::string>& argv) {
     return out;
 }
 
-// Merge env_overrides into the inherited environment. Each override
-// replaces an existing entry with the same key, or appends a new entry.
-// Returns owned strings + a parallel NUL-terminated envp[] for execve.
+// Merges env_overrides into the inherited environment for execve. envp[]
+// entries point into the owned strings, which the caller must keep alive
+// until after exec (or fork-exec failure).
 struct EnvBlock {
     std::vector<std::string> owned;
     std::vector<char*>       envp;
 };
 EnvBlock make_env(const SubprocessJob::EnvOverrides& overrides) {
     EnvBlock out;
-    // Copy parent env, replacing any keys we override along the way.
     for (char** e = environ; e && *e; ++e) {
         std::string_view entry(*e);
         const auto eq = entry.find('=');
@@ -69,7 +67,6 @@ EnvBlock make_env(const SubprocessJob::EnvOverrides& overrides) {
         }
         if (!replaced) out.owned.emplace_back(entry);
     }
-    // Append overrides not present in the parent env.
     for (const auto& [k, v] : overrides) {
         bool present = false;
         for (const auto& s : out.owned) {
@@ -120,9 +117,7 @@ void SubprocessJob::start() {
         std::error_code ec;
         std::filesystem::create_directories(log_path_.parent_path(), ec);
         log_file_.open(log_path_, std::ios::out | std::ios::binary | std::ios::trunc);
-        // Don't fail the whole job on a missing log file; the in-memory
-        // buffer is the source of truth for the UI. Log to stderr if open
-        // fails so a misconfigured path is visible.
+        // Best-effort — the in-memory buffer is the source of truth for the UI.
         if (!log_file_.is_open()) {
             std::fprintf(stderr,
                          "SubprocessJob: cannot open log file %s (errno=%d)\n",
@@ -136,8 +131,6 @@ void SubprocessJob::start() {
         throw std::runtime_error(std::string("SubprocessJob: pipe(): ") +
                                  std::strerror(errno));
     }
-    // Reads on the parent side don't block forever after the child exits —
-    // the read() returns 0 on EOF, which is what we want. No O_NONBLOCK.
     ::fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
 
     started_at_ms_.store(now_ms(), std::memory_order_release);
@@ -152,42 +145,31 @@ void SubprocessJob::start() {
     }
 
     if (pid == 0) {
-        // --- child ---
-        // New process group so cancel() can kill the whole tree (e.g. the
-        // docker client) without taking down the parent guesswork.
+        // New process group so cancel() can SIGTERM the whole tree (docker
+        // forks helpers) without touching the parent guesswork.
         ::setpgid(0, 0);
 
-        // Redirect stdout + stderr to the pipe's write end. Close the read
-        // end in the child to avoid keeping the parent's pipe open forever.
         ::close(pipefd[0]);
         ::dup2(pipefd[1], STDOUT_FILENO);
         ::dup2(pipefd[1], STDERR_FILENO);
         if (pipefd[1] != STDOUT_FILENO && pipefd[1] != STDERR_FILENO) {
             ::close(pipefd[1]);
         }
-        // Detach from any controlling terminal stdin to avoid odd interactive
-        // behavior in things like bash subscripts. Closing fd 0 is fine; if
-        // anything actually reads it, it'll get EOF.
         ::close(STDIN_FILENO);
 
-        // Build env + argv. macOS lacks execvpe(), so we swap `environ` to
-        // our merged block and then exec with PATH resolution. Mutating
-        // `environ` is safe in the post-fork child (single-threaded). The
-        // envblk's storage outlives the call because exec replaces this
-        // address space wholesale.
+        // macOS has no execvpe(); swap `environ` and execvp() instead. The
+        // post-fork child is single-threaded so mutating `environ` is safe,
+        // and the envblk storage doesn't need to outlive exec.
         auto envblk = make_env(env_);
         auto argv_v = build_argv(this->argv_);
         environ     = envblk.envp.data();
         ::execvp(argv_v[0], argv_v.data());
 
-        // exec failed; surface a one-line error to the captured stderr
-        // before exiting so the parent can see what went wrong.
         std::fprintf(stderr, "SubprocessJob: execvp(%s) failed: %s\n",
                      argv_v[0], std::strerror(errno));
         _exit(127);
     }
 
-    // --- parent ---
     ::close(pipefd[1]);
     pid_          = pid;
     pipe_read_fd_ = pipefd[0];
@@ -197,8 +179,7 @@ void SubprocessJob::start() {
 void SubprocessJob::cancel() {
     if (cancel_requested_.exchange(true)) return;
     if (pid_ > 0 && state_.load() == SubprocessState::Running) {
-        // Kill the whole process group — `docker run` typically forks helpers
-        // and we want them all to exit promptly.
+        // -pid_ targets the process group so docker helpers exit too.
         ::kill(-pid_, SIGTERM);
     }
 }

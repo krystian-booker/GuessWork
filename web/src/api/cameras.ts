@@ -31,9 +31,9 @@ export interface Camera {
   reprojection_error_px: number | null
 }
 
-// Thresholds for the Good / Poor visual cue used in both the cameras table
-// and the calibrate page. Single source of truth so the two views never
-// disagree on a borderline value.
+// Threshold + presentation helpers for the Good / Poor visual cue shared
+// between the cameras table and the calibrate page, so a borderline value
+// always looks the same.
 export const GOOD_REPROJ_ERROR_PX = 0.5
 
 export type CalibrationQuality = 'good' | 'poor' | 'unknown'
@@ -41,6 +41,14 @@ export type CalibrationQuality = 'good' | 'poor' | 'unknown'
 export function calibrationQuality(reprojErrorPx: number | null): CalibrationQuality {
   if (reprojErrorPx == null) return 'unknown'
   return reprojErrorPx <= GOOD_REPROJ_ERROR_PX ? 'good' : 'poor'
+}
+
+export function calibrationQualityColor(q: CalibrationQuality): string {
+  switch (q) {
+    case 'good':    return '#15803d'
+    case 'poor':    return '#b91c1c'
+    case 'unknown': return '#6b7280'
+  }
 }
 
 export interface SettingRange {

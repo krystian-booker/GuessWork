@@ -34,23 +34,9 @@ crow::json::wvalue result_to_json(const CalibrationSessionResult& r) {
     return j;
 }
 
-// Maps SubprocessState onto the stable strings the frontend matches against.
-// Kept in this file (not in kalibr_job) so the JSON contract stays adjacent
-// to the routes that emit it.
-const char* job_state_str(SubprocessState s) {
-    switch (s) {
-        case SubprocessState::Pending:   return "pending";
-        case SubprocessState::Running:   return "running";
-        case SubprocessState::Succeeded: return "succeeded";
-        case SubprocessState::Failed:    return "failed";
-        case SubprocessState::Cancelled: return "cancelled";
-    }
-    return "unknown";
-}
-
 crow::json::wvalue job_status_to_json(const CalibrationJobStatus& s) {
     crow::json::wvalue j;
-    j["state"]              = job_state_str(s.state);
+    j["state"]              = to_string(s.state);
     j["model"]              = s.model;
     j["exit_code"]          = s.exit_code;
     j["started_at_ms"]      = s.started_at_ms;
@@ -87,7 +73,7 @@ std::string sse_data_event(const std::string& payload) {
 
 std::string sse_done_event(const CalibrationJobStatus& s) {
     crow::json::wvalue done;
-    done["state"]              = job_state_str(s.state);
+    done["state"]              = to_string(s.state);
     done["exit_code"]          = s.exit_code;
     done["calibration_stored"] = s.calibration_stored;
     done["upload_error"]       = s.upload_error.empty()
@@ -147,10 +133,9 @@ void register_calibration_routes(crow::SimpleApp&       app,
             if (!cam) return error_response(404, "camera not found");
             const auto r = calib.stop(id);
 
-            // Auto-launch the Kalibr subprocess. Failure here surfaces as a
-            // failed job (rendered in the UI's debug panel), not a 5xx —
-            // the recording itself succeeded and shouldn't roll back. The
-            // 409 path handles the "another job already running" case.
+            // Recording succeeded — don't roll back if the Kalibr launch
+            // races another running job. Surface it as 409 with the
+            // recording_result still attached so the UI keeps the dataset.
             crow::json::wvalue body;
             body["recording_result"] = result_to_json(r);
             try {

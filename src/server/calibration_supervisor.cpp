@@ -1,9 +1,7 @@
 #include "server/calibration_supervisor.hpp"
 
 #include <chrono>
-#include <cmath>
 #include <ctime>
-#include <iomanip>
 #include <sstream>
 #include <utility>
 
@@ -198,7 +196,7 @@ CalibrationJobStatus CalibrationSupervisor::start_kalibr_job(
         constexpr uint32_t sensor_w_px = 2048;
         job = std::make_shared<KalibrJob>(
             repository_, camera_id, session_root, focal_length_mm,
-            script, pitch, sensor_w_px);
+            script, pitch, sensor_w_px);  // ctor calls derive_kalibr_lens internally
         job->start();  // throws on fork/pipe failure; lock released on unwind
 
         kalibr_job_        = job;
@@ -242,39 +240,23 @@ bool CalibrationSupervisor::kalibr_job_cancel(int64_t camera_id) {
 std::string CalibrationSupervisor::build_suggested_command(
     const std::filesystem::path& dataset_root,
     double                       focal_length_mm) const {
-    // We wrap the docker invocation in calibrate.sh so the user gets a single
-    // command that brings Colima up, runs Kalibr, and brings Colima back down
-    // afterward (only if calibrate.sh started it). The script is bash, so the
-    // path needs shell quoting only when it contains spaces.
-    const std::filesystem::path script = GW_KALIBR_CALIBRATE_SCRIPT;
-
-    // Convert the user-supplied lens focal length (mm) into the inputs Kalibr
-    // actually needs:
-    //   focal_px := focal_mm / pixel_pitch_mm   — fed to Kalibr's manual-init
-    //                                             prompt via GW_KALIBR_FOCAL_HINT
-    //                                             (the script propagates it).
-    //   HFOV     := 2 · atan((sensor_w_mm / 2) / focal_mm)
-    //   model    := HFOV ≥ 95° ? pinhole-equi (Kannala-Brandt fisheye)
-    //                          : pinhole-radtan (standard radial+tangential)
+    // Single command that brings Colima up, runs Kalibr, and brings Colima
+    // back down afterward (only if calibrate.sh started it).
     //
-    // TODO(multi-camera): sensor_width_px is currently hard-coded to 2048 to
-    // match GW_SENSOR_PIXEL_PITCH_MM's implied IMX264. Once we support cameras
-    // with different resolutions, plumb the live producer's reported sensor
-    // width through Session::sensor_width_px instead.
-    const double pitch_mm        = static_cast<double>(GW_SENSOR_PIXEL_PITCH_MM);
-    const double focal_px        = focal_length_mm / pitch_mm;
-    constexpr double sensor_w_px = 2048.0;
-    const double sensor_w_mm     = pitch_mm * sensor_w_px;
-    const double hfov_rad        = 2.0 * std::atan((sensor_w_mm / 2.0) / focal_length_mm);
-    const double hfov_deg        = hfov_rad * 180.0 / M_PI;
-    const std::string model      = (hfov_deg >= 95.0) ? "pinhole-equi"
-                                                      : "pinhole-radtan";
+    // TODO(multi-camera): sensor_width_px hard-coded to 2048 to match
+    // GW_SENSOR_PIXEL_PITCH_MM's implied IMX264. Plumb the live producer's
+    // reported sensor width once we support multiple resolutions.
+    const std::filesystem::path script = GW_KALIBR_CALIBRATE_SCRIPT;
+    const auto lens = derive_kalibr_lens(
+        focal_length_mm,
+        static_cast<double>(GW_SENSOR_PIXEL_PITCH_MM),
+        /*sensor_width_px=*/2048);
 
     std::ostringstream os;
-    os << "GW_KALIBR_FOCAL_HINT=" << std::fixed << std::setprecision(0) << focal_px
+    os << "GW_KALIBR_FOCAL_HINT=" << lens.focal_hint_px
        << " " << sh_quote(script)
        << " " << sh_quote(dataset_root)
-       << " " << model;
+       << " " << lens.model;
     return os.str();
 }
 

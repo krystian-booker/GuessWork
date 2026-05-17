@@ -11,6 +11,7 @@ import {
   updateCamera,
   type AvailableCamera,
   calibrationQuality,
+  calibrationQualityColor,
   type Camera,
   type CameraMode,
 } from '../api/cameras'
@@ -40,17 +41,13 @@ function CalibrationBadge({
 }) {
   const quality = calibrationQuality(reprojErrorPx)
   if (quality === 'unknown') {
-    if (calibratedAt != null) {
-      // Calibrated, but stored YAML predates the quality enrichment — show
-      // "calibrated" without a score so the user knows it's not uncalibrated.
-      return <span style={{ color: '#6b7280' }}>calibrated</span>
-    }
+    // Calibrated but pre-enrichment camchain — distinguish from uncalibrated.
+    if (calibratedAt != null) return <span style={{ color: '#6b7280' }}>calibrated</span>
     return <span style={{ color: '#9ca3af' }}>—</span>
   }
-  const color = quality === 'good' ? '#15803d' : '#b91c1c'
-  const label = quality === 'good' ? '✓ Good'    : '⚠ Poor'
+  const label = quality === 'good' ? '✓ Good' : '⚠ Poor'
   return (
-    <span style={{ color }}>
+    <span style={{ color: calibrationQualityColor(quality) }}>
       {label} <span style={{ color: '#6b7280' }}>· {reprojErrorPx!.toFixed(2)} px</span>
     </span>
   )

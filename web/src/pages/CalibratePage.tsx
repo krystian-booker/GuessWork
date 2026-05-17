@@ -19,6 +19,7 @@ import {
 } from '../api/calibration'
 import {
   calibrationQuality,
+  calibrationQualityColor,
   getCamera,
   type Camera,
 } from '../api/cameras'
@@ -71,28 +72,43 @@ function jobStateLabel(state: JobState): string {
   }
 }
 
+function ReprojErrorLine({ reprojErrorPx }: { reprojErrorPx: number }) {
+  const q = calibrationQuality(reprojErrorPx)
+  const label = q === 'good'
+    ? '✓ Good calibration'
+    : '⚠ Poor calibration — consider re-recording'
+  return (
+    <p style={{ marginTop: 8 }}>
+      <strong style={{ color: calibrationQualityColor(q) }}>{label}</strong>
+      {' — reprojection error '}
+      <code>{reprojErrorPx.toFixed(3)} px</code>
+      {' '}<span style={{ color: '#6b7280', fontSize: 13 }}>
+        (RMS sigma; rule of thumb: ≤ 0.5 px is good)
+      </span>
+    </p>
+  )
+}
+
 function jobStateColor(state: JobState): string {
   switch (state) {
-    case 'running':   return '#1d4ed8'  // blue
-    case 'succeeded': return '#15803d'  // green
-    case 'failed':    return '#b91c1c'  // red
-    case 'cancelled': return '#7c2d12'  // amber-brown
-    case 'pending':   return '#6b7280'  // grey
+    case 'running':   return '#1d4ed8'
+    case 'succeeded': return '#15803d'
+    case 'failed':    return '#b91c1c'
+    case 'cancelled': return '#7c2d12'
+    case 'pending':   return '#6b7280'
   }
 }
 
-// Best-effort intrinsics summary for the "current calibration" card. Parses
-// Kalibr's camchain YAML (cam0 entry only — stereo entries are out of scope
-// for the mono-intrinsic PoC).
-// Subset of guesswork_meta we read out of the augmented camchain. The block
-// is written by the server's KalibrJob::handle_exit when Kalibr provides a
-// results-cam.txt; pre-feature uploads won't have it.
+// Subset of the guesswork_meta block KalibrJob writes into the camchain
+// alongside the standard Kalibr keys. Absent for pre-enrichment uploads.
 interface GuessworkMeta {
   reprojection_error_px?: number
   reprojection_error_u_px?: number
   reprojection_error_v_px?: number
 }
 
+// Best-effort intrinsics summary for the "current calibration" card; cam0
+// only (stereo entries are out of scope for the mono-intrinsic PoC).
 function summariseCamchain(text: CalibrationYaml | null): {
   model?: string
   distortion_model?: string
@@ -148,18 +164,14 @@ export default function CalibratePage() {
   const [job, setJob] = useState<CalibrationJob | null>(null)
   const [jobLog, setJobLog] = useState<string>('')
   const [jobError, setJobError] = useState<string | null>(null)
-  // Tick at 1Hz so the elapsed-time line updates while a job runs without
-  // setting state on every render.
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
 
   const [calibration, setCalibration] = useState<CameraCalibration | null>(null)
   const [calibError, setCalibError] = useState<string | null>(null)
   const [calibBusy, setCalibBusy] = useState(false)
 
-  const logRef        = useRef<HTMLPreElement | null>(null)
-  const closeStreamRef = useRef<(() => void) | null>(null)
+  const logRef = useRef<HTMLPreElement | null>(null)
 
-  // --- Initial load: camera + active recording + active job + calibration ---
   useEffect(() => {
     if (Number.isNaN(cameraId)) {
       setLoadError('invalid camera id')
@@ -188,7 +200,6 @@ export default function CalibratePage() {
     return () => { cancelled = true }
   }, [cameraId])
 
-  // Poll recording status while a session is active.
   const isRecording = recording !== null
   useEffect(() => {
     if (!isRecording) return
@@ -205,7 +216,6 @@ export default function CalibratePage() {
     return () => { cancelled = true; clearInterval(t) }
   }, [isRecording, cameraId])
 
-  // 1Hz "now" tick for elapsed-time display, only while a job is running.
   const isJobActive = job?.state === 'running' || job?.state === 'pending'
   useEffect(() => {
     if (!isJobActive) return
@@ -213,9 +223,6 @@ export default function CalibratePage() {
     return () => clearInterval(t)
   }, [isJobActive])
 
-  // Open / close the SSE log stream as the job state changes. The effect
-  // closes the EventSource on unmount; the onDone handler closes it on
-  // terminal state and refreshes the calibration card.
   useEffect(() => {
     if (!job || job.state !== 'running') return
     const close = streamJobLog(cameraId, {
@@ -243,21 +250,15 @@ export default function CalibratePage() {
           }
         }
       },
-      onError: () => {
-        // EventSource auto-retries internally on transient blips; only
-        // surface persistent failures by leaving the stream alone here. If
-        // the user navigates back, the page-load effect will reconcile.
-      },
+      // EventSource retries transient blips itself. Persistent failures
+      // remain visible as a stuck "Running" — the page-load effect on
+      // navigation back reconciles.
+      onError: () => {},
     })
-    closeStreamRef.current = close
-    return () => {
-      close()
-      closeStreamRef.current = null
-    }
+    return close
   }, [job?.state, cameraId])
 
-  // Auto-scroll the log to the bottom on new content, unless the user has
-  // scrolled up to read earlier output.
+  // Auto-scroll the log on new content unless the user has scrolled up.
   useEffect(() => {
     const el = logRef.current
     if (!el) return
@@ -482,21 +483,9 @@ export default function CalibratePage() {
                 {' '}[{summary.distortion.map((d) => d.toFixed(4)).join(', ')}]
               </p>
             )}
-            {summary?.reproj_error_px != null && (() => {
-              const q = calibrationQuality(summary.reproj_error_px)
-              const color = q === 'good' ? '#15803d' : '#b91c1c'
-              const label = q === 'good' ? '✓ Good calibration' : '⚠ Poor calibration — consider re-recording'
-              return (
-                <p style={{ marginTop: 8 }}>
-                  <strong style={{ color }}>{label}</strong>
-                  {' — reprojection error '}
-                  <code>{summary.reproj_error_px.toFixed(3)} px</code>
-                  {' '}<span style={{ color: '#6b7280', fontSize: 13 }}>
-                    (RMS sigma; rule of thumb: ≤ 0.5 px is good)
-                  </span>
-                </p>
-              )
-            })()}
+            {summary?.reproj_error_px != null && (
+              <ReprojErrorLine reprojErrorPx={summary.reproj_error_px} />
+            )}
             <button
               type="button"
               style={dangerButtonStyle}
