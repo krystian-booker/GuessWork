@@ -18,6 +18,8 @@ namespace gw::server {
 
 class CameraSupervisor;
 class CameraRepository;
+class KalibrJob;
+struct CalibrationJobStatus;
 
 // Status snapshot of an in-progress recording session.
 struct CalibrationSessionStatus {
@@ -74,12 +76,43 @@ public:
     CalibrationSessionStatus start(int64_t camera_id);
 
     // Stops the active session. Throws CalibrationError if no session exists.
-    // The on-disk recording is left in place for the user to feed into the
-    // Kalibr container.
+    // The on-disk recording is left in place; if the caller chains into
+    // start_kalibr_job() the job picks it up from <session>/calibration.bag.
     CalibrationSessionResult stop(int64_t camera_id);
 
     // Snapshot of an active session, or nullopt if none.
     std::optional<CalibrationSessionStatus> status(int64_t camera_id);
+
+    // --- Kalibr job lifecycle (post-recording) ---
+    //
+    // Concurrency is global: at most one job system-wide because each Kalibr
+    // run consumes ~all of the Colima VM's CPU/RAM. Start throws if another
+    // job is still running.
+
+    // Spawn the calibrate.sh subprocess for <session_root> using the camera's
+    // recorded focal_length_mm. Returns the initial status snapshot (state
+    // will be Running on success). Throws CalibrationError if a job is
+    // already active (for any camera).
+    CalibrationJobStatus start_kalibr_job(int64_t                      camera_id,
+                                          const std::filesystem::path& session_root,
+                                          double                       focal_length_mm);
+
+    // Status of the active job, if any. Filtered by camera so the route layer
+    // can distinguish "no job for this camera" (404) from "a job for a
+    // different camera is running" (returns nullopt either way; the route
+    // layer maps both to 404 — see routes_calibration.cpp).
+    std::optional<CalibrationJobStatus> kalibr_job_status(int64_t camera_id);
+
+    // Pointer to the underlying job for SSE handlers that need to call
+    // wait_for_log / log_slice. Returns nullptr if no active job for this
+    // camera. The pointer is valid only while the supervisor's mu_ is held —
+    // but SSE handlers retain it implicitly via the shared_ptr we expose
+    // (see implementation). Use kalibr_job_handle() in callers.
+    std::shared_ptr<KalibrJob> kalibr_job_handle(int64_t camera_id);
+
+    // SIGTERM the job's process group. No-op if no job, or job not for this
+    // camera, or job already ended. Returns true if a TERM was issued.
+    bool kalibr_job_cancel(int64_t camera_id);
 
 private:
     struct Session {
@@ -100,6 +133,13 @@ private:
     std::filesystem::path             root_;
     std::mutex                        mu_;
     std::map<int64_t, Session>        sessions_;
+
+    // shared_ptr because SSE handlers hold a copy across an HTTP response's
+    // lifetime, which can outlive the supervisor's lock. The supervisor
+    // resets its own slot when a new job starts; existing handlers continue
+    // to observe the old job until they unwind.
+    std::shared_ptr<KalibrJob>        kalibr_job_;
+    int64_t                           kalibr_job_camera_ = 0;  // 0 = none
 };
 
 }  // namespace gw::server

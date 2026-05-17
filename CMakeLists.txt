@@ -159,6 +159,8 @@ find_package(SQLite3 REQUIRED)
 add_library(gw_server
     src/server/camera_supervisor.cpp
     src/server/calibration_supervisor.cpp
+    src/server/subprocess_job.cpp
+    src/server/kalibr_job.cpp
     src/server/routes_status.cpp
     src/server/routes_stream.cpp
     src/server/routes_camera.cpp
@@ -274,6 +276,7 @@ if(GW_BUILD_TESTS)
         tests/test_camera_repository_calibration.cpp
         tests/test_rosbag_writer.cpp
         tests/test_rosbag_recording_consumer.cpp
+        tests/test_subprocess_job.cpp
     )
     target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server GTest::gtest_main)
     include(GoogleTest)

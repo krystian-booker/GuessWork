@@ -10,6 +10,7 @@ import {
   listCameras,
   updateCamera,
   type AvailableCamera,
+  calibrationQuality,
   type Camera,
   type CameraMode,
 } from '../api/cameras'
@@ -28,6 +29,31 @@ function previewLensSpec(focalMm: number) {
   const hfovDeg = (2 * Math.atan((sensorWmm / 2) / focalMm) * 180) / Math.PI
   const model = hfovDeg >= FISHEYE_HFOV_THRESHOLD_DEG ? 'pinhole-equi' : 'pinhole-radtan'
   return { focalPx, hfovDeg, model }
+}
+
+function CalibrationBadge({
+  reprojErrorPx,
+  calibratedAt,
+}: {
+  reprojErrorPx: number | null
+  calibratedAt: number | null
+}) {
+  const quality = calibrationQuality(reprojErrorPx)
+  if (quality === 'unknown') {
+    if (calibratedAt != null) {
+      // Calibrated, but stored YAML predates the quality enrichment — show
+      // "calibrated" without a score so the user knows it's not uncalibrated.
+      return <span style={{ color: '#6b7280' }}>calibrated</span>
+    }
+    return <span style={{ color: '#9ca3af' }}>—</span>
+  }
+  const color = quality === 'good' ? '#15803d' : '#b91c1c'
+  const label = quality === 'good' ? '✓ Good'    : '⚠ Poor'
+  return (
+    <span style={{ color }}>
+      {label} <span style={{ color: '#6b7280' }}>· {reprojErrorPx!.toFixed(2)} px</span>
+    </span>
+  )
 }
 
 function LensPreview({ focalMm }: { focalMm: number }) {
@@ -366,6 +392,7 @@ export default function CamerasPage() {
               <th style={{ padding: 8 }}>Name</th>
               <th style={{ padding: 8, width: 180 }}>Serial</th>
               <th style={{ padding: 8, width: 100 }}>Lens</th>
+              <th style={{ padding: 8, width: 160 }}>Calibration</th>
               <th style={{ padding: 8, width: 220 }}>Mode</th>
               <th style={{ padding: 8, width: 280 }}>Actions</th>
             </tr>
@@ -384,6 +411,12 @@ export default function CamerasPage() {
                 </td>
                 <td style={{ padding: 8, color: '#4b5563' }}>
                   {c.focal_length_mm.toFixed(1)} mm
+                </td>
+                <td style={{ padding: 8, color: '#4b5563' }}>
+                  <CalibrationBadge
+                    reprojErrorPx={c.reprojection_error_px}
+                    calibratedAt={c.calibrated_at}
+                  />
                 </td>
                 <td style={{ padding: 8, color: '#4b5563' }}>
                   {c.mode ? (

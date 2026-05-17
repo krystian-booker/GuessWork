@@ -22,6 +22,25 @@ export interface Camera {
   exposure: number | null
   online: boolean
   created_at: number
+  // Unix seconds when the calibration was last uploaded; null if uncalibrated.
+  calibrated_at: number | null
+  // RMS reprojection-error sigma in pixels, extracted from the camchain we
+  // stored. null when uncalibrated, or when the calibration predates the
+  // guesswork_meta enrichment (uploaded manually before the auto-pipeline).
+  // Rule of thumb: ≤ 0.5 px is a good calibration; > 0.5 px is poor.
+  reprojection_error_px: number | null
+}
+
+// Thresholds for the Good / Poor visual cue used in both the cameras table
+// and the calibrate page. Single source of truth so the two views never
+// disagree on a borderline value.
+export const GOOD_REPROJ_ERROR_PX = 0.5
+
+export type CalibrationQuality = 'good' | 'poor' | 'unknown'
+
+export function calibrationQuality(reprojErrorPx: number | null): CalibrationQuality {
+  if (reprojErrorPx == null) return 'unknown'
+  return reprojErrorPx <= GOOD_REPROJ_ERROR_PX ? 'good' : 'poor'
 }
 
 export interface SettingRange {

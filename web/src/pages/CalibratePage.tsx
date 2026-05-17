@@ -2,21 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import yaml from 'js-yaml'
 import {
+  cancelJob,
   deleteCalibration,
   getCalibration,
+  getJob,
   getRecording,
   startRecording,
   stopRecording,
-  uploadCalibration,
+  streamJobLog,
+  type CalibrationJob,
   type CalibrationYaml,
   type CameraCalibration,
+  type JobState,
   type KalibrCamchain,
-  type RecordingResult,
   type RecordingStatus,
 } from '../api/calibration'
-import { getCamera, type Camera } from '../api/cameras'
+import {
+  calibrationQuality,
+  getCamera,
+  type Camera,
+} from '../api/cameras'
 import Stream from '../Stream'
-import { dangerButtonStyle, neutralButtonStyle, primaryButtonStyle } from '../components/buttonStyles'
+import { dangerButtonStyle, primaryButtonStyle } from '../components/buttonStyles'
 
 const cardStyle: React.CSSProperties = {
   border: '1px solid #e5e7eb',
@@ -26,15 +33,20 @@ const cardStyle: React.CSSProperties = {
   background: '#fff',
 }
 
-const codeBlockStyle: React.CSSProperties = {
+const logBlockStyle: React.CSSProperties = {
   background: '#0b1020',
   color: '#e5e7eb',
   borderRadius: 6,
   padding: 12,
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-  fontSize: 13,
+  fontSize: 12,
+  lineHeight: 1.45,
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-all',
+  maxHeight: 360,
+  overflow: 'auto',
+  margin: 0,
+  marginTop: 8,
 }
 
 function formatMs(ms: number): string {
@@ -44,9 +56,43 @@ function formatMs(ms: number): string {
   return `${m}m ${s.toString().padStart(2, '0')}s`
 }
 
+function jobElapsedMs(job: CalibrationJob, nowMs: number): number {
+  if (job.state === 'running') return Math.max(0, nowMs - job.started_at_ms)
+  return Math.max(0, job.ended_at_ms - job.started_at_ms)
+}
+
+function jobStateLabel(state: JobState): string {
+  switch (state) {
+    case 'pending':   return 'Pending'
+    case 'running':   return 'Running'
+    case 'succeeded': return 'Succeeded'
+    case 'failed':    return 'Failed'
+    case 'cancelled': return 'Cancelled'
+  }
+}
+
+function jobStateColor(state: JobState): string {
+  switch (state) {
+    case 'running':   return '#1d4ed8'  // blue
+    case 'succeeded': return '#15803d'  // green
+    case 'failed':    return '#b91c1c'  // red
+    case 'cancelled': return '#7c2d12'  // amber-brown
+    case 'pending':   return '#6b7280'  // grey
+  }
+}
+
 // Best-effort intrinsics summary for the "current calibration" card. Parses
 // Kalibr's camchain YAML (cam0 entry only — stereo entries are out of scope
 // for the mono-intrinsic PoC).
+// Subset of guesswork_meta we read out of the augmented camchain. The block
+// is written by the server's KalibrJob::handle_exit when Kalibr provides a
+// results-cam.txt; pre-feature uploads won't have it.
+interface GuessworkMeta {
+  reprojection_error_px?: number
+  reprojection_error_u_px?: number
+  reprojection_error_v_px?: number
+}
+
 function summariseCamchain(text: CalibrationYaml | null): {
   model?: string
   distortion_model?: string
@@ -57,11 +103,12 @@ function summariseCamchain(text: CalibrationYaml | null): {
   cx?: number
   cy?: number
   distortion?: number[]
+  reproj_error_px?: number
 } | null {
   if (!text) return null
-  let doc: KalibrCamchain
+  let doc: KalibrCamchain & { guesswork_meta?: GuessworkMeta }
   try {
-    doc = yaml.load(text) as KalibrCamchain
+    doc = yaml.load(text) as KalibrCamchain & { guesswork_meta?: GuessworkMeta }
   } catch {
     return null
   }
@@ -70,6 +117,7 @@ function summariseCamchain(text: CalibrationYaml | null): {
   const intr = c.intrinsics ?? []
   const res  = c.resolution ?? []
   const dist = Array.isArray(c.distortion_coeffs) ? c.distortion_coeffs : undefined
+  const meta = doc.guesswork_meta
   return {
     model:            c.camera_model,
     distortion_model: c.distortion_model,
@@ -80,6 +128,9 @@ function summariseCamchain(text: CalibrationYaml | null): {
     cx: typeof intr[2] === 'number' ? intr[2] : undefined,
     cy: typeof intr[3] === 'number' ? intr[3] : undefined,
     distortion: dist,
+    reproj_error_px: typeof meta?.reprojection_error_px === 'number'
+                       ? meta.reprojection_error_px
+                       : undefined,
   }
 }
 
@@ -91,18 +142,24 @@ export default function CalibratePage() {
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [recording, setRecording] = useState<RecordingStatus | null>(null)
-  const [lastResult, setLastResult] = useState<RecordingResult | null>(null)
   const [recordError, setRecordError] = useState<string | null>(null)
   const [recordBusy, setRecordBusy] = useState(false)
+
+  const [job, setJob] = useState<CalibrationJob | null>(null)
+  const [jobLog, setJobLog] = useState<string>('')
+  const [jobError, setJobError] = useState<string | null>(null)
+  // Tick at 1Hz so the elapsed-time line updates while a job runs without
+  // setting state on every render.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now())
 
   const [calibration, setCalibration] = useState<CameraCalibration | null>(null)
   const [calibError, setCalibError] = useState<string | null>(null)
   const [calibBusy, setCalibBusy] = useState(false)
 
-  const fileRef = useRef<HTMLInputElement>(null)
-  const [copied, setCopied] = useState(false)
+  const logRef        = useRef<HTMLPreElement | null>(null)
+  const closeStreamRef = useRef<(() => void) | null>(null)
 
-  // Initial load — camera, current recording (if any), current calibration.
+  // --- Initial load: camera + active recording + active job + calibration ---
   useEffect(() => {
     if (Number.isNaN(cameraId)) {
       setLoadError('invalid camera id')
@@ -111,14 +168,16 @@ export default function CalibratePage() {
     let cancelled = false
     ;(async () => {
       try {
-        const [c, rec, cal] = await Promise.all([
+        const [c, rec, j, cal] = await Promise.all([
           getCamera(cameraId),
           getRecording(cameraId),
+          getJob(cameraId),
           getCalibration(cameraId),
         ])
         if (cancelled) return
         setCamera(c)
         setRecording(rec)
+        setJob(j)
         setCalibration(cal)
       } catch (e) {
         if (!cancelled) {
@@ -129,8 +188,7 @@ export default function CalibratePage() {
     return () => { cancelled = true }
   }, [cameraId])
 
-  // Poll the recording status while a session is active. Keyed on the boolean
-  // so per-tick status updates don't tear down and re-create the interval.
+  // Poll recording status while a session is active.
   const isRecording = recording !== null
   useEffect(() => {
     if (!isRecording) return
@@ -140,12 +198,74 @@ export default function CalibratePage() {
         const r = await getRecording(cameraId)
         if (!cancelled) setRecording(r)
       } catch {
-        // ignore transient errors; the next tick may succeed
+        // transient — next tick may succeed
       }
     }
     const t = setInterval(tick, 500)
     return () => { cancelled = true; clearInterval(t) }
   }, [isRecording, cameraId])
+
+  // 1Hz "now" tick for elapsed-time display, only while a job is running.
+  const isJobActive = job?.state === 'running' || job?.state === 'pending'
+  useEffect(() => {
+    if (!isJobActive) return
+    const t = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [isJobActive])
+
+  // Open / close the SSE log stream as the job state changes. The effect
+  // closes the EventSource on unmount; the onDone handler closes it on
+  // terminal state and refreshes the calibration card.
+  useEffect(() => {
+    if (!job || job.state !== 'running') return
+    const close = streamJobLog(cameraId, {
+      onChunk: (chunk) => {
+        setJobLog((prev) => prev + chunk)
+      },
+      onDone: async (summary) => {
+        setJob((prev) =>
+          prev
+            ? {
+                ...prev,
+                state: summary.state,
+                exit_code: summary.exit_code,
+                calibration_stored: summary.calibration_stored,
+                upload_error: summary.upload_error,
+                ended_at_ms: Date.now(),
+              }
+            : prev,
+        )
+        if (summary.state === 'succeeded' && summary.calibration_stored) {
+          try {
+            setCalibration(await getCalibration(cameraId))
+          } catch (e) {
+            setJobError(e instanceof Error ? e.message : String(e))
+          }
+        }
+      },
+      onError: () => {
+        // EventSource auto-retries internally on transient blips; only
+        // surface persistent failures by leaving the stream alone here. If
+        // the user navigates back, the page-load effect will reconcile.
+      },
+    })
+    closeStreamRef.current = close
+    return () => {
+      close()
+      closeStreamRef.current = null
+    }
+  }, [job?.state, cameraId])
+
+  // Auto-scroll the log to the bottom on new content, unless the user has
+  // scrolled up to read earlier output.
+  useEffect(() => {
+    const el = logRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (distanceFromBottom < 100) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [jobLog])
 
   const runAction = useCallback(
     (setBusy: (b: boolean) => void, setError: (m: string | null) => void) =>
@@ -167,36 +287,37 @@ export default function CalibratePage() {
 
   const onStart = () => {
     if (recordBusy) return
-    setLastResult(null)
+    // Starting a new recording invalidates any prior job result the page
+    // was displaying — clear the log so it doesn't bleed into the next run.
+    setJob(null)
+    setJobLog('')
+    setJobError(null)
     runRecord(async () => { setRecording(await startRecording(cameraId)) })
   }
 
   const onStop = () => {
     if (recordBusy) return
     runRecord(async () => {
-      setLastResult(await stopRecording(cameraId))
+      const resp = await stopRecording(cameraId)
       setRecording(null)
+      if (resp.job) {
+        setJobLog('')
+        setJob(resp.job)
+      } else if (resp.job_error) {
+        setJobError(resp.job_error)
+      }
     })
   }
 
-  const onCopyCommand = async () => {
-    if (!lastResult) return
-    try {
-      await navigator.clipboard.writeText(lastResult.suggested_command)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      setRecordError('copy to clipboard failed (clipboard permissions?)')
-    }
-  }
-
-  const onUploadFile = (file: File) => {
-    if (calibBusy) return
-    runCalib(async () => {
-      const text = await file.text()
-      setCalibration(await uploadCalibration(cameraId, text))
-      if (fileRef.current) fileRef.current.value = ''
-    })
+  const onCancelJob = () => {
+    if (!job || job.state !== 'running') return
+    ;(async () => {
+      try {
+        await cancelJob(cameraId)
+      } catch (e) {
+        setJobError(e instanceof Error ? e.message : String(e))
+      }
+    })()
   }
 
   const onClearCalibration = () => {
@@ -243,7 +364,8 @@ export default function CalibratePage() {
         <h3 style={{ marginTop: 0 }}>1. Record an AprilGrid sequence</h3>
         <p style={{ color: '#4b5563', marginTop: 0 }}>
           Move the camera around an AprilGrid target so the pattern is seen from many angles and
-          covers the whole frame. 30–90 seconds is typical.
+          covers the whole frame. 30–90 seconds is typical. Stopping the recording automatically
+          launches Kalibr.
         </p>
         {recording ? (
           <>
@@ -264,7 +386,7 @@ export default function CalibratePage() {
             type="button"
             style={primaryButtonStyle}
             onClick={onStart}
-            disabled={recordBusy || !camera.online}
+            disabled={recordBusy || !camera.online || isJobActive}
           >
             Start recording
           </button>
@@ -274,50 +396,63 @@ export default function CalibratePage() {
         )}
       </div>
 
-      {lastResult && (
+      {job && (
         <div style={cardStyle}>
-          <h3 style={{ marginTop: 0 }}>2. Run Kalibr</h3>
-          <p style={{ color: '#4b5563', marginTop: 0 }}>
-            Run this command in a terminal. It starts Colima, runs Kalibr in a Docker
-            container, and stops Colima again when it's done — so the VM isn't left
-            sitting around. The focal-length hint and camera model are derived from
-            the lens you set on the camera record. Typically takes 1–5 minutes; on
-            completion it writes <code>calibration-camchain.yaml</code> next to
-            the bag.
+          <h3 style={{ marginTop: 0 }}>2. Kalibr</h3>
+          <p style={{ margin: '4px 0' }}>
+            <strong style={{ color: jobStateColor(job.state) }}>
+              {jobStateLabel(job.state)}
+            </strong>
+            {' — '}
+            {formatMs(jobElapsedMs(job, nowMs))}
+            {' · '}
+            model <code>{job.model}</code>
+            {' · '}
+            {jobLog.length.toLocaleString()} bytes of log
           </p>
-          <pre style={codeBlockStyle}>{lastResult.suggested_command}</pre>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
-            <button type="button" style={neutralButtonStyle} onClick={onCopyCommand}>
-              {copied ? 'Copied!' : 'Copy command'}
+          {job.state === 'succeeded' && job.calibration_stored && (
+            <p style={{ color: '#15803d', margin: '4px 0' }}>
+              Calibration auto-uploaded — see card below.
+            </p>
+          )}
+          {job.state === 'succeeded' && !job.calibration_stored && (
+            <p style={{ color: '#b91c1c', margin: '4px 0' }}>
+              Kalibr exited cleanly but the camchain wasn't stored
+              {job.upload_error ? <>: {job.upload_error}</> : '.'}
+            </p>
+          )}
+          {job.state === 'failed' && (
+            <p style={{ color: '#b91c1c', margin: '4px 0' }}>
+              Exit code {job.exit_code}
+              {job.upload_error ? <> · {job.upload_error}</> : ''}
+              {' '}— scan the log below for the underlying error.
+            </p>
+          )}
+          {job.state === 'cancelled' && (
+            <p style={{ color: '#7c2d12', margin: '4px 0' }}>
+              Cancelled by user; no calibration was stored.
+            </p>
+          )}
+          {jobError && (
+            <p style={{ color: 'crimson', margin: '4px 0' }}>{jobError}</p>
+          )}
+
+          {job.state === 'running' && (
+            <button type="button" style={dangerButtonStyle} onClick={onCancelJob}>
+              Cancel
             </button>
-            <span style={{ color: '#6b7280', fontSize: 13 }}>
-              Dataset path: <code>{lastResult.path}</code>
-              {' '}({lastResult.frames_written} frames)
-            </span>
-          </div>
+          )}
+
+          <details style={{ marginTop: 12 }} open={job.state !== 'running'}>
+            <summary style={{ cursor: 'pointer', color: '#4b5563', fontSize: 14 }}>
+              Show container log
+            </summary>
+            <pre ref={logRef} style={logBlockStyle}>
+              {jobLog || '(no output yet)'}
+            </pre>
+          </details>
         </div>
       )}
-
-      <div style={cardStyle}>
-        <h3 style={{ marginTop: 0 }}>3. Upload camchain YAML</h3>
-        <p style={{ color: '#4b5563', marginTop: 0 }}>
-          After Kalibr finishes, pick the resulting
-          {' '}<code>calibration-camchain.yaml</code> from the dataset directory.
-        </p>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".yaml,.yml,text/yaml,application/x-yaml"
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) onUploadFile(f)
-          }}
-          disabled={calibBusy}
-        />
-        {calibError && (
-          <p style={{ color: 'crimson', marginTop: 8 }}>{calibError}</p>
-        )}
-      </div>
 
       <div style={cardStyle}>
         <h3 style={{ marginTop: 0 }}>Current calibration</h3>
@@ -347,6 +482,21 @@ export default function CalibratePage() {
                 {' '}[{summary.distortion.map((d) => d.toFixed(4)).join(', ')}]
               </p>
             )}
+            {summary?.reproj_error_px != null && (() => {
+              const q = calibrationQuality(summary.reproj_error_px)
+              const color = q === 'good' ? '#15803d' : '#b91c1c'
+              const label = q === 'good' ? '✓ Good calibration' : '⚠ Poor calibration — consider re-recording'
+              return (
+                <p style={{ marginTop: 8 }}>
+                  <strong style={{ color }}>{label}</strong>
+                  {' — reprojection error '}
+                  <code>{summary.reproj_error_px.toFixed(3)} px</code>
+                  {' '}<span style={{ color: '#6b7280', fontSize: 13 }}>
+                    (RMS sigma; rule of thumb: ≤ 0.5 px is good)
+                  </span>
+                </p>
+              )
+            })()}
             <button
               type="button"
               style={dangerButtonStyle}
@@ -355,6 +505,9 @@ export default function CalibratePage() {
             >
               Delete calibration
             </button>
+            {calibError && (
+              <p style={{ color: 'crimson', marginTop: 8 }}>{calibError}</p>
+            )}
           </>
         ) : (
           <p style={{ color: '#6b7280', margin: 0 }}>No calibration uploaded yet.</p>

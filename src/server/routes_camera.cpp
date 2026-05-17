@@ -2,6 +2,7 @@
 
 #include <exception>
 #include <optional>
+#include <regex>
 #include <string>
 #include <unordered_map>
 
@@ -20,6 +21,19 @@ void put_opt(crow::json::wvalue& j, const char* key, const std::optional<T>& v) 
     else   j[key] = nullptr;
 }
 
+// Pull the reprojection-error number we appended to the camchain in
+// KalibrJob's augment_with_quality(). The camchain YAML is small and the
+// regex is tight, so doing this on every list_all() is comfortably fast.
+// Returns nullopt for legacy calibrations (uploaded before this feature) or
+// when Kalibr's results.txt was missing at calibration time.
+std::optional<double> extract_reproj_error_px(const std::string& yaml) {
+    static const std::regex re(
+        R"(reprojection_error_px:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))");
+    std::smatch m;
+    if (!std::regex_search(yaml, m, re)) return std::nullopt;
+    try { return std::stod(m[1].str()); } catch (...) { return std::nullopt; }
+}
+
 crow::json::wvalue camera_to_json(const Camera&                              c,
                                   bool                                       online,
                                   const std::optional<gw::VideoModeOption>&  current) {
@@ -28,6 +42,18 @@ crow::json::wvalue camera_to_json(const Camera&                              c,
     j["name"]       = c.name;
     j["serial"]     = c.serial;
     j["focal_length_mm"] = c.focal_length_mm;
+    j["calibrated_at"] = c.calibrated_at ? crow::json::wvalue(*c.calibrated_at)
+                                         : crow::json::wvalue(nullptr);
+    // Quality score for the stored calibration, in pixels (RMS of the per-
+    // axis reprojection-error sigma). null when uncalibrated or when the
+    // stored YAML predates the guesswork_meta enrichment.
+    if (c.calibration_json) {
+        const auto err = extract_reproj_error_px(*c.calibration_json);
+        if (err) j["reprojection_error_px"] = *err;
+        else     j["reprojection_error_px"] = nullptr;
+    } else {
+        j["reprojection_error_px"] = nullptr;
+    }
     if (c.mode) j["mode"] = *c.mode;
     else        j["mode"] = nullptr;
     if (current && current->width)   j["mode_width"]   = *current->width;

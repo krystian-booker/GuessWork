@@ -11,6 +11,7 @@
 #include "core/frame_channel.hpp"
 #include "server/camera_repository.hpp"
 #include "server/camera_supervisor.hpp"
+#include "server/kalibr_job.hpp"
 
 #ifndef GW_KALIBR_DOCKER_IMAGE
 #define GW_KALIBR_DOCKER_IMAGE "guesswork/kalibr:latest"
@@ -75,10 +76,19 @@ CalibrationSupervisor::CalibrationSupervisor(CameraSupervisor&     cameras,
 }
 
 CalibrationSupervisor::~CalibrationSupervisor() {
-    std::lock_guard lk(mu_);
-    for (auto& [id, s] : sessions_) {
-        if (s.consumer) s.consumer->detach();
+    // Cancel any active Kalibr job and let the SubprocessJob reader thread
+    // unwind before we release the supervisor. The shared_ptr keeps the job
+    // alive for any in-flight SSE handler too — they'll see Cancelled state
+    // when their wait_for_log returns.
+    std::shared_ptr<KalibrJob> job_to_cancel;
+    {
+        std::lock_guard lk(mu_);
+        job_to_cancel = kalibr_job_;
+        for (auto& [id, s] : sessions_) {
+            if (s.consumer) s.consumer->detach();
+        }
     }
+    if (job_to_cancel) job_to_cancel->cancel();
 }
 
 CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
@@ -158,6 +168,75 @@ CalibrationSupervisor::status_locked(const Session& s) const {
     st.elapsed_ms     = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - s.started_at).count();
     return st;
+}
+
+CalibrationJobStatus CalibrationSupervisor::start_kalibr_job(
+    int64_t                      camera_id,
+    const std::filesystem::path& session_root,
+    double                       focal_length_mm) {
+    std::shared_ptr<KalibrJob> stale_to_release;
+    std::shared_ptr<KalibrJob> job;
+    {
+        std::lock_guard lk(mu_);
+
+        // Reap any prior job that's already finished — keeps the supervisor's
+        // slot free for the new run without forcing the SSE-or-status caller
+        // to GC explicitly.
+        if (kalibr_job_) {
+            const auto s = kalibr_job_->status().state;
+            if (s == SubprocessState::Running || s == SubprocessState::Pending) {
+                throw CalibrationError("another Kalibr job is already running");
+            }
+            stale_to_release = std::move(kalibr_job_);
+            kalibr_job_camera_ = 0;
+        }
+
+        const std::filesystem::path script = GW_KALIBR_CALIBRATE_SCRIPT;
+        const double                pitch  = static_cast<double>(GW_SENSOR_PIXEL_PITCH_MM);
+        // TODO(multi-camera): pull live sensor width when we support cameras
+        // with different resolutions. Hard-coded to match the default pitch.
+        constexpr uint32_t sensor_w_px = 2048;
+        job = std::make_shared<KalibrJob>(
+            repository_, camera_id, session_root, focal_length_mm,
+            script, pitch, sensor_w_px);
+        job->start();  // throws on fork/pipe failure; lock released on unwind
+
+        kalibr_job_        = job;
+        kalibr_job_camera_ = camera_id;
+    }
+    // stale_to_release is released here — destruction of an already-finished
+    // job is cheap (joins its reader thread which already exited).
+    return job->status();
+}
+
+std::optional<CalibrationJobStatus>
+CalibrationSupervisor::kalibr_job_status(int64_t camera_id) {
+    std::shared_ptr<KalibrJob> job;
+    {
+        std::lock_guard lk(mu_);
+        if (!kalibr_job_ || kalibr_job_camera_ != camera_id) return std::nullopt;
+        job = kalibr_job_;
+    }
+    return job->status();
+}
+
+std::shared_ptr<KalibrJob>
+CalibrationSupervisor::kalibr_job_handle(int64_t camera_id) {
+    std::lock_guard lk(mu_);
+    if (!kalibr_job_ || kalibr_job_camera_ != camera_id) return nullptr;
+    return kalibr_job_;
+}
+
+bool CalibrationSupervisor::kalibr_job_cancel(int64_t camera_id) {
+    std::shared_ptr<KalibrJob> job;
+    {
+        std::lock_guard lk(mu_);
+        if (!kalibr_job_ || kalibr_job_camera_ != camera_id) return false;
+        if (kalibr_job_->status().state != SubprocessState::Running) return false;
+        job = kalibr_job_;
+    }
+    job->cancel();
+    return true;
 }
 
 std::string CalibrationSupervisor::build_suggested_command(

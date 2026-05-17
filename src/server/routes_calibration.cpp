@@ -1,10 +1,12 @@
 #include "server/routes_calibration.hpp"
 
+#include <chrono>
 #include <exception>
 #include <string>
 
 #include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
+#include "server/kalibr_job.hpp"
 #include "server/route_helpers.hpp"
 
 namespace gw::server {
@@ -30,6 +32,68 @@ crow::json::wvalue result_to_json(const CalibrationSessionResult& r) {
     j["elapsed_ms"]        = r.elapsed_ms;
     j["suggested_command"] = r.suggested_command;
     return j;
+}
+
+// Maps SubprocessState onto the stable strings the frontend matches against.
+// Kept in this file (not in kalibr_job) so the JSON contract stays adjacent
+// to the routes that emit it.
+const char* job_state_str(SubprocessState s) {
+    switch (s) {
+        case SubprocessState::Pending:   return "pending";
+        case SubprocessState::Running:   return "running";
+        case SubprocessState::Succeeded: return "succeeded";
+        case SubprocessState::Failed:    return "failed";
+        case SubprocessState::Cancelled: return "cancelled";
+    }
+    return "unknown";
+}
+
+crow::json::wvalue job_status_to_json(const CalibrationJobStatus& s) {
+    crow::json::wvalue j;
+    j["state"]              = job_state_str(s.state);
+    j["model"]              = s.model;
+    j["exit_code"]          = s.exit_code;
+    j["started_at_ms"]      = s.started_at_ms;
+    j["ended_at_ms"]        = s.ended_at_ms;
+    j["log_bytes"]          = static_cast<int64_t>(s.log_bytes);
+    j["calibration_stored"] = s.calibration_stored;
+    j["upload_error"]       = s.upload_error.empty()
+                                  ? crow::json::wvalue(nullptr)
+                                  : crow::json::wvalue(s.upload_error);
+    return j;
+}
+
+// Per the SSE spec, every newline inside a data block becomes the boundary
+// between two `data:` lines (each starts a new line of payload that the
+// browser concatenates with '\n'). The event ends on a blank line. Splitting
+// here avoids EventSource parsing the source code's literal '\n' as event
+// separators when the subprocess output contains them.
+std::string sse_data_event(const std::string& payload) {
+    std::string out;
+    out.reserve(payload.size() + 16);
+    size_t start = 0;
+    while (start <= payload.size()) {
+        const auto nl = payload.find('\n', start);
+        const auto end = (nl == std::string::npos) ? payload.size() : nl;
+        out.append("data: ");
+        out.append(payload, start, end - start);
+        out.push_back('\n');
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+    out.push_back('\n');  // blank line terminates the event
+    return out;
+}
+
+std::string sse_done_event(const CalibrationJobStatus& s) {
+    crow::json::wvalue done;
+    done["state"]              = job_state_str(s.state);
+    done["exit_code"]          = s.exit_code;
+    done["calibration_stored"] = s.calibration_stored;
+    done["upload_error"]       = s.upload_error.empty()
+                                     ? crow::json::wvalue(nullptr)
+                                     : crow::json::wvalue(s.upload_error);
+    return "event: done\ndata: " + done.dump() + "\n\n";
 }
 
 crow::json::wvalue calibration_summary_to_json(const Camera& c) {
@@ -79,14 +143,107 @@ void register_calibration_routes(crow::SimpleApp&       app,
     CROW_ROUTE(app, "/api/cameras/<int>/calibration/recording").methods("DELETE"_method)
     ([&repo, &calib](int64_t id) {
         try {
-            if (!repo.get(id)) return error_response(404, "camera not found");
+            const auto cam = repo.get(id);
+            if (!cam) return error_response(404, "camera not found");
             const auto r = calib.stop(id);
-            return json_response(200, result_to_json(r));
+
+            // Auto-launch the Kalibr subprocess. Failure here surfaces as a
+            // failed job (rendered in the UI's debug panel), not a 5xx —
+            // the recording itself succeeded and shouldn't roll back. The
+            // 409 path handles the "another job already running" case.
+            crow::json::wvalue body;
+            body["recording_result"] = result_to_json(r);
+            try {
+                const auto job = calib.start_kalibr_job(id, r.path, cam->focal_length_mm);
+                body["job"] = job_status_to_json(job);
+            } catch (const CalibrationError& e) {
+                body["job"]       = crow::json::wvalue(nullptr);
+                body["job_error"] = e.what();
+                return json_response(409, std::move(body));
+            }
+            return json_response(200, std::move(body));
         } catch (const CalibrationError& e) {
             return error_response(404, e.what());
         } catch (const std::exception& e) {
             return error_response(500, e.what());
         }
+    });
+
+    // ---- Kalibr job (post-recording, automatic) ----
+    //
+    // The job is started by DELETE /recording above; these endpoints expose
+    // status, the live log stream, and a cancel handle.
+
+    CROW_ROUTE(app, "/api/cameras/<int>/calibration/job").methods("GET"_method)
+    ([&calib](int64_t id) {
+        try {
+            const auto st = calib.kalibr_job_status(id);
+            if (!st) return error_response(404, "no active job for this camera");
+            return json_response(200, job_status_to_json(*st));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/cameras/<int>/calibration/job").methods("DELETE"_method)
+    ([&calib](int64_t id) {
+        try {
+            if (!calib.kalibr_job_cancel(id)) {
+                return error_response(404, "no running job for this camera");
+            }
+            return with_no_store(crow::response(204));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    // SSE log stream. Returns text/event-stream and keeps the connection open
+    // until the subprocess reaches a terminal state. The handler thread is a
+    // Crow worker — multithreaded mode is already on (see http_server.cpp),
+    // so blocking here doesn't stall other requests.
+    CROW_ROUTE(app, "/api/cameras/<int>/calibration/job/log").methods("GET"_method)
+    ([&calib](const crow::request& /*req*/, crow::response& res, int64_t id) {
+        const auto job = calib.kalibr_job_handle(id);
+        if (!job) {
+            res.code = 404;
+            res.set_header("Content-Type", "application/json");
+            res.write(R"({"error":"no active job for this camera"})");
+            res.end();
+            return;
+        }
+
+        res.set_header("Content-Type", "text/event-stream");
+        res.set_header("Cache-Control", "no-store");
+        res.set_header("Connection",    "keep-alive");
+
+        size_t off = 0;
+        // Flush whatever bytes have buffered up before we subscribed so a
+        // late connector still sees the start of the run.
+        const std::string initial = job->log_snapshot();
+        if (!initial.empty()) {
+            res.write(sse_data_event(initial));
+            off = initial.size();
+        }
+
+        // Drain new bytes as they arrive. wait_for_log returns either when
+        // log_bytes_ > off, the job reaches a terminal state, or the timeout
+        // fires — the latter lets us periodically check job state without
+        // sleeping forever if the subprocess goes quiet.
+        for (;;) {
+            const size_t now_bytes =
+                job->wait_for_log(off, std::chrono::milliseconds(1000));
+            if (now_bytes > off) {
+                const std::string chunk = job->log_slice(off, now_bytes - off);
+                res.write(sse_data_event(chunk));
+                off = now_bytes;
+            }
+            const auto st = job->status();
+            if (st.state != SubprocessState::Running) {
+                res.write(sse_done_event(st));
+                break;
+            }
+        }
+        res.end();
     });
 
     // ---- Stored calibration (Kalibr camchain YAML) ----
