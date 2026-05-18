@@ -18,6 +18,9 @@ export default function Nav() {
       <NavLink to="/cameras" style={({ isActive }) => linkStyle(isActive)}>
         Cameras
       </NavLink>
+      <NavLink to="/hardware-sync" style={({ isActive }) => linkStyle(isActive)}>
+        Hardware Sync
+      </NavLink>
     </nav>
   )
 }

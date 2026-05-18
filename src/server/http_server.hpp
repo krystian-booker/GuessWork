@@ -9,6 +9,8 @@ namespace gw::server {
 class CameraRepository;
 class CameraSupervisor;
 class CalibrationSupervisor;
+class TriggerGroupRepository;
+class TeensyManager;
 
 // Thin wrapper around a Crow application. The Crow SDK headers are heavyweight
 // (asio, boost-style metaprogramming) so we hide them behind a Pimpl: consumers
@@ -19,6 +21,8 @@ public:
                CameraSupervisor&                     supervisor,
                CameraRepository&                     cameras,
                CalibrationSupervisor&                calibration,
+               TriggerGroupRepository&               trigger_groups,
+               TeensyManager&                        teensy,
                std::chrono::steady_clock::time_point started_at);
     ~HttpServer();
 

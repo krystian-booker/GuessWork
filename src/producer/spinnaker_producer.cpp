@@ -62,6 +62,49 @@ void set_int_node(Spinnaker::GenApi::INodeMap& nm,
     ptr->SetValue(value);
 }
 
+void set_bool_node(Spinnaker::GenApi::INodeMap& nm,
+                   const char*                  node_name,
+                   bool                         value) {
+    Spinnaker::GenApi::CBooleanPtr ptr = nm.GetNode(node_name);
+    if (!Spinnaker::GenApi::IsWritable(ptr)) {
+        throw std::runtime_error(std::string("Spinnaker node not writable: ") + node_name);
+    }
+    ptr->SetValue(value);
+}
+
+// Configure the camera as a hardware-trigger slave on Line0. The Spinnaker
+// nodemap requires TriggerMode=Off before changing the selector / source, so
+// we toggle Off → write → On regardless of the previous state.
+void configure_hardware_trigger(Spinnaker::GenApi::INodeMap& nm) {
+    set_enum_node(nm, "TriggerMode",       "Off");
+    set_enum_node(nm, "TriggerSelector",   "FrameStart");
+    set_enum_node(nm, "TriggerSource",     "Line0");
+    set_enum_node(nm, "TriggerActivation", "RisingEdge");
+    // TriggerOverlap=ReadOut lets the camera arm its next trigger during the
+    // current frame readout, removing a one-frame deadtime. Some models
+    // (e.g. Chameleon3) only expose "Off"; tolerate the absence.
+    try { set_enum_node(nm, "TriggerOverlap", "ReadOut"); } catch (...) {}
+    set_enum_node(nm, "TriggerMode",       "On");
+
+    // ChunkFrameID gives us a strictly-monotonic per-camera trigger counter
+    // so we can detect dropped frames and re-align the host-side pulse ring.
+    try { set_bool_node(nm, "ChunkModeActive", true);                } catch (...) {}
+    try { set_enum_node(nm, "ChunkSelector",   "FrameID");           } catch (...) {}
+    try { set_bool_node(nm, "ChunkEnable",     true);                } catch (...) {}
+}
+
+// Pull the FrameID off the chunk payload. Returns 0 if chunk data wasn't
+// enabled or the camera didn't ship it for this frame; the producer treats
+// that as "no chunk info available".
+uint64_t read_chunk_frame_id(const Spinnaker::ImagePtr& img) {
+    try {
+        Spinnaker::ChunkData cd = img->GetChunkData();
+        return static_cast<uint64_t>(cd.GetFrameID());
+    } catch (...) {
+        return 0;
+    }
+}
+
 // Per-node helpers for the live-settings path. Each tolerates the node being
 // absent or non-readable so partial-support cameras drop fields silently
 // rather than fail the whole apply.
@@ -214,6 +257,7 @@ struct SpinnakerProducer::Impl {
     std::string                              serial;
     std::optional<std::string>               mode;
     CameraSettingsValues                     initial_settings;
+    HardwareSyncConfig                       hw_sync;
     FrameFormat                              format{};
     VideoModeList                            cached_modes;
     CameraSettingsLimits                     cached_limits;
@@ -236,9 +280,10 @@ struct SpinnakerProducer::Impl {
     std::atomic<uint64_t>                    total_incomplete{0};
 
     Impl(std::string n, std::string s,
-         std::optional<std::string> m, CameraSettingsValues init)
+         std::optional<std::string> m, CameraSettingsValues init,
+         HardwareSyncConfig hs)
         : name(std::move(n)), serial(std::move(s)), mode(std::move(m)),
-          initial_settings(std::move(init)) {}
+          initial_settings(std::move(init)), hw_sync(hs) {}
 
     void capture_loop();
 };
@@ -250,9 +295,11 @@ struct SpinnakerProducer::Impl {
 SpinnakerProducer::SpinnakerProducer(std::string                name,
                                      std::string                serial,
                                      std::optional<std::string> mode,
-                                     CameraSettingsValues       initial_settings)
+                                     CameraSettingsValues       initial_settings,
+                                     HardwareSyncConfig         hw_sync)
     : impl_(std::make_unique<Impl>(std::move(name), std::move(serial),
-                                   std::move(mode), std::move(initial_settings))) {}
+                                   std::move(mode), std::move(initial_settings),
+                                   hw_sync)) {}
 
 SpinnakerProducer::~SpinnakerProducer() {
     try {
@@ -337,6 +384,20 @@ void SpinnakerProducer::start() {
         }
         set_enum_node(dev_nm, "PixelFormat",     "Mono8");
         set_enum_node(dev_nm, "AcquisitionMode", "Continuous");  // belt-and-suspenders, default on Chameleon3
+        if (impl_->hw_sync.enabled) {
+            configure_hardware_trigger(dev_nm);
+        } else {
+            // Leave a previously-configured camera in a known-freerun state:
+            // toggling hw-sync off MUST be visible at the camera level, not
+            // just at the supervisor / DB level.
+            try { set_enum_node(dev_nm, "TriggerMode", "Off"); } catch (...) {}
+        }
+        // Reset the pulse stamper's per-pin state so the first frame after
+        // (re)start seeds a fresh FrameID baseline. Safe even when hw-sync is
+        // off: the stamper just clears nonexistent state.
+        if (impl_->hw_sync.stamper) {
+            impl_->hw_sync.stamper->reset_pin_state(impl_->hw_sync.trigger_output_pin);
+        }
 
         const int64_t w = read_int_node(dev_nm, "Width");
         const int64_t h = read_int_node(dev_nm, "Height");
@@ -450,6 +511,20 @@ void SpinnakerProducer::Impl::capture_loop() {
 
         const uint64_t camera_ts = static_cast<uint64_t>(img->GetTimeStamp());
 
+        // In hardware-sync mode we replace the camera's own timestamp with
+        // the Teensy-side rising-edge timestamp for THIS frame. Two cameras
+        // wired to the same trigger group resolve to the same pulse event,
+        // which is the mechanism behind the "identical timestamps" guarantee.
+        uint64_t stamp_ts = camera_ts;
+        if (hw_sync.enabled && hw_sync.stamper) {
+            const uint64_t frame_id = read_chunk_frame_id(img);
+            if (frame_id != 0) {
+                const uint64_t pulse_ns =
+                    hw_sync.stamper->pop_pulse_ns(hw_sync.trigger_output_pin, frame_id);
+                if (pulse_ns != 0) stamp_ts = pulse_ns;
+            }
+        }
+
         Frame* f = user_pool->checkout(std::move(img));
         if (!f) {
             total_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -458,7 +533,7 @@ void SpinnakerProducer::Impl::capture_loop() {
 
         f->set_sequence(++sequence_counter);
         f->set_host_capture_ns(Clock::now_ns());
-        f->set_camera_ts_ns(camera_ts);
+        f->set_camera_ts_ns(stamp_ts);
         f->set_producer_id(name);
 
         channel.publish(f);

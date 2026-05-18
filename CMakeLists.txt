@@ -165,12 +165,15 @@ add_library(gw_server
     src/server/routes_stream.cpp
     src/server/routes_camera.cpp
     src/server/routes_calibration.cpp
+    src/server/routes_hardware_sync.cpp
     src/server/static_assets.cpp
     src/server/http_server.cpp
     src/server/stream_consumer.cpp
     src/server/webrtc_peer.cpp
     src/server/database.cpp
     src/server/camera_repository.cpp
+    src/server/trigger_group_repository.cpp
+    src/server/teensy_manager.cpp
 )
 target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 

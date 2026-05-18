@@ -72,6 +72,8 @@ struct CameraSlot {
     std::string                        serial;
     std::optional<std::string>         mode;         // GenICam VideoMode symbolic
     gw::CameraSettingsValues           settings;     // persisted live-tunables
+    bool                               hardware_sync_enabled = false;
+    std::optional<int64_t>             trigger_output_pin;  // 1..6 when hw-sync is on
     std::unique_ptr<SpinnakerProducer> producer;     // null when offline
     std::shared_ptr<StreamConsumer>    stream;       // null when offline
     FpsSampler                         fps;
@@ -122,6 +124,7 @@ private:
 struct CameraSupervisor::Impl {
     CameraRepository&                        repo;
     StreamParams                             params;
+    gw::IPulseStamper*                       stamper = nullptr;
     std::mutex                               mu;
     Spinnaker::SystemPtr                     system;
     std::unique_ptr<SystemEventListener>     listener;
@@ -129,7 +132,8 @@ struct CameraSupervisor::Impl {
     std::unordered_map<std::string, int64_t> id_by_serial;
     bool                                     started = false;
 
-    Impl(CameraRepository& r, StreamParams p) : repo(r), params(p) {}
+    Impl(CameraRepository& r, StreamParams p, gw::IPulseStamper* s)
+        : repo(r), params(p), stamper(s) {}
 
     // All of these expect impl mutex to be held by the caller.
     void load_db_into_slots_locked();
@@ -153,6 +157,8 @@ void CameraSupervisor::Impl::load_db_into_slots_locked() {
         s.serial   = row.serial;
         s.mode     = row.mode;
         s.settings = settings_from_row(row);
+        s.hardware_sync_enabled = row.hardware_sync_enabled;
+        s.trigger_output_pin    = row.trigger_output_pin;
         slots_by_id.emplace(row.id, std::move(s));
         id_by_serial[row.serial] = row.id;
     }
@@ -165,8 +171,12 @@ void CameraSupervisor::Impl::try_start_slot_locked(CameraSlot& slot, Spinnaker::
     binding->system = system;
     binding->cam    = cam;
 
+    gw::HardwareSyncConfig hw_sync;
+    hw_sync.enabled            = slot.hardware_sync_enabled;
+    hw_sync.trigger_output_pin = static_cast<uint8_t>(slot.trigger_output_pin.value_or(0));
+    hw_sync.stamper            = stamper;
     auto producer = std::make_unique<SpinnakerProducer>(
-        slot.name, slot.serial, slot.mode, slot.settings);
+        slot.name, slot.serial, slot.mode, slot.settings, hw_sync);
     producer->bind_camera(std::move(binding));
     try {
         producer->start();
@@ -248,8 +258,10 @@ void CameraSupervisor::Impl::on_device_removal(Spinnaker::CameraPtr cam) {
 // Public API
 // -------------------------------------------------------------------------
 
-CameraSupervisor::CameraSupervisor(CameraRepository& repo, StreamParams params)
-    : impl_(std::make_unique<Impl>(repo, params)) {}
+CameraSupervisor::CameraSupervisor(CameraRepository&  repo,
+                                   StreamParams       params,
+                                   gw::IPulseStamper* stamper)
+    : impl_(std::make_unique<Impl>(repo, params, stamper)) {}
 
 CameraSupervisor::~CameraSupervisor() {
     std::lock_guard lk(impl_->mu);
@@ -365,6 +377,8 @@ void CameraSupervisor::on_camera_added(int64_t camera_id) {
     s.serial   = row->serial;
     s.mode     = row->mode;
     s.settings = settings_from_row(*row);
+    s.hardware_sync_enabled = row->hardware_sync_enabled;
+    s.trigger_output_pin    = row->trigger_output_pin;
     auto [it, _] = impl_->slots_by_id.emplace(row->id, std::move(s));
     impl_->id_by_serial[it->second.serial] = it->second.id;
 
@@ -394,26 +408,35 @@ void CameraSupervisor::on_camera_updated(int64_t camera_id) {
     slot.name     = row->name;
     slot.settings = settings_from_row(*row);
 
-    if (row->mode != slot.mode) {
-        slot.mode = row->mode;
-        // If currently running, restart the producer so the new mode applies.
-        if (slot.producer) {
-            const std::string serial = slot.serial;
-            impl_->stop_slot_locked(slot);
+    // Mode, hardware_sync_enabled, and trigger_output_pin all require the
+    // producer to re-Init the camera so the relevant GenICam nodes (VideoMode,
+    // TriggerMode/Source/Selector) get written. Gain/exposure changes have
+    // already been applied live by the route layer.
+    const bool mode_changed     = row->mode != slot.mode;
+    const bool hw_sync_changed  = row->hardware_sync_enabled != slot.hardware_sync_enabled;
+    const bool pin_changed      = row->trigger_output_pin    != slot.trigger_output_pin;
 
-            if (!impl_->system) return;
-            Spinnaker::CameraList cams = impl_->system->GetCameras();
-            const unsigned int n = cams.GetSize();
-            for (unsigned int i = 0; i < n; ++i) {
-                Spinnaker::CameraPtr cam = cams.GetByIndex(i);
-                if (read_tl_string(cam, "DeviceSerialNumber") == serial) {
-                    impl_->try_start_slot_locked(slot, cam);
-                    break;
-                }
-            }
-            cams.Clear();
+    slot.mode                  = row->mode;
+    slot.hardware_sync_enabled = row->hardware_sync_enabled;
+    slot.trigger_output_pin    = row->trigger_output_pin;
+
+    if (!(mode_changed || hw_sync_changed || pin_changed)) return;
+    if (!slot.producer) return;
+
+    const std::string serial = slot.serial;
+    impl_->stop_slot_locked(slot);
+
+    if (!impl_->system) return;
+    Spinnaker::CameraList cams = impl_->system->GetCameras();
+    const unsigned int n = cams.GetSize();
+    for (unsigned int i = 0; i < n; ++i) {
+        Spinnaker::CameraPtr cam = cams.GetByIndex(i);
+        if (read_tl_string(cam, "DeviceSerialNumber") == serial) {
+            impl_->try_start_slot_locked(slot, cam);
+            break;
         }
     }
+    cams.Clear();
 }
 
 std::optional<gw::VideoModeList>

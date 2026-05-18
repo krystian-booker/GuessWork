@@ -66,6 +66,8 @@ crow::json::wvalue camera_to_json(const Camera&                              c,
     put_opt(j, "gain",          c.gain);
     put_opt(j, "exposure_auto", c.exposure_auto);
     put_opt(j, "exposure",      c.exposure);
+    j["hardware_sync_enabled"] = c.hardware_sync_enabled;
+    put_opt(j, "trigger_output_pin", c.trigger_output_pin);
     j["online"]     = online;
     j["created_at"] = c.created_at;
     return j;
@@ -171,6 +173,26 @@ bool parse_optional_number(const crow::json::rvalue& body, const char* field,
     return false;
 }
 
+// Like parse_optional_number, but a JSON `null` is treated as "explicitly
+// clear". The outer optional models "present in body"; the inner optional
+// models the value (nullopt = clear to SQL NULL). Used by trigger_output_pin
+// where clearing on PUT is meaningful (hw-sync being disabled).
+bool parse_optional_nullable_int(const crow::json::rvalue& body, const char* field,
+                                 std::optional<std::optional<int64_t>>& out,
+                                 crow::response& err) {
+    if (!body.has(field)) { out = std::nullopt; return true; }
+    const auto t = body[field].t();
+    if (t == crow::json::type::Null) { out = std::optional<int64_t>(std::nullopt); return true; }
+    if (t == crow::json::type::Number) {
+        out = std::optional<int64_t>(static_cast<int64_t>(body[field].i()));
+        return true;
+    }
+    err = error_response(400, std::string("field must be an integer or null: ") + field);
+    return false;
+}
+
+bool is_valid_trigger_output_pin(int64_t v) { return v >= 1 && v <= 6; }
+
 // Lens focal length in mm — must be positive and within a wide sanity
 // envelope. Typical machine-vision lenses are 1.4–35 mm; we accept up to
 // 1000 mm to leave headroom without inviting bogus inputs.
@@ -195,6 +217,8 @@ struct CreateBody {
     std::string                serial;
     double                     focal_length_mm = 0.0;
     std::optional<std::string> mode;
+    bool                       hardware_sync_enabled = false;
+    std::optional<int64_t>     trigger_output_pin;
     crow::response             error;
     bool                       ok = false;
 };
@@ -214,6 +238,25 @@ CreateBody parse_create_body(const crow::request& req) {
         return r;
     }
     if (!parse_optional_string(body, "mode", r.mode, r.error))                       return r;
+
+    std::optional<bool> hw_sync;
+    if (!parse_optional_bool(body, "hardware_sync_enabled", hw_sync, r.error)) return r;
+    if (hw_sync) r.hardware_sync_enabled = *hw_sync;
+
+    std::optional<std::optional<int64_t>> pin;
+    if (!parse_optional_nullable_int(body, "trigger_output_pin", pin, r.error)) return r;
+    if (pin && pin->has_value()) {
+        if (!is_valid_trigger_output_pin(**pin)) {
+            r.error = error_response(400, "trigger_output_pin must be 1..6");
+            return r;
+        }
+        r.trigger_output_pin = **pin;
+    }
+    if (r.hardware_sync_enabled && !r.trigger_output_pin) {
+        r.error = error_response(400,
+            "trigger_output_pin is required when hardware_sync_enabled is true");
+        return r;
+    }
     r.ok = true;
     return r;
 }
@@ -226,13 +269,19 @@ struct UpdateBody {
     std::optional<double>      gain;
     std::optional<bool>        exposure_auto;
     std::optional<double>      exposure;
+    std::optional<bool>        hardware_sync_enabled;
+    // Outer = present in body; inner = value (nullopt → JSON null, clear).
+    std::optional<std::optional<int64_t>> trigger_output_pin;
     crow::response             error;
     bool                       ok = false;
 
     bool has_settings() const {
         return gain_auto || gain || exposure_auto || exposure;
     }
-    bool empty() const { return !name && !focal_length_mm && !mode && !has_settings(); }
+    bool empty() const {
+        return !name && !focal_length_mm && !mode && !has_settings()
+            && !hardware_sync_enabled && !trigger_output_pin;
+    }
 };
 
 UpdateBody parse_update_body(const crow::request& req) {
@@ -253,6 +302,23 @@ UpdateBody parse_update_body(const crow::request& req) {
     if (!parse_optional_number(body, "gain",          r.gain,          r.error)) return r;
     if (!parse_optional_bool  (body, "exposure_auto", r.exposure_auto, r.error)) return r;
     if (!parse_optional_number(body, "exposure",      r.exposure,      r.error)) return r;
+    if (!parse_optional_bool         (body, "hardware_sync_enabled",
+                                      r.hardware_sync_enabled, r.error)) return r;
+    if (!parse_optional_nullable_int (body, "trigger_output_pin",
+                                      r.trigger_output_pin,    r.error)) return r;
+    if (r.trigger_output_pin && r.trigger_output_pin->has_value()) {
+        if (!is_valid_trigger_output_pin(**r.trigger_output_pin)) {
+            r.error = error_response(400, "trigger_output_pin must be 1..6");
+            return r;
+        }
+    }
+    // Disabling hw-sync implicitly clears the pin; preserve any explicit value
+    // the caller already gave us if it matches that intent.
+    if (r.hardware_sync_enabled && !*r.hardware_sync_enabled) {
+        r.trigger_output_pin = std::optional<int64_t>(std::nullopt);
+    }
+    // Enabling hw-sync without a pin (and no prior pin) is rejected in the
+    // route handler — we don't have access to the existing row here.
     if (r.empty()) {
         r.error = error_response(400, "PUT body must include at least one updatable field");
         return r;
@@ -325,7 +391,9 @@ void register_camera_routes(crow::SimpleApp&  app,
                 parsed.mode ? std::optional<std::string_view>(*parsed.mode)
                             : std::nullopt;
             const auto c = repo.create(parsed.name, parsed.serial,
-                                       parsed.focal_length_mm, mode_view);
+                                       parsed.focal_length_mm, mode_view,
+                                       parsed.hardware_sync_enabled,
+                                       parsed.trigger_output_pin);
             supervisor.on_camera_added(c.id);
             const bool on = supervisor.is_online(c.id);
             return json_response(
@@ -335,6 +403,8 @@ void register_camera_routes(crow::SimpleApp&  app,
         } catch (const DuplicateNameError& e) {
             return error_response(409, e.what());
         } catch (const DuplicateSerialError& e) {
+            return error_response(409, e.what());
+        } catch (const DuplicateTriggerOutputPinError& e) {
             return error_response(409, e.what());
         } catch (const std::exception& e) {
             return error_response(500, e.what());
@@ -361,6 +431,21 @@ void register_camera_routes(crow::SimpleApp&  app,
         auto parsed = parse_update_body(req);
         if (!parsed.ok) return std::move(parsed.error);
         try {
+            // Enabling hw-sync requires a pin: either provided in this body, or
+            // already persisted on the row. Reject early so we don't half-apply.
+            if (parsed.hardware_sync_enabled && *parsed.hardware_sync_enabled) {
+                const bool incoming_pin =
+                    parsed.trigger_output_pin && parsed.trigger_output_pin->has_value();
+                if (!incoming_pin) {
+                    const auto existing = repo.get(id);
+                    if (!existing) return error_response(404, "camera not found");
+                    if (!existing->trigger_output_pin) {
+                        return error_response(400,
+                            "trigger_output_pin is required when enabling hardware_sync_enabled");
+                    }
+                }
+            }
+
             // Push settings to the live producer first so we can persist the
             // actually-applied values (post-clamp, post-quantization) instead
             // of the raw request body. Skipped when the camera is offline —
@@ -382,6 +467,8 @@ void register_camera_routes(crow::SimpleApp&  app,
             upd.gain          = parsed.gain;
             upd.exposure_auto = parsed.exposure_auto;
             upd.exposure      = parsed.exposure;
+            upd.hardware_sync_enabled = parsed.hardware_sync_enabled;
+            upd.trigger_output_pin    = parsed.trigger_output_pin;
 
             const auto c = repo.update(id, upd);
             if (!c) return error_response(404, "camera not found");
@@ -394,6 +481,8 @@ void register_camera_routes(crow::SimpleApp&  app,
                 camera_to_json(*c, on,
                                on ? supervisor.current_mode_for(c->id) : std::nullopt));
         } catch (const DuplicateNameError& e) {
+            return error_response(409, e.what());
+        } catch (const DuplicateTriggerOutputPinError& e) {
             return error_response(409, e.what());
         } catch (const std::exception& e) {
             return error_response(500, e.what());

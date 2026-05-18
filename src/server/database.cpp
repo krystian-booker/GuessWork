@@ -24,18 +24,35 @@ void exec_or_throw(sqlite3* db, const char* sql) {
 // (or call Database::remove_files) to start over.
 constexpr const char* kSchemaCameras =
     "CREATE TABLE IF NOT EXISTS cameras ("
-    "  id               INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  name             TEXT    NOT NULL UNIQUE,"
-    "  serial           TEXT    NOT NULL UNIQUE,"
-    "  focal_length_mm  REAL    NOT NULL,"   // lens focal length, drives Kalibr focal hint + model
-    "  mode             TEXT,"
-    "  gain_auto        INTEGER,"
-    "  gain             REAL,"
-    "  exposure_auto    INTEGER,"
-    "  exposure         REAL,"
-    "  calibration_json TEXT,"      // Kalibr camchain YAML, NULL = uncalibrated
-    "  calibrated_at    INTEGER,"   // unix seconds when calibration was uploaded
-    "  created_at       INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    "  id                    INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name                  TEXT    NOT NULL UNIQUE,"
+    "  serial                TEXT    NOT NULL UNIQUE,"
+    "  focal_length_mm       REAL    NOT NULL,"   // lens focal length, drives Kalibr focal hint + model
+    "  mode                  TEXT,"
+    "  gain_auto             INTEGER,"
+    "  gain                  REAL,"
+    "  exposure_auto         INTEGER,"
+    "  exposure              REAL,"
+    "  calibration_json      TEXT,"      // Kalibr camchain YAML, NULL = uncalibrated
+    "  calibrated_at         INTEGER,"   // unix seconds when calibration was uploaded
+    "  hardware_sync_enabled INTEGER NOT NULL DEFAULT 0,"
+    // 1..6 when hw-sync is on; NULL when freerun. Drives both the GenICam
+    // TriggerSource on the camera and the host-side pulse-event routing.
+    "  trigger_output_pin    INTEGER UNIQUE,"
+    "  created_at            INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    ");";
+
+// Single-row source of truth for Teensy trigger groups. `outputs_bitmask` is a
+// 6-bit field where bit (n-1) is set iff Teensy output `n` belongs to this
+// group. Uniqueness of pin assignment across groups is enforced in
+// TriggerGroupRepository (no SQL constraint can express it cleanly).
+constexpr const char* kSchemaTriggerGroups =
+    "CREATE TABLE IF NOT EXISTS trigger_groups ("
+    "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name            TEXT    NOT NULL UNIQUE,"
+    "  fps             REAL    NOT NULL CHECK (fps > 0),"
+    "  outputs_bitmask INTEGER NOT NULL CHECK (outputs_bitmask > 0 AND outputs_bitmask < 64),"
+    "  created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 
 }  // namespace
@@ -56,6 +73,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, "PRAGMA foreign_keys = ON;");
     exec_or_throw(db_, "PRAGMA busy_timeout = 2000;");
     exec_or_throw(db_, kSchemaCameras);
+    exec_or_throw(db_, kSchemaTriggerGroups);
 }
 
 void Database::remove_files(const std::filesystem::path& db_path) {

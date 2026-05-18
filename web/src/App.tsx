@@ -2,6 +2,7 @@ import { Route, Routes } from 'react-router-dom'
 import Nav from './Nav'
 import CalibratePage from './pages/CalibratePage'
 import CamerasPage from './pages/CamerasPage'
+import HardwareSyncPage from './pages/HardwareSyncPage'
 import StreamPage from './pages/StreamPage'
 
 export default function App() {
@@ -13,6 +14,7 @@ export default function App() {
         <Route path="/" element={<StreamPage />} />
         <Route path="/cameras" element={<CamerasPage />} />
         <Route path="/cameras/:id/calibrate" element={<CalibratePage />} />
+        <Route path="/hardware-sync" element={<HardwareSyncPage />} />
       </Routes>
     </div>
   )

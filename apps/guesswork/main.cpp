@@ -13,6 +13,8 @@
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
 #include "server/http_server.hpp"
+#include "server/teensy_manager.hpp"
+#include "server/trigger_group_repository.hpp"
 
 namespace {
 
@@ -62,13 +64,16 @@ int main(int argc, char** argv) {
         gw::server::Database::remove_files(db_path);
         std::cerr << "guesswork: --reset-db wiped " << db_path << "\n";
     }
-    gw::server::Database         database(db_path);
-    gw::server::CameraRepository cameras(database);
+    gw::server::Database               database(db_path);
+    gw::server::CameraRepository       cameras(database);
+    gw::server::TriggerGroupRepository trigger_groups(database);
+    gw::server::TeensyManager          teensy;
+    teensy.start();
     std::cerr << "guesswork: database at " << db_path << "\n";
 
     gw::server::StreamParams params{
         cli.stream_width, cli.stream_height, cli.stream_fps, cli.stream_bitrate};
-    gw::server::CameraSupervisor supervisor(cameras, params);
+    gw::server::CameraSupervisor supervisor(cameras, params, &teensy);
 
     try {
         supervisor.start();
@@ -88,7 +93,8 @@ int main(int argc, char** argv) {
               << (cli.stream_bitrate / 1000) << " kbps\n";
     std::cerr << "guesswork: listening on http://localhost:" << cli.port << "\n";
 
-    gw::server::HttpServer server(cli.port, supervisor, cameras, calibration, started_at);
+    gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
+                                  trigger_groups, teensy, started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;

@@ -114,6 +114,68 @@ function modeGeometrySuffix(c: Camera): string {
   return parts.length === 0 ? '' : ` [${parts.join(' @ ')}]`
 }
 
+// Pins already claimed by other cameras — the option for any such pin is
+// rendered as disabled in the modal so two cameras can't pick the same wire.
+function pinsClaimedByOthers(
+  cameras: Camera[] | null, selfId: number | null,
+): Set<number> {
+  const out = new Set<number>()
+  if (!cameras) return out
+  for (const c of cameras) {
+    if (c.id === selfId) continue
+    if (c.trigger_output_pin != null) out.add(c.trigger_output_pin)
+  }
+  return out
+}
+
+function HardwareSyncControls({
+  enabled, pin, unavailablePins, onChangeEnabled, onChangePin,
+}: {
+  enabled: boolean
+  pin: number | null
+  unavailablePins: Set<number>
+  onChangeEnabled: (v: boolean) => void
+  onChangePin: (v: number | null) => void
+}) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13,
+                       color: '#374151' }}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => onChangeEnabled(e.target.checked)}
+        />
+        Enable hardware sync (slave on Line0 / OPTO_IN)
+      </label>
+      {enabled && (
+        <label style={{ display: 'block', marginTop: 8 }}>
+          <span style={{ display: 'block', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+            Teensy output pin
+          </span>
+          <select
+            aria-label="Teensy output pin"
+            value={pin ?? ''}
+            onChange={(e) => onChangePin(e.target.value ? parseInt(e.target.value, 10) : null)}
+            style={{ ...inputStyle, width: '100%', background: '#fff' }}
+          >
+            <option value="">Select an output…</option>
+            {[1, 2, 3, 4, 5, 6].map((p) => (
+              <option key={p} value={p} disabled={unavailablePins.has(p)}>
+                Output {p}{unavailablePins.has(p) ? ' (in use)' : ''}
+              </option>
+            ))}
+          </select>
+          <small style={{ display: 'block', marginTop: 4, color: '#6b7280' }}>
+            Physical wire from the Teensy output to this camera's OPTO_IN.
+            Groups for each output are configured on the Hardware Sync page.
+          </small>
+        </label>
+      )}
+    </div>
+  )
+}
+
 function OnlineDot({ online }: { online: boolean }) {
   return (
     <span
@@ -166,6 +228,8 @@ export default function CamerasPage() {
   // String state so the user can type partial decimals like "6." without the
   // controlled <input type=number> snapping the value mid-edit.
   const [addFocalMm, setAddFocalMm] = useState<string>('')
+  const [addHwSync, setAddHwSync] = useState(false)
+  const [addPin, setAddPin] = useState<number | null>(null)
 
   // --- Edit modal state ---
   const [editCamera, setEditCamera] = useState<Camera | null>(null)
@@ -174,6 +238,8 @@ export default function CamerasPage() {
   const [editModes, setEditModes] = useState<ModesState>(emptyModes)
   const [editSelectedMode, setEditSelectedMode] = useState<string | null>(null)
   const [editFocalMm, setEditFocalMm] = useState<string>('')
+  const [editHwSync, setEditHwSync] = useState(false)
+  const [editPin, setEditPin] = useState<number | null>(null)
 
   const refresh = async () => {
     try {
@@ -201,6 +267,8 @@ export default function CamerasPage() {
     setAddModes(emptyModes)
     setAddSelectedMode(null)
     setAddFocalMm('')
+    setAddHwSync(false)
+    setAddPin(null)
     try {
       const list = await listAvailableCameras()
       setAvailable(list)
@@ -253,6 +321,10 @@ export default function CamerasPage() {
     e.preventDefault()
     const focalNum = parseFloat(addFocalMm)
     if (!addName.trim() || !addSerial || !Number.isFinite(focalNum) || focalNum <= 0 || busy) return
+    if (addHwSync && addPin == null) {
+      setAddError('Select a Teensy output pin or disable hardware sync.')
+      return
+    }
     setBusy(true)
     setAddError(null)
     try {
@@ -262,6 +334,8 @@ export default function CamerasPage() {
         focal_length_mm: focalNum,
         mode:
           addModes.supported && addSelectedMode ? addSelectedMode : undefined,
+        hardware_sync_enabled: addHwSync,
+        trigger_output_pin: addHwSync ? (addPin ?? undefined) : undefined,
       })
       setAddOpen(false)
       await refresh()
@@ -281,6 +355,8 @@ export default function CamerasPage() {
     setEditModes({ ...emptyModes, loading: true })
     setEditSelectedMode(c.mode)
     setEditFocalMm(c.focal_length_mm.toString())
+    setEditHwSync(c.hardware_sync_enabled)
+    setEditPin(c.trigger_output_pin)
     try {
       const r = await getCameraModes(c.id)
       setEditModes({
@@ -314,9 +390,19 @@ export default function CamerasPage() {
     if (!editCamera || busy) return
     const trimmedName = editName.trim()
     if (!trimmedName) return
+    if (editHwSync && editPin == null) {
+      setEditError('Select a Teensy output pin or disable hardware sync.')
+      return
+    }
 
     // Build a partial body containing only changed fields.
-    const patch: { name?: string; mode?: string; focal_length_mm?: number } = {}
+    const patch: {
+      name?: string
+      mode?: string
+      focal_length_mm?: number
+      hardware_sync_enabled?: boolean
+      trigger_output_pin?: number | null
+    } = {}
     if (trimmedName !== editCamera.name) patch.name = trimmedName
     if (
       editModes.supported &&
@@ -331,7 +417,17 @@ export default function CamerasPage() {
         editFocalNum !== editCamera.focal_length_mm) {
       patch.focal_length_mm = editFocalNum
     }
-    if (!patch.name && !patch.mode && patch.focal_length_mm === undefined) {
+    if (editHwSync !== editCamera.hardware_sync_enabled) {
+      patch.hardware_sync_enabled = editHwSync
+    }
+    // Send the pin explicitly when it changed OR when hw-sync just turned on
+    // (the server requires it). Sending null clears it.
+    if (editHwSync) {
+      if (editPin !== editCamera.trigger_output_pin) patch.trigger_output_pin = editPin
+    } else if (editCamera.trigger_output_pin != null) {
+      patch.trigger_output_pin = null
+    }
+    if (Object.keys(patch).length === 0) {
       setEditCamera(null)
       return
     }
@@ -539,6 +635,16 @@ export default function CamerasPage() {
                 />
                 <LensPreview focalMm={parseFloat(addFocalMm)} />
               </label>
+              <HardwareSyncControls
+                enabled={addHwSync}
+                pin={addPin}
+                unavailablePins={pinsClaimedByOthers(cameras, null)}
+                onChangeEnabled={(v) => {
+                  setAddHwSync(v)
+                  if (!v) setAddPin(null)
+                }}
+                onChangePin={setAddPin}
+              />
               {addError && (
                 <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{addError}</p>
               )}
@@ -555,7 +661,8 @@ export default function CamerasPage() {
                     addModes.loading ||
                     !addName.trim() ||
                     !addSerial ||
-                    !(parseFloat(addFocalMm) > 0)
+                    !(parseFloat(addFocalMm) > 0) ||
+                    (addHwSync && addPin == null)
                   }
                 >
                   Add
@@ -624,6 +731,16 @@ export default function CamerasPage() {
                 />
                 <LensPreview focalMm={parseFloat(editFocalMm)} />
               </label>
+              <HardwareSyncControls
+                enabled={editHwSync}
+                pin={editPin}
+                unavailablePins={pinsClaimedByOthers(cameras, editCamera.id)}
+                onChangeEnabled={(v) => {
+                  setEditHwSync(v)
+                  if (!v) setEditPin(null)
+                }}
+                onChangePin={setEditPin}
+              />
               {editError && (
                 <p style={{ color: 'crimson', marginTop: 8, marginBottom: 8 }}>{editError}</p>
               )}
@@ -634,7 +751,10 @@ export default function CamerasPage() {
                 <button
                   type="submit"
                   style={primaryButtonStyle}
-                  disabled={busy || editModes.loading || !editName.trim()}
+                  disabled={
+                    busy || editModes.loading || !editName.trim() ||
+                    (editHwSync && editPin == null)
+                  }
                 >
                   Save
                 </button>

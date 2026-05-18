@@ -10,9 +10,22 @@
 #include "core/frame_format.hpp"
 #include "producer/camera_settings.hpp"
 #include "producer/producer.hpp"
+#include "producer/pulse_stamper.hpp"
 #include "producer/spinnaker_video_modes.hpp"
 
 namespace gw {
+
+// Optional hardware-trigger ("slave") configuration. When enabled the
+// producer configures the camera to fire on a rising edge on Line0 / OPTO_IN
+// and re-stamps every frame's camera_ts_ns from `stamper` instead of the
+// camera's own clock. `trigger_output_pin` is the Teensy output pin (1..6)
+// the camera is wired to; the stamper uses it to route the right pulse
+// stream to this producer.
+struct HardwareSyncConfig {
+    bool           enabled            = false;
+    uint8_t        trigger_output_pin = 0;
+    IPulseStamper* stamper            = nullptr;
+};
 
 // Producer driver for FLIR Spinnaker-compatible cameras (e.g. Chameleon3).
 //
@@ -35,7 +48,8 @@ public:
     SpinnakerProducer(std::string                name,
                       std::string                serial,
                       std::optional<std::string> mode             = std::nullopt,
-                      CameraSettingsValues       initial_settings = {});
+                      CameraSettingsValues       initial_settings = {},
+                      HardwareSyncConfig         hw_sync          = {});
     ~SpinnakerProducer() override;
 
     SpinnakerProducer(const SpinnakerProducer&)            = delete;

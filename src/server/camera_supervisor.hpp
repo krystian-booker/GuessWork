@@ -11,6 +11,7 @@
 
 namespace gw {
 class FrameChannel;
+class IPulseStamper;
 }
 
 namespace gw::server {
@@ -56,7 +57,13 @@ struct CameraStatus {
 // currently running.
 class CameraSupervisor {
 public:
-    CameraSupervisor(CameraRepository& repo, StreamParams default_params);
+    // `stamper` is optional; when non-null, hardware-sync cameras source their
+    // frame timestamps from it (the Teensy pulse stream). When null, hw-sync
+    // cameras still get configured as slaves but fall back to their own
+    // chunk timestamps.
+    CameraSupervisor(CameraRepository&  repo,
+                     StreamParams       default_params,
+                     gw::IPulseStamper* stamper = nullptr);
     ~CameraSupervisor();
 
     CameraSupervisor(const CameraSupervisor&)            = delete;

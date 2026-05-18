@@ -1,18 +1,36 @@
+// Teensy 4.1 hardware-sync trigger.
+//
+// Drives up to 4 named, independently-configured trigger groups on outputs
+// 1..6 (Teensy physical pins 2..7) and streams a TRIG line per rising edge
+// over USB-CDC. The host (`TeensyManager` on the macOS side) is the source
+// of truth for configuration; this firmware boots quiescent and waits for
+// CFG + ARM before producing any pulses.
+//
+// See firmware/src/serial_proto.h for the on-wire protocol and
+// firmware/src/trigger_engine.h for the IntervalTimer + ring-buffer setup.
+
 #include <Arduino.h>
 
-// put function declarations here:
-int myFunction(int, int);
+#include "trigger_engine.h"
+#include "serial_proto.h"
+
+namespace {
+
+gw_fw::TriggerEngine engine;
+gw_fw::SerialProto   proto(engine);
+
+}  // namespace
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+    Serial.begin(1'000'000);                // baud is ignored over USB-CDC
+    engine.begin();                         // outputs LOW
+    // Give the host a beat to open the port before the greeting; without
+    // this the first byte is often dropped on first boot.
+    delay(50);
+    proto.begin();                          // emits "READY fw=1 outputs=6"
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+    proto.poll();                           // parse any complete command lines
+    proto.flush_pulse_events();             // emit TRIG lines for ISR events
 }

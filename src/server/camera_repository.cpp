@@ -35,7 +35,9 @@ std::optional<bool> column_bool_opt(sqlite3_stmt* stmt, int idx) {
 constexpr const char* kSelectColumns =
     "id, name, serial, focal_length_mm, mode, "
     "gain_auto, gain, exposure_auto, exposure, "
-    "calibration_json, calibrated_at, created_at";
+    "calibration_json, calibrated_at, "
+    "hardware_sync_enabled, trigger_output_pin, "
+    "created_at";
 
 std::optional<std::string> column_text_opt(sqlite3_stmt* stmt, int idx) {
     if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
@@ -62,13 +64,15 @@ Camera read_row(sqlite3_stmt* stmt) {
         const auto* mode_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
         c.mode = mode_text ? std::string(mode_text) : std::string();
     }
-    c.gain_auto        = column_bool_opt (stmt, 5);
-    c.gain             = column_real_opt (stmt, 6);
-    c.exposure_auto    = column_bool_opt (stmt, 7);
-    c.exposure         = column_real_opt (stmt, 8);
-    c.calibration_json = column_text_opt (stmt, 9);
-    c.calibrated_at    = column_int64_opt(stmt, 10);
-    c.created_at       = sqlite3_column_int64(stmt, 11);
+    c.gain_auto         = column_bool_opt (stmt, 5);
+    c.gain              = column_real_opt (stmt, 6);
+    c.exposure_auto     = column_bool_opt (stmt, 7);
+    c.exposure          = column_real_opt (stmt, 8);
+    c.calibration_json  = column_text_opt (stmt, 9);
+    c.calibrated_at     = column_int64_opt(stmt, 10);
+    c.hardware_sync_enabled = sqlite3_column_int(stmt, 11) != 0;
+    c.trigger_output_pin    = column_int64_opt(stmt, 12);
+    c.created_at        = sqlite3_column_int64(stmt, 13);
     return c;
 }
 
@@ -144,16 +148,24 @@ std::optional<Camera> CameraRepository::find_by_serial(std::string_view serial) 
 Camera CameraRepository::create(std::string_view                name,
                                 std::string_view                serial,
                                 double                          focal_length_mm,
-                                std::optional<std::string_view> mode) {
+                                std::optional<std::string_view> mode,
+                                bool                            hardware_sync_enabled,
+                                std::optional<int64_t>          trigger_output_pin) {
     const std::string name_str(name);
     const std::string serial_str(serial);
     const std::optional<std::string> mode_str =
         mode ? std::optional<std::string>(std::string(*mode)) : std::nullopt;
+    // Persist a pin only when hw-sync is on; ignore an orphan pin otherwise.
+    const std::optional<int64_t> pin =
+        hardware_sync_enabled ? trigger_output_pin : std::nullopt;
+
     return db_.with_handle([&](sqlite3* h) {
         StmtGuard g;
         const std::string sql =
-            std::string("INSERT INTO cameras (name, serial, focal_length_mm, mode) "
-                        "VALUES (?, ?, ?, ?) RETURNING ") + kSelectColumns + ";";
+            std::string("INSERT INTO cameras "
+                        "  (name, serial, focal_length_mm, mode, "
+                        "   hardware_sync_enabled, trigger_output_pin) "
+                        "VALUES (?, ?, ?, ?, ?, ?) RETURNING ") + kSelectColumns + ";";
         if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
             throw_sqlite(h, "create: prepare");
         }
@@ -165,10 +177,16 @@ Camera CameraRepository::create(std::string_view                name,
         } else {
             sqlite3_bind_null(g.stmt, 4);
         }
+        sqlite3_bind_int(g.stmt, 5, hardware_sync_enabled ? 1 : 0);
+        if (pin) sqlite3_bind_int64(g.stmt, 6, *pin);
+        else     sqlite3_bind_null (g.stmt, 6);
 
         const int rc = sqlite3_step(g.stmt);
         if (rc == SQLITE_ROW) return read_row(g.stmt);
         if (is_unique_violation(rc)) {
+            if (err_mentions(h, "trigger_output_pin") && pin) {
+                throw DuplicateTriggerOutputPinError(*pin);
+            }
             if (err_mentions(h, "serial")) throw DuplicateSerialError(serial_str);
             throw DuplicateNameError(name_str);
         }
@@ -199,6 +217,8 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
         if (patch.gain)          add_col("gain = ?");
         if (patch.exposure_auto) add_col("exposure_auto = ?");
         if (patch.exposure)      add_col("exposure = ?");
+        if (patch.hardware_sync_enabled) add_col("hardware_sync_enabled = ?");
+        if (patch.trigger_output_pin)    add_col("trigger_output_pin = ?");
         sql += " WHERE id = ? RETURNING ";
         sql += kSelectColumns;
         sql += ";";
@@ -221,12 +241,28 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
         if (patch.gain)          sqlite3_bind_double(g.stmt, idx++, *patch.gain);
         if (patch.exposure_auto) sqlite3_bind_int   (g.stmt, idx++, *patch.exposure_auto ? 1 : 0);
         if (patch.exposure)      sqlite3_bind_double(g.stmt, idx++, *patch.exposure);
+        if (patch.hardware_sync_enabled) {
+            sqlite3_bind_int(g.stmt, idx++, *patch.hardware_sync_enabled ? 1 : 0);
+        }
+        if (patch.trigger_output_pin) {
+            if (patch.trigger_output_pin->has_value()) {
+                sqlite3_bind_int64(g.stmt, idx++, **patch.trigger_output_pin);
+            } else {
+                sqlite3_bind_null(g.stmt, idx++);
+            }
+        }
         sqlite3_bind_int64(g.stmt, idx, id);
 
         const int rc = sqlite3_step(g.stmt);
         if (rc == SQLITE_ROW) return read_row(g.stmt);
         if (rc == SQLITE_DONE) return std::nullopt;
-        if (is_unique_violation(rc) && patch.name) throw DuplicateNameError(*patch.name);
+        if (is_unique_violation(rc)) {
+            if (err_mentions(h, "trigger_output_pin") && patch.trigger_output_pin
+                && patch.trigger_output_pin->has_value()) {
+                throw DuplicateTriggerOutputPinError(**patch.trigger_output_pin);
+            }
+            if (patch.name) throw DuplicateNameError(*patch.name);
+        }
         throw_sqlite(h, "update: step");
     });
 }

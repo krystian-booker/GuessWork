@@ -20,6 +20,11 @@ export interface Camera {
   gain: number | null
   exposure_auto: boolean | null
   exposure: number | null
+  // When true, the producer configures the camera as a slave on Line0/OPTO_IN
+  // and re-stamps frame timestamps from the matching Teensy pulse. The
+  // physical wire to the Teensy is recorded in trigger_output_pin (1..6).
+  hardware_sync_enabled: boolean
+  trigger_output_pin: number | null
   online: boolean
   created_at: number
   // Unix seconds when the calibration was last uploaded; null if uncalibrated.
@@ -116,6 +121,8 @@ export async function createCamera(input: {
   serial: string
   focal_length_mm: number
   mode?: string
+  hardware_sync_enabled?: boolean
+  trigger_output_pin?: number
 }): Promise<Camera> {
   const body: Record<string, unknown> = {
     name: input.name,
@@ -123,6 +130,10 @@ export async function createCamera(input: {
     focal_length_mm: input.focal_length_mm,
   }
   if (input.mode) body.mode = input.mode
+  if (input.hardware_sync_enabled) {
+    body.hardware_sync_enabled = true
+    body.trigger_output_pin    = input.trigger_output_pin
+  }
   const res = await fetch('/api/cameras', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -131,9 +142,18 @@ export async function createCamera(input: {
   return asJson<Camera>(res)
 }
 
+// `trigger_output_pin: null` explicitly clears the wiring. Use undefined to
+// leave the existing value unchanged.
+export interface CameraHardwareSyncPatch {
+  hardware_sync_enabled?: boolean
+  trigger_output_pin?: number | null
+}
+
 export async function updateCamera(
   id: number,
-  patch: { name?: string; mode?: string; focal_length_mm?: number } & CameraSettingsPatch,
+  patch: { name?: string; mode?: string; focal_length_mm?: number }
+       & CameraSettingsPatch
+       & CameraHardwareSyncPatch,
 ): Promise<Camera> {
   const res = await fetch(`/api/cameras/${id}`, {
     method: 'PUT',

@@ -27,6 +27,13 @@ struct Camera {
     // it was stored. Both unset = uncalibrated.
     std::optional<std::string> calibration_json;
     std::optional<int64_t>     calibrated_at;
+    // Hardware-trigger ("slave") mode. When true, the producer configures the
+    // camera to fire on a rising edge on Line0 / OPTO_IN and routes its frame
+    // timestamps from the matching Teensy output's pulse stream.
+    bool                       hardware_sync_enabled = false;
+    // Physical Teensy output the camera is wired to (1..6). Required when
+    // hardware_sync_enabled is true; ignored otherwise. Unique across cameras.
+    std::optional<int64_t>     trigger_output_pin;
     int64_t                    created_at = 0;  // unix seconds
 };
 
@@ -40,10 +47,15 @@ struct CameraUpdate {
     std::optional<double>      gain;
     std::optional<bool>        exposure_auto;
     std::optional<double>      exposure;
+    std::optional<bool>        hardware_sync_enabled;
+    // Nested optional: outer = "in patch", inner = "value (nullopt → SQL NULL)".
+    // The route layer clears the pin (inner nullopt) when hw-sync is disabled.
+    std::optional<std::optional<int64_t>> trigger_output_pin;
 
     bool empty() const {
         return !name && !focal_length_mm && !mode
-            && !gain_auto && !gain && !exposure_auto && !exposure;
+            && !gain_auto && !gain && !exposure_auto && !exposure
+            && !hardware_sync_enabled && !trigger_output_pin;
     }
 };
 
@@ -63,6 +75,14 @@ public:
         : std::runtime_error("camera serial already mapped: " + serial) {}
 };
 
+// Thrown when a write would assign a trigger output pin already claimed by
+// another camera (UNIQUE(trigger_output_pin) violation). Maps to HTTP 409.
+class DuplicateTriggerOutputPinError : public std::runtime_error {
+public:
+    explicit DuplicateTriggerOutputPinError(int64_t pin)
+        : std::runtime_error("trigger_output_pin already in use: " + std::to_string(pin)) {}
+};
+
 class CameraRepository {
 public:
     explicit CameraRepository(Database& db) : db_(db) {}
@@ -71,13 +91,17 @@ public:
     std::optional<Camera> get(int64_t id);
     std::optional<Camera> find_by_serial(std::string_view serial);
 
-    // Throws DuplicateNameError or DuplicateSerialError on UNIQUE conflict.
-    // focal_length_mm is required (a positive lens focal length in mm,
-    // typically 1–50); range validation lives in the route layer.
+    // Throws DuplicateNameError, DuplicateSerialError, or
+    // DuplicateTriggerOutputPinError on UNIQUE conflict. focal_length_mm is
+    // required (a positive lens focal length in mm, typically 1–50); range
+    // validation lives in the route layer. hardware_sync_enabled defaults to
+    // false; trigger_output_pin is ignored unless hw-sync is on.
     Camera                create(std::string_view                name,
                                  std::string_view                serial,
                                  double                          focal_length_mm,
-                                 std::optional<std::string_view> mode = std::nullopt);
+                                 std::optional<std::string_view> mode = std::nullopt,
+                                 bool                            hardware_sync_enabled = false,
+                                 std::optional<int64_t>          trigger_output_pin = std::nullopt);
 
     // Partial update. Any field of CameraUpdate may be nullopt to leave it
     // unchanged; an entirely-empty patch returns the row as-is. Serial cannot
