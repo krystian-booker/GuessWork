@@ -22,15 +22,15 @@ gw_fw::SerialProto   proto(engine);
 }  // namespace
 
 void setup() {
-    Serial.begin(1'000'000);                // baud is ignored over USB-CDC
-    engine.begin();                         // outputs LOW
-    // Give the host a beat to open the port before the greeting; without
-    // this the first byte is often dropped on first boot.
+    Serial.begin(1'000'000);  // baud is ignored over USB-CDC
+    engine.begin();
+    // Host needs a beat to open the port before the greeting, otherwise the
+    // first byte is often dropped on first boot.
     delay(50);
-    proto.begin();                          // emits "READY fw=1 outputs=6"
+    proto.begin();
 }
 
 void loop() {
-    proto.poll();                           // parse any complete command lines
-    proto.flush_pulse_events();             // emit TRIG lines for ISR events
+    proto.poll();
+    proto.flush_pulse_events();
 }

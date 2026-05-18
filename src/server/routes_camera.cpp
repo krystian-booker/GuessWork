@@ -15,12 +15,6 @@ namespace gw::server {
 
 namespace {
 
-template <typename T>
-void put_opt(crow::json::wvalue& j, const char* key, const std::optional<T>& v) {
-    if (v) j[key] = *v;
-    else   j[key] = nullptr;
-}
-
 // Pull the reprojection-error number we appended to the camchain in
 // KalibrJob's augment_with_quality(). The camchain YAML is small and the
 // regex is tight, so doing this on every list_all() is comfortably fast.

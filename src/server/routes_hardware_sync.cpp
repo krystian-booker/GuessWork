@@ -75,13 +75,12 @@ void register_hardware_sync_routes(crow::SimpleApp&        app,
     ([&teensy] {
         const auto s = teensy.status();
         crow::json::wvalue j;
-        j["connected"] = s.connected;
-        if (s.port) j["port"] = *s.port; else j["port"] = nullptr;
-        j["armed"]     = s.armed;
-        if (s.last_pulse_age_ms) j["last_pulse_age_ms"] = *s.last_pulse_age_ms;
-        else                     j["last_pulse_age_ms"] = nullptr;
+        j["connected"]    = s.connected;
+        j["armed"]        = s.armed;
         j["total_pulses"] = s.total_pulses;
-        if (s.last_error) j["last_error"] = *s.last_error; else j["last_error"] = nullptr;
+        put_opt(j, "port",              s.port);
+        put_opt(j, "last_pulse_age_ms", s.last_pulse_age_ms);
+        put_opt(j, "last_error",        s.last_error);
         return json_response(200, std::move(j));
     });
 

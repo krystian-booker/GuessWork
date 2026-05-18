@@ -395,7 +395,6 @@ export default function CamerasPage() {
       return
     }
 
-    // Build a partial body containing only changed fields.
     const patch: {
       name?: string
       mode?: string

@@ -53,8 +53,6 @@ const modalCard: React.CSSProperties = {
   boxShadow: '0 10px 25px rgba(0,0,0,0.15)',
 }
 
-// Build a Set of pins claimed by `groups` excluding `excludeGroupId` (so the
-// editor doesn't disable its own pins).
 function pinsClaimedByOtherGroups(
   groups: TriggerGroup[], excludeGroupId: number | null,
 ): Set<number> {
@@ -64,6 +62,16 @@ function pinsClaimedByOtherGroups(
     for (const p of g.output_pins) out.add(p)
   }
   return out
+}
+
+function statusEqual(a: HardwareSyncStatus | null, b: HardwareSyncStatus): boolean {
+  if (!a) return false
+  return a.connected === b.connected
+      && a.port === b.port
+      && a.armed === b.armed
+      && a.total_pulses === b.total_pulses
+      && a.last_pulse_age_ms === b.last_pulse_age_ms
+      && a.last_error === b.last_error
 }
 
 function camerasOnPin(cameras: Camera[] | null, pin: number): Camera[] {
@@ -134,10 +142,10 @@ export default function HardwareSyncPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [formErr, setFormErr] = useState<string | null>(null)
 
-  const refresh = async () => {
+  const refreshAll = async () => {
     try {
       const [s, g, c] = await Promise.all([getStatus(), listGroups(), listCameras()])
-      setStatus(s)
+      setStatus((prev) => statusEqual(prev, s) ? prev : s)
       setGroups(g)
       setCameras(c)
       setLoadErr(null)
@@ -146,11 +154,21 @@ export default function HardwareSyncPage() {
     }
   }
 
+  const refreshGroups = async () => {
+    try {
+      const [s, g] = await Promise.all([getStatus(), listGroups()])
+      setStatus((prev) => statusEqual(prev, s) ? prev : s)
+      setGroups(g)
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   useEffect(() => {
-    refresh()
+    refreshAll()
     const t = setInterval(() => {
       getStatus()
-        .then(setStatus)
+        .then((s) => setStatus((prev) => statusEqual(prev, s) ? prev : s))
         .catch(() => {/* transient */})
     }, 1000)
     return () => clearInterval(t)
@@ -201,7 +219,7 @@ export default function HardwareSyncPage() {
       if (form.id == null) await createGroup({ name, fps: fpsNum, output_pins: pins })
       else                  await updateGroup(form.id, { name, fps: fpsNum, output_pins: pins })
       setFormOpen(false)
-      await refresh()
+      await refreshGroups()
     } catch (err) {
       setFormErr(err instanceof Error ? err.message : String(err))
     } finally {
@@ -215,7 +233,7 @@ export default function HardwareSyncPage() {
     setActionErr(null)
     try {
       await deleteGroup(id)
-      await refresh()
+      await refreshGroups()
     } catch (err) {
       setActionErr(err instanceof Error ? err.message : String(err))
     } finally {
@@ -229,7 +247,7 @@ export default function HardwareSyncPage() {
     setActionErr(null)
     try {
       await armApi()
-      await refresh()
+      await refreshGroups()
     } catch (err) {
       setActionErr(err instanceof Error ? err.message : String(err))
     } finally {
@@ -243,7 +261,7 @@ export default function HardwareSyncPage() {
     setActionErr(null)
     try {
       await stopOutputs()
-      await refresh()
+      await refreshGroups()
     } catch (err) {
       setActionErr(err instanceof Error ? err.message : String(err))
     } finally {
@@ -424,24 +442,26 @@ export default function HardwareSyncPage() {
                   Outputs
                 </span>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {Array.from({ length: MAX_OUTPUTS }, (_, i) => i + 1).map((pin) => {
+                  {(() => {
                     const claimed = pinsClaimedByOtherGroups(groups ?? [], form.id)
-                    const disabled = claimed.has(pin)
-                    return (
-                      <label key={pin} style={{
-                        display: 'flex', alignItems: 'center', gap: 4, fontSize: 13,
-                        opacity: disabled ? 0.5 : 1,
-                      }}>
-                        <input
-                          type="checkbox"
-                          checked={form.pins.has(pin)}
-                          disabled={disabled}
-                          onChange={() => togglePinInForm(pin)}
-                        />
-                        Output {pin}{disabled ? ' (in use)' : ''}
-                      </label>
-                    )
-                  })}
+                    return Array.from({ length: MAX_OUTPUTS }, (_, i) => i + 1).map((pin) => {
+                      const disabled = claimed.has(pin)
+                      return (
+                        <label key={pin} style={{
+                          display: 'flex', alignItems: 'center', gap: 4, fontSize: 13,
+                          opacity: disabled ? 0.5 : 1,
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={form.pins.has(pin)}
+                            disabled={disabled}
+                            onChange={() => togglePinInForm(pin)}
+                          />
+                          Output {pin}{disabled ? ' (in use)' : ''}
+                        </label>
+                      )
+                    })
+                  })()}
                 </div>
               </div>
               {formErr && <p style={{ color: 'crimson' }}>{formErr}</p>}

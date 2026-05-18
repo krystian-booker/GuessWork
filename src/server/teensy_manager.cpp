@@ -104,7 +104,9 @@ struct TeensyManager::Impl {
     bool write_line_locked(std::string_view s, std::string& err);
     bool send_command(std::string_view cmd, std::string& err);  // takes cmd_mu
     void handle_incoming_line(std::string_view line);
-    void resync_config();           // sends CFG_CLEAR + every CFG + ARM
+    bool send_full_config(const std::vector<TeensyManager::GroupConfig>& groups,
+                          bool want_armed, std::string& err);
+    void resync_config();           // pushes the cfg_mu-stashed snapshot
     void note_error(std::string msg);
 
     void set_group_pins(const std::vector<TeensyManager::GroupConfig>& groups);
@@ -161,23 +163,7 @@ bool TeensyManager::push_config(const std::vector<GroupConfig>& groups, std::str
         err = "Teensy not connected";
         return false;
     }
-    std::string sub_err;
-    if (!impl_->send_command("CFG_CLEAR", sub_err)) { err = sub_err; return false; }
-    for (const auto& g : groups) {
-        std::ostringstream cmd;
-        cmd << "CFG name=" << g.name << " fps=" << g.fps << " pins=";
-        for (size_t i = 0; i < g.output_pins.size(); ++i) {
-            if (i) cmd << ',';
-            cmd << static_cast<int>(g.output_pins[i]);
-        }
-        if (!impl_->send_command(cmd.str(), sub_err)) { err = sub_err; return false; }
-    }
-    if (!groups.empty()) {
-        if (!impl_->send_command("ARM", sub_err)) { err = sub_err; return false; }
-        std::lock_guard lk(impl_->status_mu);
-        impl_->armed = true;
-    }
-    return true;
+    return impl_->send_full_config(groups, !groups.empty(), err);
 }
 
 bool TeensyManager::stop_outputs(std::string& err) {
@@ -460,6 +446,27 @@ void TeensyManager::Impl::handle_incoming_line(std::string_view line) {
     }
 }
 
+bool TeensyManager::Impl::send_full_config(
+        const std::vector<TeensyManager::GroupConfig>& groups,
+        bool want_armed_target, std::string& err) {
+    if (!send_command("CFG_CLEAR", err)) return false;
+    for (const auto& g : groups) {
+        std::ostringstream cmd;
+        cmd << "CFG name=" << g.name << " fps=" << g.fps << " pins=";
+        for (size_t i = 0; i < g.output_pins.size(); ++i) {
+            if (i) cmd << ',';
+            cmd << static_cast<int>(g.output_pins[i]);
+        }
+        if (!send_command(cmd.str(), err)) return false;
+    }
+    if (want_armed_target && !groups.empty()) {
+        if (!send_command("ARM", err)) return false;
+        std::lock_guard lk(status_mu);
+        armed = true;
+    }
+    return true;
+}
+
 void TeensyManager::Impl::resync_config() {
     std::vector<TeensyManager::GroupConfig> snapshot;
     bool want_armed_snap = false;
@@ -470,20 +477,8 @@ void TeensyManager::Impl::resync_config() {
     }
     if (snapshot.empty()) return;
     std::string err;
-    if (!send_command("CFG_CLEAR", err)) { note_error("CFG_CLEAR: " + err); return; }
-    for (const auto& g : snapshot) {
-        std::ostringstream cmd;
-        cmd << "CFG name=" << g.name << " fps=" << g.fps << " pins=";
-        for (size_t i = 0; i < g.output_pins.size(); ++i) {
-            if (i) cmd << ',';
-            cmd << static_cast<int>(g.output_pins[i]);
-        }
-        if (!send_command(cmd.str(), err)) { note_error("CFG: " + err); return; }
-    }
-    if (want_armed_snap) {
-        if (!send_command("ARM", err)) { note_error("ARM: " + err); return; }
-        std::lock_guard lk(status_mu);
-        armed = true;
+    if (!send_full_config(snapshot, want_armed_snap, err)) {
+        note_error("resync: " + err);
     }
 }
 
