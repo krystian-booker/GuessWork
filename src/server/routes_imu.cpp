@@ -4,6 +4,8 @@
 #include <optional>
 #include <string>
 
+#include "calibration/calibration_store.hpp"
+#include "server/apriltag_supervisor.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/route_helpers.hpp"
 #include "server/teensy_manager.hpp"
@@ -50,7 +52,8 @@ bool parse_positive_number(const crow::json::rvalue& body, const char* field,
 
 void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
-                         TeensyManager&       teensy) {
+                         TeensyManager&       teensy,
+                         ApriltagSupervisor&  apriltag) {
     CROW_ROUTE(app, "/api/imu/status").methods("GET"_method)
     ([&teensy] {
         const auto s = teensy.status();
@@ -77,7 +80,7 @@ void register_imu_routes(crow::SimpleApp&     app,
     });
 
     CROW_ROUTE(app, "/api/imu/config").methods("PUT"_method)
-    ([&imu_config](const crow::request& req) {
+    ([&imu_config, &apriltag](const crow::request& req) {
         const auto body = crow::json::load(req.body);
         if (!body) return error_response(400, "invalid JSON body");
 
@@ -98,8 +101,15 @@ void register_imu_routes(crow::SimpleApp&     app,
             if (v.t() == crow::json::type::Null) {
                 patch.t_imu_robot_json = std::optional<std::string>{};  // clear
             } else if (v.t() == crow::json::type::Object) {
-                patch.t_imu_robot_json =
-                    std::optional<std::string>{crow::json::wvalue(v).dump()};
+                const std::string json = crow::json::wvalue(v).dump();
+                // Validate the transform's shape before storing: a bad
+                // T_robot_imu silently corrupts every published robot pose.
+                try {
+                    gw::calib::parse_t_robot_imu(json);
+                } catch (const std::exception& e) {
+                    return error_response(400, e.what());
+                }
+                patch.t_imu_robot_json = std::optional<std::string>{json};
             } else {
                 return error_response(400, "t_imu_robot must be an object or null");
             }
@@ -109,7 +119,9 @@ void register_imu_routes(crow::SimpleApp&     app,
             return error_response(400, "PUT body must include at least one updatable field");
         }
         try {
-            return json_response(200, config_to_json(imu_config.update(patch)));
+            auto resp = json_response(200, config_to_json(imu_config.update(patch)));
+            if (patch.t_imu_robot_json) apriltag.reload_shared();
+            return resp;
         } catch (const std::exception& e) {
             return error_response(500, e.what());
         }

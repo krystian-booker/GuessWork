@@ -8,12 +8,15 @@
 
 #include <rtc/rtc.hpp>
 
+#include "server/apriltag_supervisor.hpp"
 #include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
+#include "server/field_layout_repository.hpp"
 #include "server/http_server.hpp"
 #include "server/imu_config_repository.hpp"
+#include "server/routes_apriltag.hpp"
 #include "server/teensy_manager.hpp"
 #include "server/trigger_group_repository.hpp"
 
@@ -77,6 +80,17 @@ int main(int argc, char** argv) {
         cli.stream_width, cli.stream_height, cli.stream_fps, cli.stream_bitrate};
     gw::server::CameraSupervisor supervisor(cameras, params, &teensy);
 
+    // AprilTag pipeline: seed the bundled season layout, then register the
+    // detection-consumer factory BEFORE supervisor.start() so cameras that
+    // come online at boot get their consumers attached.
+    gw::server::FieldLayoutRepository field_layouts(database);
+    gw::server::seed_default_field_layout(field_layouts);
+    gw::server::ApriltagSupervisor apriltag(cameras, field_layouts, imu_config);
+    supervisor.register_consumer_factory(
+        [&apriltag](const gw::server::Camera& row) {
+            return apriltag.make_consumer(row);
+        });
+
     try {
         supervisor.start();
     } catch (const std::exception& e) {
@@ -97,7 +111,8 @@ int main(int argc, char** argv) {
     std::cerr << "guesswork: listening on http://localhost:" << cli.port << "\n";
 
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
-                                  trigger_groups, teensy, imu_config, started_at);
+                                  trigger_groups, teensy, imu_config,
+                                  field_layouts, apriltag, started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;

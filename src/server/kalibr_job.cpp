@@ -181,6 +181,7 @@ void KalibrJob::handle_exit(SubprocessState s, int /*exit_code*/) {
     }
 
     calibration_stored_.store(true, std::memory_order_release);
+    if (on_stored_) on_stored_(camera_id_);
 }
 
 }  // namespace gw::server

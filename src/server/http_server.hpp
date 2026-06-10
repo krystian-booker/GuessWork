@@ -12,6 +12,8 @@ class CalibrationSupervisor;
 class TriggerGroupRepository;
 class TeensyManager;
 class ImuConfigRepository;
+class FieldLayoutRepository;
+class ApriltagSupervisor;
 
 // Thin wrapper around a Crow application. The Crow SDK headers are heavyweight
 // (asio, boost-style metaprogramming) so we hide them behind a Pimpl: consumers
@@ -25,6 +27,8 @@ public:
                TriggerGroupRepository&               trigger_groups,
                TeensyManager&                        teensy,
                ImuConfigRepository&                  imu_config,
+               FieldLayoutRepository&                field_layouts,
+               ApriltagSupervisor&                   apriltag,
                std::chrono::steady_clock::time_point started_at);
     ~HttpServer();
 

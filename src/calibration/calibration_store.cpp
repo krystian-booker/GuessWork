@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <iomanip>
 #include <sstream>
 
 namespace gw::calib {
@@ -191,6 +193,62 @@ std::string serialize_single_camera(const CamchainEntry& entry) {
     root["cam0"] = emit_entry(entry);
     std::ostringstream out;
     out << root << "\n";
+    return out.str();
+}
+
+Mat4 parse_t_robot_imu(const std::string& json_text) {
+    YAML::Node root;
+    try {
+        root = YAML::Load(json_text);
+    } catch (const YAML::Exception& e) {
+        throw CalibrationParseError(std::string("t_robot_imu: invalid JSON: ") + e.what());
+    }
+    if (!root.IsMap() || !root["T_robot_imu"]) {
+        throw CalibrationParseError("t_robot_imu: missing top-level key T_robot_imu");
+    }
+    const Mat4 T = parse_mat4(root["T_robot_imu"], "t_robot_imu", "T_robot_imu");
+
+    // Bottom row must be (0,0,0,1).
+    const auto& b = T[3];
+    if (std::abs(b[0]) > 1e-9 || std::abs(b[1]) > 1e-9 || std::abs(b[2]) > 1e-9 ||
+        std::abs(b[3] - 1.0) > 1e-9) {
+        throw CalibrationParseError("t_robot_imu: bottom row must be (0,0,0,1)");
+    }
+
+    // Rotation block: orthonormal within 1e-3, det ≈ +1 (a reflection or a
+    // scaled matrix here silently corrupts every downstream pose).
+    constexpr double kTol = 1e-3;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            double dot = 0;
+            for (int k = 0; k < 3; ++k) dot += T[k][i] * T[k][j];
+            const double expect = (i == j) ? 1.0 : 0.0;
+            if (std::abs(dot - expect) > kTol) {
+                throw CalibrationParseError(
+                    "t_robot_imu: rotation block is not orthonormal");
+            }
+        }
+    }
+    const double det =
+        T[0][0] * (T[1][1] * T[2][2] - T[1][2] * T[2][1]) -
+        T[0][1] * (T[1][0] * T[2][2] - T[1][2] * T[2][0]) +
+        T[0][2] * (T[1][0] * T[2][1] - T[1][1] * T[2][0]);
+    if (std::abs(det - 1.0) > kTol) {
+        throw CalibrationParseError("t_robot_imu: rotation determinant is not +1");
+    }
+    return T;
+}
+
+std::string serialize_t_robot_imu(const Mat4& T) {
+    std::ostringstream out;
+    out << std::setprecision(17);
+    out << "{\"T_robot_imu\": [";
+    for (int r = 0; r < 4; ++r) {
+        out << (r ? ", [" : "[");
+        for (int c = 0; c < 4; ++c) out << (c ? ", " : "") << T[r][c];
+        out << "]";
+    }
+    out << "]}";
     return out.str();
 }
 

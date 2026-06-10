@@ -258,6 +258,9 @@ CalibrationJobStatus CalibrationSupervisor::start_kalibr_job(
         job = std::make_shared<KalibrJob>(
             repository_, camera_id, session_root, focal_length_mm,
             script, pitch, sensor_width_px);  // ctor calls derive_kalibr_lens internally
+        // Rebuild calibration-dependent consumers (e.g. AprilTag) once the
+        // result lands. Fires on the job's reader thread with no locks held.
+        job->set_on_stored([this](int64_t id) { cameras_.on_camera_updated(id); });
         job->start();  // throws on fork/pipe failure; lock released on unwind
 
         kalibr_job_        = job;
@@ -600,6 +603,7 @@ CalibrationSupervisor::start_imu_job(const ExtrinsicsSessionResult& result) {
             repository_, std::move(camera_ids), result.path,
             std::filesystem::path(GW_KALIBR_CALIBRATE_IMU_SCRIPT),
             result.model, result.focal_hints_px, result.session_id);
+        job->set_on_stored([this](int64_t id) { cameras_.on_camera_updated(id); });
         job->start();  // throws on fork/pipe failure; lock released on unwind
 
         imu_job_ = job;

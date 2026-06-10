@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -11,6 +12,7 @@
 
 namespace gw {
 class FrameChannel;
+class IConsumer;
 class IPulseStamper;
 }
 
@@ -18,6 +20,7 @@ namespace gw::server {
 
 class CameraRepository;
 class StreamConsumer;
+struct Camera;
 
 // Default streaming params applied to every camera's StreamConsumer. Per-camera
 // overrides are out of scope.
@@ -68,6 +71,24 @@ public:
 
     CameraSupervisor(const CameraSupervisor&)            = delete;
     CameraSupervisor& operator=(const CameraSupervisor&) = delete;
+
+    // Factory for role-specific extra consumers (e.g. AprilTag detection).
+    // Called with the camera's DB row whenever its producer starts; a non-null
+    // result is attached to the producer's channel and detached before the
+    // producer is destroyed — the slot lifecycle guarantees consumers never
+    // outlive their channel (the StreamConsumer pattern, generalized).
+    //
+    // Contract: factories run under the supervisor's internal mutex and MUST
+    // NOT call back into CameraSupervisor. Register before start().
+    // Exceptions from a factory are caught and logged (a bad calibration row
+    // must not take the camera offline).
+    //
+    // Role or calibration changes (role / calibrated_at /
+    // extrinsics_calibrated_at deltas seen by on_camera_updated) rebuild the
+    // extra consumers in place against the live channel — no producer restart.
+    using ConsumerFactory =
+        std::function<std::shared_ptr<gw::IConsumer>(const Camera& row)>;
+    void register_consumer_factory(ConsumerFactory factory);
 
     // Acquires the Spinnaker system, registers the arrival/removal handler,
     // enumerates current cameras, and starts producers for the ones already

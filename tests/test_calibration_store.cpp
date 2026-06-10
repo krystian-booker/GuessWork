@@ -140,6 +140,42 @@ TEST(CalibrationStoreTest, SerializeSingleCameraRekeysToCam0) {
     EXPECT_DOUBLE_EQ(again.cameras[0].second.intrinsics.intrinsics[0], 457.587);
 }
 
+TEST(CalibrationStoreTest, ParsesTRobotImuAndRoundTrips) {
+    const std::string json =
+        R"({"T_robot_imu": [[0, -1, 0, 0.10], [1, 0, 0, -0.05], [0, 0, 1, 0.25], [0, 0, 0, 1]]})";
+    const auto T = parse_t_robot_imu(json);
+    EXPECT_DOUBLE_EQ(T[0][1], -1.0);
+    EXPECT_DOUBLE_EQ(T[0][3], 0.10);
+    EXPECT_DOUBLE_EQ(T[2][3], 0.25);
+
+    const auto again = parse_t_robot_imu(serialize_t_robot_imu(T));
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) EXPECT_DOUBLE_EQ(again[r][c], T[r][c]);
+}
+
+TEST(CalibrationStoreTest, TRobotImuRejectsBadShapes) {
+    // Missing key.
+    EXPECT_THROW(parse_t_robot_imu(R"({"transform": []})"), CalibrationParseError);
+    // 3 rows.
+    EXPECT_THROW(parse_t_robot_imu(
+                     R"({"T_robot_imu": [[1,0,0,0],[0,1,0,0],[0,0,1,0]]})"),
+                 CalibrationParseError);
+    // Bad bottom row.
+    EXPECT_THROW(parse_t_robot_imu(
+                     R"({"T_robot_imu": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,1,1]]})"),
+                 CalibrationParseError);
+    // Non-orthonormal rotation (scaled).
+    EXPECT_THROW(parse_t_robot_imu(
+                     R"({"T_robot_imu": [[2,0,0,0],[0,2,0,0],[0,0,2,0],[0,0,0,1]]})"),
+                 CalibrationParseError);
+    // Reflection (det = -1).
+    EXPECT_THROW(parse_t_robot_imu(
+                     R"({"T_robot_imu": [[-1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]})"),
+                 CalibrationParseError);
+    // Not JSON at all.
+    EXPECT_THROW(parse_t_robot_imu("][" ), CalibrationParseError);
+}
+
 TEST(CalibrationStoreTest, ThrowsOnMalformedShapes) {
     EXPECT_THROW(parse_camchain("not: a camchain"), CalibrationParseError);
     EXPECT_THROW(parse_camchain("cam0: 12"), CalibrationParseError);

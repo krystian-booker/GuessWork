@@ -176,6 +176,49 @@ target_include_directories(gw_calibration PUBLIC src)
 target_link_libraries(gw_calibration PRIVATE yaml-cpp::yaml-cpp)
 
 # ----------------------------------------------------------------------------
+# AprilTag detection library. The AprilRobotics detector is fetched and
+# built statically; OpenCV (Homebrew) provides solvePnP/undistortPoints.
+# Neither appears in gw_apriltag's public headers — consumers see only std
+# types and gw::calib::Mat4.
+# ----------------------------------------------------------------------------
+find_package(OpenCV REQUIRED COMPONENTS core calib3d)
+
+# Scope the apriltag build options as normal variables (shadowing any cache
+# entries) so they don't leak into other FetchContent'd projects.
+set(BUILD_SHARED_LIBS OFF)
+set(BUILD_EXAMPLES OFF)
+set(BUILD_PYTHON_WRAPPER OFF)
+set(BUILD_TESTING OFF)
+set(ASAN OFF)
+FetchContent_Declare(
+    apriltag
+    URL https://github.com/AprilRobotics/apriltag/archive/refs/tags/v3.4.5.zip
+)
+FetchContent_MakeAvailable(apriltag)
+unset(BUILD_SHARED_LIBS)
+unset(BUILD_EXAMPLES)
+unset(BUILD_PYTHON_WRAPPER)
+unset(BUILD_TESTING)
+unset(ASAN)
+# Plain C library — exempt it from our -Wall -Wextra -Wpedantic. Always
+# optimize it: an -O0 detector costs ~50 ms/frame at 2048×1536 (vs ~10 ms at
+# -O2), blowing the latency budget even in Debug builds of our own code.
+target_compile_options(apriltag PRIVATE -w -O2)
+
+add_library(gw_apriltag
+    src/apriltag/pose_math.cpp
+    src/apriltag/field_layout.cpp
+    src/apriltag/tag_pose_estimator.cpp
+    src/apriltag/apriltag_consumer.cpp
+)
+target_include_directories(gw_apriltag PUBLIC src)
+target_link_libraries(gw_apriltag
+    PUBLIC  gw_core gw_calibration
+    PRIVATE apriltag yaml-cpp::yaml-cpp ${OpenCV_LIBS}
+)
+target_include_directories(gw_apriltag PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# ----------------------------------------------------------------------------
 # HTTP server library
 # ----------------------------------------------------------------------------
 add_library(gw_server
@@ -198,10 +241,13 @@ add_library(gw_server
     src/server/trigger_group_repository.cpp
     src/server/imu_config_repository.cpp
     src/server/routes_imu.cpp
+    src/server/field_layout_repository.cpp
+    src/server/apriltag_supervisor.cpp
+    src/server/routes_apriltag.cpp
     src/server/teensy_manager.cpp
     src/server/telemetry_decoder.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -236,6 +282,8 @@ set(GW_KALIBR_CALIBRATE_SCRIPT "${CMAKE_SOURCE_DIR}/docker/kalibr/calibrate.sh"
     CACHE FILEPATH "Script that wraps colima start + docker run + colima stop")
 set(GW_KALIBR_CALIBRATE_IMU_SCRIPT "${CMAKE_SOURCE_DIR}/docker/kalibr/calibrate_imu.sh"
     CACHE FILEPATH "Camera-IMU extrinsics script (kalibr_calibrate_imu_camera)")
+set(GW_FIELD_LAYOUT_DEFAULT "${CMAKE_SOURCE_DIR}/data/field_layouts/2026-rebuilt-welded.json"
+    CACHE FILEPATH "WPILib AprilTagFieldLayout JSON seeded into field_layouts on first boot")
 if(NOT EXISTS "${GW_KALIBR_TARGET_DEFAULT}")
     message(FATAL_ERROR
         "GW_KALIBR_TARGET_DEFAULT not found at ${GW_KALIBR_TARGET_DEFAULT}")
@@ -247,6 +295,10 @@ endif()
 if(NOT EXISTS "${GW_KALIBR_CALIBRATE_IMU_SCRIPT}")
     message(FATAL_ERROR
         "GW_KALIBR_CALIBRATE_IMU_SCRIPT not found at ${GW_KALIBR_CALIBRATE_IMU_SCRIPT}")
+endif()
+if(NOT EXISTS "${GW_FIELD_LAYOUT_DEFAULT}")
+    message(FATAL_ERROR
+        "GW_FIELD_LAYOUT_DEFAULT not found at ${GW_FIELD_LAYOUT_DEFAULT}")
 endif()
 
 # Sensor pixel pitch (mm) — used by the supervisor to convert per-camera
@@ -261,6 +313,7 @@ target_compile_definitions(gw_server PRIVATE
     GW_KALIBR_CALIBRATE_SCRIPT="${GW_KALIBR_CALIBRATE_SCRIPT}"
     GW_KALIBR_CALIBRATE_IMU_SCRIPT="${GW_KALIBR_CALIBRATE_IMU_SCRIPT}"
     GW_SENSOR_PIXEL_PITCH_MM=${GW_SENSOR_PIXEL_PITCH_MM}
+    GW_FIELD_LAYOUT_DEFAULT="${GW_FIELD_LAYOUT_DEFAULT}"
 )
 
 # ----------------------------------------------------------------------------
@@ -319,8 +372,20 @@ if(GW_BUILD_TESTS)
         tests/test_calibration_store.cpp
         tests/test_multi_topic_bag_recorder.cpp
         tests/test_kalibr_imu_job.cpp
+        tests/test_pose_math.cpp
+        tests/test_field_layout.cpp
+        tests/test_tag_pose_estimator.cpp
+        tests/test_apriltag_consumer.cpp
+        tests/test_field_layout_repository.cpp
     )
-    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server GTest::gtest_main)
+    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag GTest::gtest_main)
+    # The estimator tests build synthetic projections with OpenCV directly,
+    # the consumer test renders a real tag bitmap via the apriltag library,
+    # and the field-layout test parses the shipped season fixture.
+    target_include_directories(gw_tests PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(gw_tests PRIVATE ${OpenCV_LIBS} apriltag)
+    target_compile_definitions(gw_tests PRIVATE
+        GW_FIELD_LAYOUT_DEFAULT="${GW_FIELD_LAYOUT_DEFAULT}")
     include(GoogleTest)
     gtest_discover_tests(gw_tests)
 endif()

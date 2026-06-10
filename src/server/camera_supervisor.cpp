@@ -76,6 +76,13 @@ struct CameraSlot {
     std::optional<int64_t>             trigger_output_pin;  // 1..6 when hw-sync is on
     std::unique_ptr<SpinnakerProducer> producer;     // null when offline
     std::shared_ptr<StreamConsumer>    stream;       // null when offline
+    // Factory-made role consumers (e.g. AprilTag detection), attached after
+    // the stream and detached before the producer dies. The cached role /
+    // calibration stamps detect when on_camera_updated must rebuild them.
+    std::vector<std::shared_ptr<gw::IConsumer>> extra;
+    std::optional<std::string>         role;
+    std::optional<int64_t>             calibrated_at;
+    std::optional<int64_t>             extrinsics_calibrated_at;
     FpsSampler                         fps;
 };
 
@@ -130,6 +137,7 @@ struct CameraSupervisor::Impl {
     std::unique_ptr<SystemEventListener>     listener;
     std::map<int64_t, CameraSlot>            slots_by_id;
     std::unordered_map<std::string, int64_t> id_by_serial;
+    std::vector<ConsumerFactory>             factories;
     bool                                     started = false;
 
     Impl(CameraRepository& r, StreamParams p, gw::IPulseStamper* s)
@@ -140,6 +148,8 @@ struct CameraSupervisor::Impl {
     void enumerate_and_match_locked();
     void try_start_slot_locked(CameraSlot& slot, Spinnaker::CameraPtr cam);
     void stop_slot_locked(CameraSlot& slot);
+    void start_extra_locked(CameraSlot& slot);
+    void stop_extra_locked(CameraSlot& slot);
     void on_device_arrival(Spinnaker::CameraPtr cam);   // called from Spinnaker thread
     void on_device_removal(Spinnaker::CameraPtr cam);   // called from Spinnaker thread
 };
@@ -195,11 +205,18 @@ void CameraSupervisor::Impl::try_start_slot_locked(CameraSlot& slot, Spinnaker::
     slot.fps      = FpsSampler{};
     // Cache what the camera actually accepted (post-clamp, post-quantization).
     try { slot.settings = slot.producer->current_settings(); } catch (...) {}
+
+    start_extra_locked(slot);
+
     std::cerr << "CameraSupervisor: camera '" << slot.name
               << "' (serial " << slot.serial << ") online\n";
 }
 
 void CameraSupervisor::Impl::stop_slot_locked(CameraSlot& slot) {
+    // Extras (and the stream) MUST detach before the producer is destroyed —
+    // the FrameChannel lives inside the producer; a consumer still
+    // subscribed at destruction time would dangle.
+    stop_extra_locked(slot);
     if (slot.stream) {
         try { slot.stream->detach(); } catch (...) {}
         slot.stream.reset();
@@ -211,6 +228,35 @@ void CameraSupervisor::Impl::stop_slot_locked(CameraSlot& slot) {
                   << "' (serial " << slot.serial << ") offline\n";
     }
     slot.fps = FpsSampler{};
+}
+
+void CameraSupervisor::Impl::start_extra_locked(CameraSlot& slot) {
+    if (!slot.producer || factories.empty()) return;
+    const auto row = repo.get(slot.id);
+    if (!row) return;
+    slot.role                     = row->role;
+    slot.calibrated_at            = row->calibrated_at;
+    slot.extrinsics_calibrated_at = row->extrinsics_calibrated_at;
+    for (const auto& factory : factories) {
+        try {
+            auto consumer = factory(*row);
+            if (!consumer) continue;
+            consumer->attach(slot.producer->channel());
+            slot.extra.push_back(std::move(consumer));
+        } catch (const std::exception& e) {
+            // A factory failure (e.g. unparseable calibration) must not take
+            // the camera offline — streaming and recording still work.
+            std::cerr << "CameraSupervisor: consumer factory failed for '"
+                      << slot.name << "': " << e.what() << "\n";
+        }
+    }
+}
+
+void CameraSupervisor::Impl::stop_extra_locked(CameraSlot& slot) {
+    for (auto& consumer : slot.extra) {
+        try { consumer->detach(); } catch (...) {}
+    }
+    slot.extra.clear();
 }
 
 void CameraSupervisor::Impl::enumerate_and_match_locked() {
@@ -262,6 +308,11 @@ CameraSupervisor::CameraSupervisor(CameraRepository&  repo,
                                    StreamParams       params,
                                    gw::IPulseStamper* stamper)
     : impl_(std::make_unique<Impl>(repo, params, stamper)) {}
+
+void CameraSupervisor::register_consumer_factory(ConsumerFactory factory) {
+    std::lock_guard lk(impl_->mu);
+    impl_->factories.push_back(std::move(factory));
+}
 
 CameraSupervisor::~CameraSupervisor() {
     std::lock_guard lk(impl_->mu);
@@ -416,11 +467,24 @@ void CameraSupervisor::on_camera_updated(int64_t camera_id) {
     const bool hw_sync_changed  = row->hardware_sync_enabled != slot.hardware_sync_enabled;
     const bool pin_changed      = row->trigger_output_pin    != slot.trigger_output_pin;
 
+    // Role or calibration changes only affect the factory-made extra
+    // consumers — rebuild them in place against the live channel, no
+    // producer restart needed.
+    const bool extra_inputs_changed =
+        row->role != slot.role || row->calibrated_at != slot.calibrated_at ||
+        row->extrinsics_calibrated_at != slot.extrinsics_calibrated_at;
+
     slot.mode                  = row->mode;
     slot.hardware_sync_enabled = row->hardware_sync_enabled;
     slot.trigger_output_pin    = row->trigger_output_pin;
 
-    if (!(mode_changed || hw_sync_changed || pin_changed)) return;
+    if (!(mode_changed || hw_sync_changed || pin_changed)) {
+        if (extra_inputs_changed && slot.producer) {
+            impl_->stop_extra_locked(slot);
+            impl_->start_extra_locked(slot);
+        }
+        return;
+    }
     if (!slot.producer) return;
 
     const std::string serial = slot.serial;

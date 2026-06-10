@@ -6,6 +6,7 @@
 
 #include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
+#include "server/camera_supervisor.hpp"
 #include "server/kalibr_imu_job.hpp"
 #include "server/kalibr_job.hpp"
 #include "server/route_helpers.hpp"
@@ -188,7 +189,8 @@ crow::json::wvalue extrinsics_summary_to_json(const Camera& c) {
 
 void register_calibration_routes(crow::SimpleApp&       app,
                                  CameraRepository&      repo,
-                                 CalibrationSupervisor& calib) {
+                                 CalibrationSupervisor& calib,
+                                 CameraSupervisor&      supervisor) {
     // ---- Recording session ----
 
     CROW_ROUTE(app, "/api/cameras/<int>/calibration/recording").methods("POST"_method)
@@ -315,7 +317,7 @@ void register_calibration_routes(crow::SimpleApp&       app,
     // map. We grep for that substring rather than parsing YAML server-side
     // (yaml-cpp would be the only consumer of a YAML parser here).
     CROW_ROUTE(app, "/api/cameras/<int>/calibration").methods("PUT"_method)
-    ([&repo](const crow::request& req, int64_t id) {
+    ([&repo, &supervisor](const crow::request& req, int64_t id) {
         try {
             std::string yaml_text;
             const auto  ctype = req.get_header_value("Content-Type");
@@ -339,6 +341,7 @@ void register_calibration_routes(crow::SimpleApp&       app,
             }
             const auto c = repo.set_calibration(id, yaml_text);
             if (!c) return error_response(404, "camera not found");
+            supervisor.on_camera_updated(id);  // rebuild calibration consumers
             return json_response(200, calibration_summary_to_json(*c));
         } catch (const std::exception& e) {
             return error_response(500, e.what());
@@ -346,9 +349,10 @@ void register_calibration_routes(crow::SimpleApp&       app,
     });
 
     CROW_ROUTE(app, "/api/cameras/<int>/calibration").methods("DELETE"_method)
-    ([&repo](int64_t id) {
+    ([&repo, &supervisor](int64_t id) {
         try {
             if (!repo.clear_calibration(id)) return error_response(404, "camera not found");
+            supervisor.on_camera_updated(id);
             return with_no_store(crow::response(204));
         } catch (const std::exception& e) {
             return error_response(500, e.what());
@@ -475,11 +479,12 @@ void register_calibration_routes(crow::SimpleApp&       app,
     });
 
     CROW_ROUTE(app, "/api/cameras/<int>/extrinsics").methods("DELETE"_method)
-    ([&repo](int64_t id) {
+    ([&repo, &supervisor](int64_t id) {
         try {
             if (!repo.clear_imu_extrinsics(id)) {
                 return error_response(404, "camera not found");
             }
+            supervisor.on_camera_updated(id);
             return with_no_store(crow::response(204));
         } catch (const std::exception& e) {
             return error_response(500, e.what());

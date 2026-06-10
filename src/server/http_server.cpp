@@ -2,6 +2,7 @@
 
 #include <crow.h>
 
+#include "server/routes_apriltag.hpp"
 #include "server/routes_calibration.hpp"
 #include "server/routes_camera.hpp"
 #include "server/routes_hardware_sync.hpp"
@@ -23,14 +24,17 @@ struct HttpServer::Impl {
          TriggerGroupRepository&               trigger_groups,
          TeensyManager&                        teensy,
          ImuConfigRepository&                  imu_config,
+         FieldLayoutRepository&                field_layouts,
+         ApriltagSupervisor&                   apriltag,
          std::chrono::steady_clock::time_point started_at)
         : port(p) {
         register_status_routes(app, supervisor, started_at);
         register_stream_routes(app, supervisor);
         register_camera_routes(app, cameras, supervisor);
-        register_calibration_routes(app, cameras, calibration);
+        register_calibration_routes(app, cameras, calibration, supervisor);
         register_hardware_sync_routes(app, trigger_groups, teensy);
-        register_imu_routes(app, imu_config, teensy);
+        register_imu_routes(app, imu_config, teensy, apriltag);
+        register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_static_routes(app);
     }
 };
@@ -42,9 +46,12 @@ HttpServer::HttpServer(uint16_t                              port,
                        TriggerGroupRepository&               trigger_groups,
                        TeensyManager&                        teensy,
                        ImuConfigRepository&                  imu_config,
+                       FieldLayoutRepository&                field_layouts,
+                       ApriltagSupervisor&                   apriltag,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
-                                   trigger_groups, teensy, imu_config, started_at)) {}
+                                   trigger_groups, teensy, imu_config,
+                                   field_layouts, apriltag, started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

@@ -71,4 +71,15 @@ std::string serialize_camchain(const Camchain& chain);
 // position in the chain — the uniform shape stored per camera row.
 std::string serialize_single_camera(const CamchainEntry& entry);
 
+// imu_config.t_imu_robot_json schema (defined here, Phase 3):
+//   {"T_robot_imu": [[r00,r01,r02,t0], [...], [...], [0,0,0,1]]}
+// 4×4 row-major homogeneous transform mapping IMU-frame points into the
+// robot frame, meters. Parsed via yaml-cpp (JSON is a subset of YAML 1.2),
+// so consumers of this header never see a JSON library.
+//
+// Validation: 4×4 numeric shape, bottom row ≈ (0,0,0,1), rotation block
+// orthonormal within 1e-3 with det ≈ +1. Throws CalibrationParseError.
+Mat4        parse_t_robot_imu(const std::string& json_text);
+std::string serialize_t_robot_imu(const Mat4& T);
+
 }  // namespace gw::calib

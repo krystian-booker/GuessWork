@@ -70,6 +70,20 @@ constexpr const char* kSchemaTriggerGroups =
 // optimistic vs. a sensor bolted to a robot). t_imu_robot_json is the
 // CAD-derived IMU→robot transform consumed when chaining camera extrinsics
 // into the robot frame.
+// WPILib AprilTagFieldLayout documents, stored verbatim. Exactly one row is
+// active at a time — enforced in FieldLayoutRepository::activate() (a
+// partial-unique constraint can't be expressed as a column constraint).
+// Seeded with the bundled season layout on first boot (additive table — no
+// --reset-db needed when this arrived).
+constexpr const char* kSchemaFieldLayouts =
+    "CREATE TABLE IF NOT EXISTS field_layouts ("
+    "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name       TEXT    NOT NULL UNIQUE,"
+    "  json       TEXT    NOT NULL,"
+    "  active     INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0,1)),"
+    "  created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    ");";
+
 constexpr const char* kSchemaImuConfig =
     "CREATE TABLE IF NOT EXISTS imu_config ("
     "  id                  INTEGER PRIMARY KEY CHECK (id = 1),"
@@ -102,6 +116,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, "PRAGMA busy_timeout = 2000;");
     exec_or_throw(db_, kSchemaCameras);
     exec_or_throw(db_, kSchemaTriggerGroups);
+    exec_or_throw(db_, kSchemaFieldLayouts);
     exec_or_throw(db_, kSchemaImuConfig);
 }
 

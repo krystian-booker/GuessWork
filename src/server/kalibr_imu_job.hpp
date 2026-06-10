@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -54,6 +55,13 @@ public:
     void start();
     void cancel() { sub_.cancel(); }
 
+    // Invoked (on the subprocess reader thread) once per camera whose
+    // extrinsics were stored — lets the camera supervisor rebuild
+    // calibration-dependent consumers. Set before start().
+    void set_on_stored(std::function<void(int64_t camera_id)> cb) {
+        on_stored_ = std::move(cb);
+    }
+
     CalibrationJobStatus status() const;
 
     size_t      log_bytes() const                     { return sub_.log_bytes(); }
@@ -77,6 +85,7 @@ private:
     std::filesystem::path      session_root_;
     const std::string          model_;
     const std::string          session_id_;
+    std::function<void(int64_t)> on_stored_;
     std::atomic<bool>          calibration_stored_{false};
 
     mutable std::mutex         err_mu_;

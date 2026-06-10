@@ -152,7 +152,8 @@ void KalibrImuJob::handle_exit(SubprocessState s, int /*exit_code*/) {
     const auto stats =
         extract_reproj_stats(session_root_ / "results-imucam-calibration.txt");
 
-    std::string errors;
+    std::string          errors;
+    std::vector<int64_t> stored_ids;
     for (size_t i = 0; i < camera_ids_.size(); ++i) {
         std::string payload = std::move(payloads[i]);
         if (!payload.empty() && payload.back() != '\n') payload += '\n';
@@ -176,10 +177,16 @@ void KalibrImuJob::handle_exit(SubprocessState s, int /*exit_code*/) {
             if (!stored) {
                 errors += "camera row " + std::to_string(camera_ids_[i]) +
                           " missing during auto-upload; ";
+            } else {
+                stored_ids.push_back(camera_ids_[i]);
             }
         } catch (const std::exception& e) {
             errors += "camera " + std::to_string(camera_ids_[i]) + ": " + e.what() + "; ";
         }
+    }
+
+    if (on_stored_) {
+        for (int64_t id : stored_ids) on_stored_(id);
     }
 
     if (!errors.empty()) {
