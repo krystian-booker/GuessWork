@@ -1,5 +1,6 @@
 #include "consumer/rosbag_writer.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -18,8 +19,12 @@ constexpr uint8_t kOpConnection  = 0x07;
 
 constexpr const char* kMagic = "#ROSBAG V2.0\n";
 
-// One ROS connection per bag (we only emit /cam0/image_raw).
-constexpr uint32_t kConnId = 0;
+// Canonical MD5s — changing a message's fields would change these. They gate
+// type compatibility in every ROS deserializer.
+constexpr const char* kImageType = "sensor_msgs/Image";
+constexpr const char* kImageMd5  = "060021388200f6f0f447d0fcd9c64743";
+constexpr const char* kImuType   = "sensor_msgs/Imu";
+constexpr const char* kImuMd5    = "6a62c6daae103f4ff57a132d6f95cec2";
 
 uint32_t ns_to_sec(uint64_t ns) { return static_cast<uint32_t>(ns / 1'000'000'000ull); }
 uint32_t ns_to_nsec(uint64_t ns) { return static_cast<uint32_t>(ns % 1'000'000'000ull); }
@@ -32,12 +37,11 @@ void encode_time(uint8_t out[8], uint64_t ns) {
     std::memcpy(out + 4, &ns_, 4);
 }
 
-}  // namespace
-
-const std::string& RosbagWriter::image_message_definition() {
-    // Canonical concatenated form: sensor_msgs/Image + embedded
-    // std_msgs/Header. Comments stripped — kalibr / rosbag only use this
-    // string for description; the MD5 is what gates type compatibility.
+// Canonical concatenated form: top-level message followed by every embedded
+// type, '='*80 separators. rosbag's Python reader (which Kalibr uses) builds
+// its deserializers from this text via genpy, so the embedded definitions
+// are required, not documentation.
+const std::string& image_message_definition() {
     static const std::string def =
         "std_msgs/Header header\n"
         "uint32 height\n"
@@ -55,12 +59,45 @@ const std::string& RosbagWriter::image_message_definition() {
     return def;
 }
 
+const std::string& imu_message_definition() {
+    static const std::string def =
+        "std_msgs/Header header\n"
+        "geometry_msgs/Quaternion orientation\n"
+        "float64[9] orientation_covariance\n"
+        "geometry_msgs/Vector3 angular_velocity\n"
+        "float64[9] angular_velocity_covariance\n"
+        "geometry_msgs/Vector3 linear_acceleration\n"
+        "float64[9] linear_acceleration_covariance\n"
+        "\n"
+        "================================================================================\n"
+        "MSG: std_msgs/Header\n"
+        "uint32 seq\n"
+        "time stamp\n"
+        "string frame_id\n"
+        "\n"
+        "================================================================================\n"
+        "MSG: geometry_msgs/Quaternion\n"
+        "float64 x\n"
+        "float64 y\n"
+        "float64 z\n"
+        "float64 w\n"
+        "\n"
+        "================================================================================\n"
+        "MSG: geometry_msgs/Vector3\n"
+        "float64 x\n"
+        "float64 y\n"
+        "float64 z\n";
+    return def;
+}
+
+}  // namespace
+
 RosbagWriter::RosbagWriter(std::filesystem::path path,
                            std::string           topic_name,
                            std::string           frame_id)
-    : path_(std::move(path)),
-      topic_(std::move(topic_name)),
-      frame_id_(std::move(frame_id)) {}
+    : path_(std::move(path)) {
+    register_connection(ConnKind::Image, std::move(topic_name), std::move(frame_id));
+}
 
 RosbagWriter::~RosbagWriter() {
     if (opened_ && !closed_) {
@@ -68,9 +105,27 @@ RosbagWriter::~RosbagWriter() {
     }
 }
 
+uint32_t RosbagWriter::register_connection(ConnKind kind, std::string topic,
+                                           std::string frame_id) {
+    if (opened_) {
+        throw std::runtime_error("RosbagWriter: connections must be registered before open()");
+    }
+    conns_.push_back(ConnectionInfo{kind, std::move(topic), std::move(frame_id), {}, 0});
+    return static_cast<uint32_t>(conns_.size() - 1);
+}
+
+uint32_t RosbagWriter::add_image_connection(std::string topic_name, std::string frame_id) {
+    return register_connection(ConnKind::Image, std::move(topic_name), std::move(frame_id));
+}
+
+uint32_t RosbagWriter::add_imu_connection(std::string topic_name, std::string frame_id) {
+    return register_connection(ConnKind::Imu, std::move(topic_name), std::move(frame_id));
+}
+
 void RosbagWriter::put_u8(uint8_t v)   { out_.put(static_cast<char>(v)); }
 void RosbagWriter::put_u32(uint32_t v) { out_.write(reinterpret_cast<const char*>(&v), 4); }
 void RosbagWriter::put_u64(uint64_t v) { out_.write(reinterpret_cast<const char*>(&v), 8); }
+void RosbagWriter::put_f64(double v)   { out_.write(reinterpret_cast<const char*>(&v), 8); }
 void RosbagWriter::put_bytes(const void* data, size_t n) {
     out_.write(static_cast<const char*>(data), static_cast<std::streamsize>(n));
 }
@@ -118,12 +173,7 @@ void RosbagWriter::write_bag_header_placeholder() {
                              conn_count_field_bytes - 4 + chunk_count_field_bytes - 4 +
                              // Re-add the 4-byte length prefix for each field:
                              4 * 4;
-    // Sanity: hdr_len should be the sum of bytes between hdr_len prefix and
-    // data_len prefix.
 
-    // Total record bytes consumed so far if we use this hdr_len:
-    //   4 (hdr_len prefix) + hdr_len + 4 (data_len prefix) + data_padding
-    // We want the total to equal kBagHeaderRecordBytes.
     const uint32_t fixed_overhead = 4 + hdr_len + 4;
     if (kBagHeaderRecordBytes < fixed_overhead) {
         throw std::runtime_error("RosbagWriter: BagHeader record budget too small");
@@ -170,25 +220,24 @@ void RosbagWriter::rewrite_bag_header(uint64_t index_pos,
 }
 
 void RosbagWriter::write_connection_record(uint32_t conn_id) {
+    const ConnectionInfo& c = conns_[conn_id];
+
     // Connection record header: op, conn, topic.
     const uint32_t op_bytes    = 2 + 1 + 1;                   // op=\x07
     const uint32_t conn_bytes  = 4 + 1 + 4;                   // conn=<u32>
-    const uint32_t topic_bytes = 5 + 1 + static_cast<uint32_t>(topic_.size()); // topic=<str>
+    const uint32_t topic_bytes = 5 + 1 + static_cast<uint32_t>(c.topic.size()); // topic=<str>
     const uint32_t hdr_len     = (4 + op_bytes) + (4 + conn_bytes) + (4 + topic_bytes);
 
     put_u32(hdr_len);
     put_field_u8 ("op",    kOpConnection);
     put_field_u32("conn",  conn_id);
-    put_field_str("topic", topic_);
+    put_field_str("topic", c.topic);
 
-    put_u32(static_cast<uint32_t>(conn_data_block_.size()));
-    put_bytes(conn_data_block_.data(), conn_data_block_.size());
+    put_u32(static_cast<uint32_t>(c.data_block.size()));
+    put_bytes(c.data_block.data(), c.data_block.size());
 }
 
-void RosbagWriter::write_image_message(uint64_t       timestamp_ns,
-                                       uint32_t       width,
-                                       uint32_t       height,
-                                       const uint8_t* pixels) {
+void RosbagWriter::write_message_header(uint32_t conn_id, uint64_t timestamp_ns) {
     // Record header: op, conn, time (8-byte ROS Time).
     const uint32_t op_bytes   = 2 + 1 + 1;       // op=\x02
     const uint32_t conn_bytes = 4 + 1 + 4;       // conn=<u32>
@@ -197,12 +246,21 @@ void RosbagWriter::write_image_message(uint64_t       timestamp_ns,
 
     put_u32(hdr_len);
     put_field_u8 ("op",   kOpMessageData);
-    put_field_u32("conn", kConnId);
+    put_field_u32("conn", conn_id);
     {
         uint8_t time_buf[8];
         encode_time(time_buf, timestamp_ns);
         put_field("time", time_buf, 8);
     }
+}
+
+void RosbagWriter::write_image_message(uint32_t       conn_id,
+                                       uint64_t       timestamp_ns,
+                                       uint32_t       width,
+                                       uint32_t       height,
+                                       const uint8_t* pixels) {
+    ConnectionInfo& c = conns_[conn_id];
+    write_message_header(conn_id, timestamp_ns);
 
     // Data block: serialized sensor_msgs/Image (little-endian).
     //   header.seq  : u32
@@ -216,7 +274,7 @@ void RosbagWriter::write_image_message(uint64_t       timestamp_ns,
     //   data        : <u32 len><width*height bytes>
     const uint32_t step       = width;
     const uint32_t pix_bytes  = step * height;
-    const uint32_t frame_len  = static_cast<uint32_t>(frame_id_.size());
+    const uint32_t frame_len  = static_cast<uint32_t>(c.frame_id.size());
     const char     enc[]      = "mono8";
     const uint32_t enc_len    = 5;
     const uint32_t data_len   =
@@ -231,15 +289,14 @@ void RosbagWriter::write_image_message(uint64_t       timestamp_ns,
         4 + pix_bytes;                   // data
     put_u32(data_len);
 
-    const uint32_t seq = static_cast<uint32_t>(msg_count_ & 0xFFFFFFFFu);
-    put_u32(seq);
+    put_u32(c.seq++);
     {
         uint8_t time_buf[8];
         encode_time(time_buf, timestamp_ns);
         put_bytes(time_buf, 8);
     }
     put_u32(frame_len);
-    put_bytes(frame_id_.data(), frame_len);
+    put_bytes(c.frame_id.data(), frame_len);
     put_u32(height);
     put_u32(width);
     put_u32(enc_len);
@@ -250,10 +307,51 @@ void RosbagWriter::write_image_message(uint64_t       timestamp_ns,
     put_bytes(pixels, pix_bytes);
 }
 
+void RosbagWriter::write_imu_message(uint32_t    conn_id,
+                                     uint64_t    timestamp_ns,
+                                     const float accel[3],
+                                     const float gyro[3]) {
+    ConnectionInfo& c = conns_[conn_id];
+    write_message_header(conn_id, timestamp_ns);
+
+    // Data block: serialized sensor_msgs/Imu (little-endian, all f64).
+    //   header (seq u32, stamp 8B, frame_id <len><bytes>)
+    //   orientation: quaternion x,y,z,w — identity (we publish none)
+    //   orientation_covariance[9] — [0] = -1 marks "no orientation estimate"
+    //   angular_velocity x,y,z (rad/s) + covariance[9] = zeros (unknown)
+    //   linear_acceleration x,y,z (m/s²) + covariance[9] = zeros (unknown)
+    const uint32_t frame_len = static_cast<uint32_t>(c.frame_id.size());
+    const uint32_t data_len  =
+        4 + 8 + 4 + frame_len +          // header
+        4 * 8 +                          // orientation quaternion
+        9 * 8 +                          // orientation_covariance
+        3 * 8 + 9 * 8 +                  // angular_velocity + covariance
+        3 * 8 + 9 * 8;                   // linear_acceleration + covariance
+    put_u32(data_len);
+
+    put_u32(c.seq++);
+    {
+        uint8_t time_buf[8];
+        encode_time(time_buf, timestamp_ns);
+        put_bytes(time_buf, 8);
+    }
+    put_u32(frame_len);
+    put_bytes(c.frame_id.data(), frame_len);
+
+    put_f64(0.0); put_f64(0.0); put_f64(0.0); put_f64(1.0);   // orientation
+    put_f64(-1.0);                                            // orientation_cov[0]
+    for (int i = 1; i < 9; ++i) put_f64(0.0);
+    for (int i = 0; i < 3; ++i) put_f64(static_cast<double>(gyro[i]));
+    for (int i = 0; i < 9; ++i) put_f64(0.0);
+    for (int i = 0; i < 3; ++i) put_f64(static_cast<double>(accel[i]));
+    for (int i = 0; i < 9; ++i) put_f64(0.0);
+}
+
 void RosbagWriter::begin_chunk() {
     chunks_.emplace_back();
     cur_chunk_ = &chunks_.back();
     cur_chunk_->file_pos = static_cast<uint64_t>(out_.tellp());
+    cur_chunk_->index_per_conn.resize(conns_.size());
 
     // Chunk record header: op, compression, size (placeholder).
     const uint32_t op_bytes    = 2 + 1 + 1;                                       // op=\x05
@@ -270,9 +368,11 @@ void RosbagWriter::begin_chunk() {
     put_u32(0);                          // data_len placeholder
     cur_chunk_->data_start_pos = static_cast<uint64_t>(out_.tellp());
 
-    // Connection record at the top of the chunk's data block — every chunk
+    // Connection records at the top of the chunk's data block — every chunk
     // is self-describing, which matches rosbag's standard layout.
-    write_connection_record(kConnId);
+    for (uint32_t id = 0; id < conns_.size(); ++id) {
+        write_connection_record(id);
+    }
 }
 
 void RosbagWriter::end_chunk() {
@@ -308,9 +408,17 @@ void RosbagWriter::end_chunk() {
     put_u32(data_bytes);
     out_.seekp(save);
 
-    // Write the IndexData record for this chunk: one record per connection.
-    const uint32_t count = cur_chunk_->msg_count;
-    {
+    // One IndexData record per registered connection (written even when the
+    // connection logged no messages this chunk — matches rosbag and keeps
+    // the N=1 output identical to the original single-topic writer).
+    for (uint32_t id = 0; id < conns_.size(); ++id) {
+        auto& index = cur_chunk_->index_per_conn[id];
+        std::stable_sort(index.begin(), index.end(),
+                         [](const IndexEntry& a, const IndexEntry& b) {
+                             return a.timestamp_ns < b.timestamp_ns;
+                         });
+        const uint32_t count = static_cast<uint32_t>(index.size());
+
         const uint32_t op_bytes_    = 2 + 1 + 1;            // op=\x04
         const uint32_t ver_bytes    = 3 + 1 + 4;            // ver=<u32>
         const uint32_t conn_bytes   = 4 + 1 + 4;            // conn=<u32>
@@ -320,13 +428,13 @@ void RosbagWriter::end_chunk() {
         put_u32(hdr_len);
         put_field_u8 ("op",    kOpIndexData);
         put_field_u32("ver",   1);
-        put_field_u32("conn",  kConnId);
+        put_field_u32("conn",  id);
         put_field_u32("count", count);
 
         // Entry: 8-byte time + 4-byte offset within chunk data block.
         const uint32_t data_len = 12u * count;
         put_u32(data_len);
-        for (const auto& e : cur_chunk_->index) {
+        for (const auto& e : index) {
             uint8_t time_buf[8];
             encode_time(time_buf, e.timestamp_ns);
             put_bytes(time_buf, 8);
@@ -353,11 +461,10 @@ void RosbagWriter::open() {
     chunks_.clear();
     cur_chunk_ = nullptr;
 
-    // Pre-serialize the Connection record's data block (itself a field block:
-    // <u32 len><k=v> × 4). Topic, type, md5, and message_definition are
-    // immutable after construction, so this same byte sequence is re-emitted
-    // at the top of every chunk and once in the trailing index region.
-    conn_data_block_.clear();
+    // Pre-serialize each Connection record's data block (itself a field
+    // block: <u32 len><k=v> × 4). Topic, type, md5, and message_definition
+    // are immutable after open(), so the same byte sequence is re-emitted at
+    // the top of every chunk and once in the trailing index region.
     auto append_field = [](std::string& out, std::string_view k, std::string_view v) {
         const uint32_t len = static_cast<uint32_t>(k.size() + 1 + v.size());
         out.append(reinterpret_cast<const char*>(&len), 4);
@@ -365,44 +472,80 @@ void RosbagWriter::open() {
         out.push_back('=');
         out.append(v);
     };
-    append_field(conn_data_block_, "topic",              topic_);
-    append_field(conn_data_block_, "type",               kTopicType);
-    append_field(conn_data_block_, "md5sum",             kTopicMd5);
-    append_field(conn_data_block_, "message_definition", image_message_definition());
+    for (auto& c : conns_) {
+        const bool  imu  = (c.kind == ConnKind::Imu);
+        const char* type = imu ? kImuType : kImageType;
+        const char* md5  = imu ? kImuMd5 : kImageMd5;
+        const std::string& def =
+            imu ? imu_message_definition() : image_message_definition();
+        c.data_block.clear();
+        c.seq = 0;
+        append_field(c.data_block, "topic",              c.topic);
+        append_field(c.data_block, "type",               type);
+        append_field(c.data_block, "md5sum",             md5);
+        append_field(c.data_block, "message_definition", def);
+    }
 
     write_magic();
     write_bag_header_placeholder();
     begin_chunk();
 }
 
-void RosbagWriter::add_mono8_image(uint64_t       timestamp_ns,
-                                   uint32_t       width,
-                                   uint32_t       height,
-                                   const uint8_t* pixels) {
+uint32_t RosbagWriter::prepare_message(uint32_t conn_id, ConnKind expected_kind,
+                                       uint64_t approx_record_bytes) {
     if (!opened_ || closed_) {
         throw std::runtime_error("RosbagWriter: not open");
     }
+    if (conn_id >= conns_.size()) {
+        throw std::runtime_error("RosbagWriter: unknown conn_id");
+    }
+    if (conns_[conn_id].kind != expected_kind) {
+        throw std::runtime_error("RosbagWriter: message type does not match connection");
+    }
     if (!cur_chunk_) begin_chunk();
 
-    // Estimate this message's record size to decide whether to roll a chunk.
-    const uint64_t pix_bytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-    const uint64_t approx_msg_record = 64 + pix_bytes;  // ~header + small fixed fields
     uint64_t cur_pos = static_cast<uint64_t>(out_.tellp());
-    if (cur_pos - cur_chunk_->data_start_pos + approx_msg_record > kChunkBudget) {
+    if (cur_pos - cur_chunk_->data_start_pos + approx_record_bytes > kChunkBudget) {
         end_chunk();
         begin_chunk();
         cur_pos = static_cast<uint64_t>(out_.tellp());
     }
+    return static_cast<uint32_t>(cur_pos - cur_chunk_->data_start_pos);
+}
 
-    const uint32_t offset_in_chunk =
-        static_cast<uint32_t>(cur_pos - cur_chunk_->data_start_pos);
-    write_image_message(timestamp_ns, width, height, pixels);
-
-    cur_chunk_->index.push_back({timestamp_ns, offset_in_chunk});
-    cur_chunk_->msg_count++;
+void RosbagWriter::note_message(uint32_t conn_id, uint64_t timestamp_ns,
+                                uint32_t chunk_offset) {
+    cur_chunk_->index_per_conn[conn_id].push_back({timestamp_ns, chunk_offset});
     cur_chunk_->start_time_ns = std::min(cur_chunk_->start_time_ns, timestamp_ns);
     cur_chunk_->end_time_ns   = std::max(cur_chunk_->end_time_ns,   timestamp_ns);
     msg_count_++;
+}
+
+void RosbagWriter::add_mono8_image(uint32_t       conn_id,
+                                   uint64_t       timestamp_ns,
+                                   uint32_t       width,
+                                   uint32_t       height,
+                                   const uint8_t* pixels) {
+    const uint64_t pix_bytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    const uint32_t offset = prepare_message(conn_id, ConnKind::Image, 64 + pix_bytes);
+    write_image_message(conn_id, timestamp_ns, width, height, pixels);
+    note_message(conn_id, timestamp_ns, offset);
+}
+
+void RosbagWriter::add_mono8_image(uint64_t       timestamp_ns,
+                                   uint32_t       width,
+                                   uint32_t       height,
+                                   const uint8_t* pixels) {
+    add_mono8_image(0, timestamp_ns, width, height, pixels);
+}
+
+void RosbagWriter::add_imu_sample(uint32_t    conn_id,
+                                  uint64_t    timestamp_ns,
+                                  const float accel[3],
+                                  const float gyro[3]) {
+    const uint32_t offset = prepare_message(conn_id, ConnKind::Imu, 64 + 33 * 8);
+    write_imu_message(conn_id, timestamp_ns, accel, gyro);
+    note_message(conn_id, timestamp_ns, offset);
 }
 
 void RosbagWriter::close() {
@@ -415,9 +558,11 @@ void RosbagWriter::close() {
     // Connection record). rosbag's reader seeks here, calls read_connection_
     // record() expecting op=CONNECTION, and aborts with "Unindexed bag" if it
     // hits a ChunkInfo instead — so capture the offset BEFORE the Connection
-    // write, not after.
+    // writes, not after.
     const uint64_t index_pos = static_cast<uint64_t>(out_.tellp());
-    write_connection_record(kConnId);
+    for (uint32_t id = 0; id < conns_.size(); ++id) {
+        write_connection_record(id);
+    }
 
     // ChunkInfo records — one per chunk we wrote.
     for (const auto& c : chunks_) {
@@ -442,16 +587,18 @@ void RosbagWriter::close() {
             encode_time(buf, c.end_time_ns);
             put_field("end_time",   buf, 8);
         }
-        put_field_u32("count", 1);                    // number of connections in this chunk
+        put_field_u32("count", static_cast<uint32_t>(conns_.size()));
 
-        // Data block: <conn u32><msg_count u32> for each connection (just one).
-        put_u32(8);
-        put_u32(kConnId);
-        put_u32(c.msg_count);
+        // Data block: <conn u32><msg_count u32> for each registered connection.
+        put_u32(static_cast<uint32_t>(8 * conns_.size()));
+        for (uint32_t id = 0; id < conns_.size(); ++id) {
+            put_u32(id);
+            put_u32(static_cast<uint32_t>(c.index_per_conn[id].size()));
+        }
     }
 
     // Now go back and write the real BagHeader.
-    rewrite_bag_header(index_pos, /*conn_count=*/1,
+    rewrite_bag_header(index_pos, static_cast<uint32_t>(conns_.size()),
                        /*chunk_count=*/static_cast<uint32_t>(chunks_.size()));
 
     out_.flush();

@@ -62,6 +62,10 @@ crow::json::wvalue camera_to_json(const Camera&                              c,
     put_opt(j, "exposure",      c.exposure);
     j["hardware_sync_enabled"] = c.hardware_sync_enabled;
     put_opt(j, "trigger_output_pin", c.trigger_output_pin);
+    put_opt(j, "role", c.role);
+    j["extrinsics_calibrated_at"] =
+        c.extrinsics_calibrated_at ? crow::json::wvalue(*c.extrinsics_calibrated_at)
+                                   : crow::json::wvalue(nullptr);
     j["online"]     = online;
     j["created_at"] = c.created_at;
     return j;
@@ -187,6 +191,29 @@ bool parse_optional_nullable_int(const crow::json::rvalue& body, const char* fie
 
 bool is_valid_trigger_output_pin(int64_t v) { return v >= 1 && v <= 6; }
 
+bool is_valid_role(const std::string& v) {
+    return v == "apriltag" || v == "vio_left" || v == "vio_right";
+}
+
+// String-or-null sibling of parse_optional_nullable_int — used by `role`
+// where a JSON null clears the column.
+bool parse_optional_nullable_string(const crow::json::rvalue& body, const char* field,
+                                    std::optional<std::optional<std::string>>& out,
+                                    crow::response& err) {
+    if (!body.has(field)) { out = std::nullopt; return true; }
+    const auto t = body[field].t();
+    if (t == crow::json::type::Null) {
+        out = std::optional<std::string>(std::nullopt);
+        return true;
+    }
+    if (t == crow::json::type::String) {
+        out = std::optional<std::string>(std::string(body[field].s()));
+        return true;
+    }
+    err = error_response(400, std::string("field must be a string or null: ") + field);
+    return false;
+}
+
 // Lens focal length in mm — must be positive and within a wide sanity
 // envelope. Typical machine-vision lenses are 1.4–35 mm; we accept up to
 // 1000 mm to leave headroom without inviting bogus inputs.
@@ -266,6 +293,7 @@ struct UpdateBody {
     std::optional<bool>        hardware_sync_enabled;
     // Outer = present in body; inner = value (nullopt → JSON null, clear).
     std::optional<std::optional<int64_t>> trigger_output_pin;
+    std::optional<std::optional<std::string>> role;
     crow::response             error;
     bool                       ok = false;
 
@@ -274,7 +302,7 @@ struct UpdateBody {
     }
     bool empty() const {
         return !name && !focal_length_mm && !mode && !has_settings()
-            && !hardware_sync_enabled && !trigger_output_pin;
+            && !hardware_sync_enabled && !trigger_output_pin && !role;
     }
 };
 
@@ -305,6 +333,12 @@ UpdateBody parse_update_body(const crow::request& req) {
             r.error = error_response(400, "trigger_output_pin must be 1..6");
             return r;
         }
+    }
+    if (!parse_optional_nullable_string(body, "role", r.role, r.error)) return r;
+    if (r.role && r.role->has_value() && !is_valid_role(**r.role)) {
+        r.error = error_response(400,
+            "role must be 'apriltag', 'vio_left', 'vio_right', or null");
+        return r;
     }
     // Disabling hw-sync implicitly clears the pin; preserve any explicit value
     // the caller already gave us if it matches that intent.
@@ -440,6 +474,18 @@ void register_camera_routes(crow::SimpleApp&  app,
                 }
             }
 
+            // vio_left/vio_right are exclusive: exactly one camera each. The
+            // cameras table can't express partial uniqueness, so check here.
+            if (parsed.role && parsed.role->has_value() && **parsed.role != "apriltag") {
+                for (const auto& other : repo.list_all()) {
+                    if (other.id != id && other.role && *other.role == **parsed.role) {
+                        return error_response(409,
+                            "role '" + **parsed.role + "' is already assigned to camera '" +
+                            other.name + "'");
+                    }
+                }
+            }
+
             // Push settings to the live producer first so we can persist the
             // actually-applied values (post-clamp, post-quantization) instead
             // of the raw request body. Skipped when the camera is offline —
@@ -463,6 +509,7 @@ void register_camera_routes(crow::SimpleApp&  app,
             upd.exposure      = parsed.exposure;
             upd.hardware_sync_enabled = parsed.hardware_sync_enabled;
             upd.trigger_output_pin    = parsed.trigger_output_pin;
+            upd.role                  = parsed.role;
 
             const auto c = repo.update(id, upd);
             if (!c) return error_response(404, "camera not found");

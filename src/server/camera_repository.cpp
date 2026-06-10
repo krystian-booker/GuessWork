@@ -37,7 +37,8 @@ constexpr const char* kSelectColumns =
     "gain_auto, gain, exposure_auto, exposure, "
     "calibration_json, calibrated_at, "
     "hardware_sync_enabled, trigger_output_pin, "
-    "created_at";
+    "created_at, "
+    "role, imu_extrinsics_json, extrinsics_calibrated_at";
 
 std::optional<std::string> column_text_opt(sqlite3_stmt* stmt, int idx) {
     if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
@@ -73,6 +74,9 @@ Camera read_row(sqlite3_stmt* stmt) {
     c.hardware_sync_enabled = sqlite3_column_int(stmt, 11) != 0;
     c.trigger_output_pin    = column_int64_opt(stmt, 12);
     c.created_at        = sqlite3_column_int64(stmt, 13);
+    c.role                     = column_text_opt (stmt, 14);
+    c.imu_extrinsics_json      = column_text_opt (stmt, 15);
+    c.extrinsics_calibrated_at = column_int64_opt(stmt, 16);
     return c;
 }
 
@@ -219,6 +223,7 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
         if (patch.exposure)      add_col("exposure = ?");
         if (patch.hardware_sync_enabled) add_col("hardware_sync_enabled = ?");
         if (patch.trigger_output_pin)    add_col("trigger_output_pin = ?");
+        if (patch.role)                  add_col("role = ?");
         sql += " WHERE id = ? RETURNING ";
         sql += kSelectColumns;
         sql += ";";
@@ -247,6 +252,14 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
         if (patch.trigger_output_pin) {
             if (patch.trigger_output_pin->has_value()) {
                 sqlite3_bind_int64(g.stmt, idx++, **patch.trigger_output_pin);
+            } else {
+                sqlite3_bind_null(g.stmt, idx++);
+            }
+        }
+        if (patch.role) {
+            if (patch.role->has_value()) {
+                sqlite3_bind_text(g.stmt, idx++, (*patch.role)->c_str(), -1,
+                                  SQLITE_TRANSIENT);
             } else {
                 sqlite3_bind_null(g.stmt, idx++);
             }
@@ -319,6 +332,48 @@ bool CameraRepository::clear_calibration(int64_t id) {
 
         const int rc = sqlite3_step(g.stmt);
         if (rc != SQLITE_DONE) throw_sqlite(h, "clear_calibration: step");
+        return sqlite3_changes(h) > 0;
+    });
+}
+
+std::optional<Camera> CameraRepository::set_imu_extrinsics(int64_t id,
+                                                           std::string_view text) {
+    const std::string text_str(text);
+    return db_.with_handle([&](sqlite3* h) -> std::optional<Camera> {
+        StmtGuard g;
+        const std::string sql =
+            std::string("UPDATE cameras "
+                        "SET imu_extrinsics_json      = ?, "
+                        "    extrinsics_calibrated_at = strftime('%s', 'now') "
+                        "WHERE id = ? "
+                        "RETURNING ") + kSelectColumns + ";";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "set_imu_extrinsics: prepare");
+        }
+        sqlite3_bind_text (g.stmt, 1, text_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(g.stmt, 2, id);
+
+        const int rc = sqlite3_step(g.stmt);
+        if (rc == SQLITE_ROW)  return read_row(g.stmt);
+        if (rc == SQLITE_DONE) return std::nullopt;
+        throw_sqlite(h, "set_imu_extrinsics: step");
+    });
+}
+
+bool CameraRepository::clear_imu_extrinsics(int64_t id) {
+    return db_.with_handle([id](sqlite3* h) {
+        StmtGuard g;
+        const char* sql =
+            "UPDATE cameras "
+            "SET imu_extrinsics_json = NULL, extrinsics_calibrated_at = NULL "
+            "WHERE id = ?;";
+        if (sqlite3_prepare_v2(h, sql, -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "clear_imu_extrinsics: prepare");
+        }
+        sqlite3_bind_int64(g.stmt, 1, id);
+
+        const int rc = sqlite3_step(g.stmt);
+        if (rc != SQLITE_DONE) throw_sqlite(h, "clear_imu_extrinsics: step");
         return sqlite3_changes(h) > 0;
     });
 }

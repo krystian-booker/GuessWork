@@ -108,4 +108,69 @@ TEST_F(CameraCalibrationTest, ListAllReturnsCalibrationFields) {
     EXPECT_FALSE(rows[1].calibration_json.has_value());
 }
 
+// --- IMU extrinsics (camera-IMU calibration result) ---
+
+TEST_F(CameraCalibrationTest, SetImuExtrinsicsStoresYamlAndTimestamp) {
+    const auto c = repo_->create("front", "SN001", 6.0);
+    EXPECT_FALSE(c.imu_extrinsics_json.has_value());
+    EXPECT_FALSE(c.extrinsics_calibrated_at.has_value());
+
+    const auto updated = repo_->set_imu_extrinsics(c.id, "cam0:\n  T_cam_imu: []\n");
+    ASSERT_TRUE(updated.has_value());
+    ASSERT_TRUE(updated->imu_extrinsics_json.has_value());
+    EXPECT_NE(updated->imu_extrinsics_json->find("T_cam_imu"), std::string::npos);
+    ASSERT_TRUE(updated->extrinsics_calibrated_at.has_value());
+    EXPECT_GT(*updated->extrinsics_calibrated_at, 0);
+    // Intrinsics columns are independent — untouched.
+    EXPECT_FALSE(updated->calibration_json.has_value());
+    EXPECT_FALSE(updated->calibrated_at.has_value());
+}
+
+TEST_F(CameraCalibrationTest, ClearImuExtrinsicsResetsBothColumns) {
+    const auto c = repo_->create("front", "SN001", 6.0);
+    repo_->set_calibration(c.id, kStubCalibrationJson);
+    repo_->set_imu_extrinsics(c.id, "cam0: {}\n");
+
+    EXPECT_TRUE(repo_->clear_imu_extrinsics(c.id));
+
+    const auto fetched = repo_->get(c.id);
+    ASSERT_TRUE(fetched.has_value());
+    EXPECT_FALSE(fetched->imu_extrinsics_json.has_value());
+    EXPECT_FALSE(fetched->extrinsics_calibrated_at.has_value());
+    // Intrinsics survive an extrinsics clear.
+    EXPECT_TRUE(fetched->calibration_json.has_value());
+}
+
+TEST_F(CameraCalibrationTest, SetImuExtrinsicsOnMissingIdReturnsNullopt) {
+    EXPECT_FALSE(repo_->set_imu_extrinsics(9999, "cam0: {}\n").has_value());
+    EXPECT_FALSE(repo_->clear_imu_extrinsics(9999));
+}
+
+// --- role column ---
+
+TEST_F(CameraCalibrationTest, RoleRoundTripsThroughUpdate) {
+    const auto c = repo_->create("front", "SN001", 6.0);
+    EXPECT_FALSE(c.role.has_value());
+
+    CameraUpdate set_role;
+    set_role.role = std::optional<std::string>("vio_left");
+    const auto updated = repo_->update(c.id, set_role);
+    ASSERT_TRUE(updated.has_value());
+    ASSERT_TRUE(updated->role.has_value());
+    EXPECT_EQ(*updated->role, "vio_left");
+
+    CameraUpdate clear_role;
+    clear_role.role = std::optional<std::string>(std::nullopt);
+    const auto cleared = repo_->update(c.id, clear_role);
+    ASSERT_TRUE(cleared.has_value());
+    EXPECT_FALSE(cleared->role.has_value());
+}
+
+TEST_F(CameraCalibrationTest, BogusRoleRejectedByCheckConstraint) {
+    const auto c = repo_->create("front", "SN001", 6.0);
+    CameraUpdate bad;
+    bad.role = std::optional<std::string>("steering_wheel");
+    EXPECT_THROW(repo_->update(c.id, bad), std::exception);
+}
+
 }  // namespace gw::server

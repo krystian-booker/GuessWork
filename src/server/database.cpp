@@ -39,6 +39,15 @@ constexpr const char* kSchemaCameras =
     // 1..6 when hw-sync is on; NULL when freerun. Drives both the GenICam
     // TriggerSource on the camera and the host-side pulse-event routing.
     "  trigger_output_pin    INTEGER UNIQUE,"
+    // Pipeline role: which consumer attaches to this camera's channel.
+    // vio_left/vio_right are unique across cameras (enforced in the route
+    // layer — partial-unique can't be expressed as a column constraint).
+    "  role                  TEXT CHECK (role IN ('apriltag','vio_left','vio_right')),"
+    // The camera's block of a Kalibr camchain-imucam result (T_cam_imu,
+    // timeshift, T_cn_cnm1 where present), re-keyed to cam0. NULL until an
+    // extrinsics job stores it.
+    "  imu_extrinsics_json      TEXT,"
+    "  extrinsics_calibrated_at INTEGER,"
     "  created_at            INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 

@@ -27,12 +27,10 @@ KalibrLensConfig derive_kalibr_lens(double   focal_length_mm,
     };
 }
 
-namespace {
-
 // Prepend Homebrew + /usr/local so the subprocess can find `docker` and
 // `colima` when guesswork was launched from a minimal-env shell (e.g. macOS
 // launchctl). Inherited PATH is appended by SubprocessJob's env merge.
-std::string augmented_path() {
+std::string kalibr_augmented_path() {
     const char* parent_path = std::getenv("PATH");
     std::string p           = "/opt/homebrew/bin:/usr/local/bin";
     if (parent_path && *parent_path) {
@@ -41,6 +39,8 @@ std::string augmented_path() {
     }
     return p;
 }
+
+namespace {
 
 // Kalibr's results-cam.txt contains a line of the form:
 //   reprojection error: [<mean_u>, <mean_v>] +- [<sigma_u>, <sigma_v>]
@@ -103,7 +103,7 @@ KalibrJob::KalibrJob(CameraRepository&            repo,
       sub_({calibrate_script_path.string(),
             session_root_.string(),
             lens.model},
-           {{"PATH",                 augmented_path()},
+           {{"PATH",                 kalibr_augmented_path()},
             {"GW_KALIBR_FOCAL_HINT", std::to_string(lens.focal_hint_px)}},
            session_root_ / "kalibr.log") {
     sub_.set_on_exit([this](SubprocessState s, int code) { handle_exit(s, code); });

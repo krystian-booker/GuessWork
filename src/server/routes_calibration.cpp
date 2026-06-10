@@ -6,6 +6,7 @@
 
 #include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
+#include "server/kalibr_imu_job.hpp"
 #include "server/kalibr_job.hpp"
 #include "server/route_helpers.hpp"
 
@@ -82,6 +83,45 @@ std::string sse_done_event(const CalibrationJobStatus& s) {
     return "event: done\ndata: " + done.dump() + "\n\n";
 }
 
+// Shared SSE log-streaming body for KalibrJob and KalibrImuJob — both expose
+// the same log/status surface by design. Keeps the connection open until the
+// subprocess reaches a terminal state; the handler thread is a Crow worker
+// (multithreaded mode is on), so blocking here doesn't stall other requests.
+template <typename Job>
+void stream_job_log_sse(crow::response& res, const std::shared_ptr<Job>& job) {
+    res.set_header("Content-Type", "text/event-stream");
+    res.set_header("Cache-Control", "no-store");
+    res.set_header("Connection",    "keep-alive");
+
+    size_t off = 0;
+    // Flush whatever bytes have buffered up before we subscribed so a late
+    // connector still sees the start of the run.
+    const std::string initial = job->log_snapshot();
+    if (!initial.empty()) {
+        res.write(sse_data_event(initial));
+        off = initial.size();
+    }
+
+    // Drain new bytes as they arrive. wait_for_log returns either when
+    // log_bytes_ > off, the job reaches a terminal state, or the timeout
+    // fires — the latter lets us periodically check job state without
+    // sleeping forever if the subprocess goes quiet.
+    for (;;) {
+        const size_t now_bytes = job->wait_for_log(off, std::chrono::milliseconds(1000));
+        if (now_bytes > off) {
+            const std::string chunk = job->log_slice(off, now_bytes - off);
+            res.write(sse_data_event(chunk));
+            off = now_bytes;
+        }
+        const auto st = job->status();
+        if (st.state != SubprocessState::Running) {
+            res.write(sse_done_event(st));
+            break;
+        }
+    }
+    res.end();
+}
+
 crow::json::wvalue calibration_summary_to_json(const Camera& c) {
     crow::json::wvalue j;
     j["camera_id"]     = c.id;
@@ -91,6 +131,56 @@ crow::json::wvalue calibration_summary_to_json(const Camera& c) {
     // parses it with js-yaml; we just pass the string through.
     j["calibration"]   = c.calibration_json ? crow::json::wvalue(*c.calibration_json)
                                             : crow::json::wvalue(nullptr);
+    return j;
+}
+
+crow::json::wvalue ext_cameras_to_json(const std::vector<ExtrinsicsCameraStatus>& cams) {
+    crow::json::wvalue::list items;
+    items.reserve(cams.size());
+    for (const auto& c : cams) {
+        crow::json::wvalue j;
+        j["camera_id"]      = c.camera_id;
+        j["topic"]          = c.topic;
+        j["frames_written"] = c.frames_written;
+        j["frames_dropped"] = c.frames_dropped;
+        items.emplace_back(std::move(j));
+    }
+    return crow::json::wvalue(std::move(items));
+}
+
+crow::json::wvalue ext_status_to_json(const ExtrinsicsSessionStatus& s) {
+    crow::json::wvalue j;
+    j["session_id"]  = s.session_id;
+    j["path"]        = s.path.string();
+    j["cameras"]     = ext_cameras_to_json(s.cameras);
+    j["imu_written"] = s.imu_written;
+    j["imu_dropped"] = s.imu_dropped;
+    j["elapsed_ms"]  = s.elapsed_ms;
+    return j;
+}
+
+crow::json::wvalue ext_result_to_json(const ExtrinsicsSessionResult& r) {
+    crow::json::wvalue j;
+    j["session_id"]        = r.session_id;
+    j["path"]              = r.path.string();
+    j["cameras"]           = ext_cameras_to_json(r.cameras);
+    j["imu_written"]       = r.imu_written;
+    j["imu_dropped"]       = r.imu_dropped;
+    j["elapsed_ms"]        = r.elapsed_ms;
+    j["model"]             = r.model;
+    j["suggested_command"] = r.suggested_command;
+    return j;
+}
+
+crow::json::wvalue extrinsics_summary_to_json(const Camera& c) {
+    crow::json::wvalue j;
+    j["camera_id"] = c.id;
+    j["extrinsics_calibrated_at"] =
+        c.extrinsics_calibrated_at ? crow::json::wvalue(*c.extrinsics_calibrated_at)
+                                   : crow::json::wvalue(nullptr);
+    j["extrinsics"] =
+        c.imu_extrinsics_json ? crow::json::wvalue(*c.imu_extrinsics_json)
+                              : crow::json::wvalue(nullptr);
     return j;
 }
 
@@ -139,7 +229,8 @@ void register_calibration_routes(crow::SimpleApp&       app,
             crow::json::wvalue body;
             body["recording_result"] = result_to_json(r);
             try {
-                const auto job = calib.start_kalibr_job(id, r.path, cam->focal_length_mm);
+                const auto job = calib.start_kalibr_job(id, r.path, cam->focal_length_mm,
+                                                        r.sensor_width_px);
                 body["job"] = job_status_to_json(job);
             } catch (const CalibrationError& e) {
                 body["job"]       = crow::json::wvalue(nullptr);
@@ -196,39 +287,7 @@ void register_calibration_routes(crow::SimpleApp&       app,
             res.end();
             return;
         }
-
-        res.set_header("Content-Type", "text/event-stream");
-        res.set_header("Cache-Control", "no-store");
-        res.set_header("Connection",    "keep-alive");
-
-        size_t off = 0;
-        // Flush whatever bytes have buffered up before we subscribed so a
-        // late connector still sees the start of the run.
-        const std::string initial = job->log_snapshot();
-        if (!initial.empty()) {
-            res.write(sse_data_event(initial));
-            off = initial.size();
-        }
-
-        // Drain new bytes as they arrive. wait_for_log returns either when
-        // log_bytes_ > off, the job reaches a terminal state, or the timeout
-        // fires — the latter lets us periodically check job state without
-        // sleeping forever if the subprocess goes quiet.
-        for (;;) {
-            const size_t now_bytes =
-                job->wait_for_log(off, std::chrono::milliseconds(1000));
-            if (now_bytes > off) {
-                const std::string chunk = job->log_slice(off, now_bytes - off);
-                res.write(sse_data_event(chunk));
-                off = now_bytes;
-            }
-            const auto st = job->status();
-            if (st.state != SubprocessState::Running) {
-                res.write(sse_done_event(st));
-                break;
-            }
-        }
-        res.end();
+        stream_job_log_sse(res, job);
     });
 
     // ---- Stored calibration (Kalibr camchain YAML) ----
@@ -290,6 +349,137 @@ void register_calibration_routes(crow::SimpleApp&       app,
     ([&repo](int64_t id) {
         try {
             if (!repo.clear_calibration(id)) return error_response(404, "camera not found");
+            return with_no_store(crow::response(204));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    // ---- Extrinsics (camera-IMU) recording session + job ----
+    //
+    // One session system-wide (it owns the IMU stream); body camera_ids order
+    // defines the topic mapping (camera_ids[i] → /cam<i>/image_raw).
+
+    CROW_ROUTE(app, "/api/calibration/extrinsics/recording").methods("POST"_method)
+    ([&calib](const crow::request& req) {
+        const auto body = crow::json::load(req.body);
+        if (!body) return error_response(400, "invalid JSON body");
+        if (!body.has("camera_ids") ||
+            body["camera_ids"].t() != crow::json::type::List) {
+            return error_response(400, "missing array field: camera_ids");
+        }
+        std::vector<int64_t> ids;
+        for (const auto& e : body["camera_ids"]) {
+            if (e.t() != crow::json::type::Number) {
+                return error_response(400, "camera_ids must contain numbers");
+            }
+            ids.push_back(e.i());
+        }
+        try {
+            const auto status = calib.start_extrinsics(ids);
+            return json_response(201, ext_status_to_json(status));
+        } catch (const CalibrationError& e) {
+            return error_response(409, e.what());
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/calibration/extrinsics/recording").methods("GET"_method)
+    ([&calib] {
+        try {
+            const auto st = calib.extrinsics_status();
+            if (!st) return error_response(404, "no active extrinsics session");
+            return json_response(200, ext_status_to_json(*st));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/calibration/extrinsics/recording").methods("DELETE"_method)
+    ([&calib] {
+        try {
+            const auto r = calib.stop_extrinsics();
+
+            // Recording succeeded — mirror the intrinsics DELETE: keep the
+            // dataset and surface a job-start race as 409 with the result
+            // still attached.
+            crow::json::wvalue body;
+            body["recording_result"] = ext_result_to_json(r);
+            try {
+                const auto job = calib.start_imu_job(r);
+                body["job"] = job_status_to_json(job);
+            } catch (const CalibrationError& e) {
+                body["job"]       = crow::json::wvalue(nullptr);
+                body["job_error"] = e.what();
+                return json_response(409, std::move(body));
+            }
+            return json_response(200, std::move(body));
+        } catch (const CalibrationError& e) {
+            return error_response(404, e.what());
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/calibration/extrinsics/job").methods("GET"_method)
+    ([&calib] {
+        try {
+            const auto st = calib.imu_job_status();
+            if (!st) return error_response(404, "no extrinsics job");
+            return json_response(200, job_status_to_json(*st));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/calibration/extrinsics/job").methods("DELETE"_method)
+    ([&calib] {
+        try {
+            if (!calib.imu_job_cancel()) {
+                return error_response(404, "no running extrinsics job");
+            }
+            return with_no_store(crow::response(204));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/calibration/extrinsics/job/log").methods("GET"_method)
+    ([&calib](const crow::request& /*req*/, crow::response& res) {
+        const auto job = calib.imu_job_handle();
+        if (!job) {
+            res.code = 404;
+            res.set_header("Content-Type", "application/json");
+            res.write(R"({"error":"no extrinsics job"})");
+            res.end();
+            return;
+        }
+        stream_job_log_sse(res, job);
+    });
+
+    // ---- Stored extrinsics (per-camera camchain-imucam block) ----
+
+    CROW_ROUTE(app, "/api/cameras/<int>/extrinsics").methods("GET"_method)
+    ([&repo](int64_t id) {
+        try {
+            const auto c = repo.get(id);
+            if (!c) return error_response(404, "camera not found");
+            if (!c->imu_extrinsics_json) {
+                return error_response(404, "camera has no stored extrinsics");
+            }
+            return json_response(200, extrinsics_summary_to_json(*c));
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
+    });
+
+    CROW_ROUTE(app, "/api/cameras/<int>/extrinsics").methods("DELETE"_method)
+    ([&repo](int64_t id) {
+        try {
+            if (!repo.clear_imu_extrinsics(id)) {
+                return error_response(404, "camera not found");
+            }
             return with_no_store(crow::response(204));
         } catch (const std::exception& e) {
             return error_response(500, e.what());

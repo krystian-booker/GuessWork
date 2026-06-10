@@ -34,6 +34,13 @@ struct Camera {
     // Physical Teensy output the camera is wired to (1..6). Required when
     // hardware_sync_enabled is true; ignored otherwise. Unique across cameras.
     std::optional<int64_t>     trigger_output_pin;
+    // Pipeline role: 'apriltag' | 'vio_left' | 'vio_right'. Unset = camera is
+    // registered but not wired to a detection/VIO consumer.
+    std::optional<std::string> role;
+    // The camera's block of a Kalibr camchain-imucam result (cam0-keyed
+    // YAML: intrinsics + T_cam_imu + timeshift, T_cn_cnm1 where present).
+    std::optional<std::string> imu_extrinsics_json;
+    std::optional<int64_t>     extrinsics_calibrated_at;
     int64_t                    created_at = 0;  // unix seconds
 };
 
@@ -51,11 +58,13 @@ struct CameraUpdate {
     // Nested optional: outer = "in patch", inner = "value (nullopt → SQL NULL)".
     // The route layer clears the pin (inner nullopt) when hw-sync is disabled.
     std::optional<std::optional<int64_t>> trigger_output_pin;
+    // Same nested-optional pattern: inner nullopt clears the role.
+    std::optional<std::optional<std::string>> role;
 
     bool empty() const {
         return !name && !focal_length_mm && !mode
             && !gain_auto && !gain && !exposure_auto && !exposure
-            && !hardware_sync_enabled && !trigger_output_pin;
+            && !hardware_sync_enabled && !trigger_output_pin && !role;
     }
 };
 
@@ -120,6 +129,15 @@ public:
     // Clears both calibration_json and calibrated_at. Returns true if a row was
     // touched; false if id doesn't exist.
     bool                  clear_calibration(int64_t id);
+
+    // Stores the camera's IMU-extrinsics block (cam0-keyed camchain-imucam
+    // YAML) and stamps extrinsics_calibrated_at with the current unix second.
+    // Returns the updated row, or nullopt if id doesn't exist.
+    std::optional<Camera> set_imu_extrinsics(int64_t id, std::string_view text);
+
+    // Clears imu_extrinsics_json and extrinsics_calibrated_at. Returns true
+    // if a row was touched.
+    bool                  clear_imu_extrinsics(int64_t id);
 
 private:
     Database& db_;

@@ -40,6 +40,11 @@ KalibrLensConfig derive_kalibr_lens(double   focal_length_mm,
                                     double   pixel_pitch_mm,
                                     uint32_t sensor_width_px);
 
+// PATH with Homebrew + /usr/local prepended so Kalibr-wrapping subprocesses
+// can find `docker`/`colima` even when guesswork was launched from a
+// minimal-env shell. Shared by KalibrJob and KalibrImuJob.
+std::string kalibr_augmented_path();
+
 // Wraps a SubprocessJob with Kalibr-specific orchestration: derives lens
 // inputs, runs calibrate.sh, and on a successful exit reads
 // `<session>/calibration-camchain.yaml` back through CameraRepository so the

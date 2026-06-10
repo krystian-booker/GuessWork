@@ -100,6 +100,7 @@ add_library(gw_consumer
     src/consumer/preview_consumer.mm
     src/consumer/rosbag_writer.cpp
     src/consumer/rosbag_recording_consumer.cpp
+    src/consumer/multi_topic_bag_recorder.cpp
 )
 target_link_libraries(gw_consumer PUBLIC gw_core
     "-framework Metal"
@@ -154,6 +155,27 @@ FetchContent_MakeAvailable(crow)
 find_package(SQLite3 REQUIRED)
 
 # ----------------------------------------------------------------------------
+# yaml-cpp (fetched) + calibration library. gw_calibration parses/serializes
+# Kalibr camchain YAML into typed structs; yaml-cpp stays a PRIVATE
+# dependency so consumers (gw_server today, gw_apriltag/gw_vio later) never
+# see its headers.
+# ----------------------------------------------------------------------------
+set(YAML_CPP_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS   OFF CACHE BOOL "" FORCE)
+set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    yaml-cpp
+    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.zip
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
+add_library(gw_calibration
+    src/calibration/calibration_store.cpp
+)
+target_include_directories(gw_calibration PUBLIC src)
+target_link_libraries(gw_calibration PRIVATE yaml-cpp::yaml-cpp)
+
+# ----------------------------------------------------------------------------
 # HTTP server library
 # ----------------------------------------------------------------------------
 add_library(gw_server
@@ -161,6 +183,7 @@ add_library(gw_server
     src/server/calibration_supervisor.cpp
     src/server/subprocess_job.cpp
     src/server/kalibr_job.cpp
+    src/server/kalibr_imu_job.cpp
     src/server/routes_status.cpp
     src/server/routes_stream.cpp
     src/server/routes_camera.cpp
@@ -178,7 +201,7 @@ add_library(gw_server
     src/server/teensy_manager.cpp
     src/server/telemetry_decoder.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -211,6 +234,8 @@ set(GW_KALIBR_TARGET_DEFAULT   "${CMAKE_SOURCE_DIR}/data/kalibr/aprilgrid_6x6.ya
     CACHE FILEPATH "Default Kalibr AprilGrid target YAML")
 set(GW_KALIBR_CALIBRATE_SCRIPT "${CMAKE_SOURCE_DIR}/docker/kalibr/calibrate.sh"
     CACHE FILEPATH "Script that wraps colima start + docker run + colima stop")
+set(GW_KALIBR_CALIBRATE_IMU_SCRIPT "${CMAKE_SOURCE_DIR}/docker/kalibr/calibrate_imu.sh"
+    CACHE FILEPATH "Camera-IMU extrinsics script (kalibr_calibrate_imu_camera)")
 if(NOT EXISTS "${GW_KALIBR_TARGET_DEFAULT}")
     message(FATAL_ERROR
         "GW_KALIBR_TARGET_DEFAULT not found at ${GW_KALIBR_TARGET_DEFAULT}")
@@ -218,6 +243,10 @@ endif()
 if(NOT EXISTS "${GW_KALIBR_CALIBRATE_SCRIPT}")
     message(FATAL_ERROR
         "GW_KALIBR_CALIBRATE_SCRIPT not found at ${GW_KALIBR_CALIBRATE_SCRIPT}")
+endif()
+if(NOT EXISTS "${GW_KALIBR_CALIBRATE_IMU_SCRIPT}")
+    message(FATAL_ERROR
+        "GW_KALIBR_CALIBRATE_IMU_SCRIPT not found at ${GW_KALIBR_CALIBRATE_IMU_SCRIPT}")
 endif()
 
 # Sensor pixel pitch (mm) — used by the supervisor to convert per-camera
@@ -230,6 +259,7 @@ target_compile_definitions(gw_server PRIVATE
     GW_KALIBR_DOCKER_IMAGE="${GW_KALIBR_DOCKER_IMAGE}"
     GW_KALIBR_TARGET_DEFAULT="${GW_KALIBR_TARGET_DEFAULT}"
     GW_KALIBR_CALIBRATE_SCRIPT="${GW_KALIBR_CALIBRATE_SCRIPT}"
+    GW_KALIBR_CALIBRATE_IMU_SCRIPT="${GW_KALIBR_CALIBRATE_IMU_SCRIPT}"
     GW_SENSOR_PIXEL_PITCH_MM=${GW_SENSOR_PIXEL_PITCH_MM}
 )
 
@@ -286,6 +316,9 @@ if(GW_BUILD_TESTS)
         tests/test_telemetry_decoder.cpp
         tests/test_measurement_bus.cpp
         tests/test_imu_config_repository.cpp
+        tests/test_calibration_store.cpp
+        tests/test_multi_topic_bag_recorder.cpp
+        tests/test_kalibr_imu_job.cpp
     )
     target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server GTest::gtest_main)
     include(GoogleTest)
