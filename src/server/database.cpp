@@ -55,6 +55,25 @@ constexpr const char* kSchemaTriggerGroups =
     "  created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 
+// Single-row IMU configuration. Noise defaults are BMI088 datasheet values
+// in Kalibr's continuous-time units; the calibration layer applies the
+// customary ×5–10 inflation when generating imu.yaml (datasheet figures are
+// optimistic vs. a sensor bolted to a robot). t_imu_robot_json is the
+// CAD-derived IMU→robot transform consumed when chaining camera extrinsics
+// into the robot frame.
+constexpr const char* kSchemaImuConfig =
+    "CREATE TABLE IF NOT EXISTS imu_config ("
+    "  id                  INTEGER PRIMARY KEY CHECK (id = 1),"
+    "  rate_hz             REAL NOT NULL DEFAULT 400 CHECK (rate_hz > 0),"
+    "  accel_noise_density REAL NOT NULL DEFAULT 1.7e-3,"   // m/s²/√Hz
+    "  accel_random_walk   REAL NOT NULL DEFAULT 4.4e-4,"   // m/s³/√Hz
+    "  gyro_noise_density  REAL NOT NULL DEFAULT 2.4e-4,"   // rad/s/√Hz
+    "  gyro_random_walk    REAL NOT NULL DEFAULT 2.7e-5,"   // rad/s²/√Hz
+    "  t_imu_robot_json    TEXT,"                            // NULL until configured
+    "  updated_at          INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    ");"
+    "INSERT OR IGNORE INTO imu_config (id) VALUES (1);";
+
 }  // namespace
 
 Database::Database(const std::filesystem::path& db_path) {
@@ -74,6 +93,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, "PRAGMA busy_timeout = 2000;");
     exec_or_throw(db_, kSchemaCameras);
     exec_or_throw(db_, kSchemaTriggerGroups);
+    exec_or_throw(db_, kSchemaImuConfig);
 }
 
 void Database::remove_files(const std::filesystem::path& db_path) {

@@ -5,6 +5,7 @@
 #include "server/routes_calibration.hpp"
 #include "server/routes_camera.hpp"
 #include "server/routes_hardware_sync.hpp"
+#include "server/routes_imu.hpp"
 #include "server/routes_status.hpp"
 #include "server/routes_stream.hpp"
 #include "server/static_assets.hpp"
@@ -21,6 +22,7 @@ struct HttpServer::Impl {
          CalibrationSupervisor&                calibration,
          TriggerGroupRepository&               trigger_groups,
          TeensyManager&                        teensy,
+         ImuConfigRepository&                  imu_config,
          std::chrono::steady_clock::time_point started_at)
         : port(p) {
         register_status_routes(app, supervisor, started_at);
@@ -28,6 +30,7 @@ struct HttpServer::Impl {
         register_camera_routes(app, cameras, supervisor);
         register_calibration_routes(app, cameras, calibration);
         register_hardware_sync_routes(app, trigger_groups, teensy);
+        register_imu_routes(app, imu_config, teensy);
         register_static_routes(app);
     }
 };
@@ -38,9 +41,10 @@ HttpServer::HttpServer(uint16_t                              port,
                        CalibrationSupervisor&                calibration,
                        TriggerGroupRepository&               trigger_groups,
                        TeensyManager&                        teensy,
+                       ImuConfigRepository&                  imu_config,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
-                                   trigger_groups, teensy, started_at)) {}
+                                   trigger_groups, teensy, imu_config, started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

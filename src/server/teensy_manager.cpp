@@ -18,6 +18,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include "server/telemetry_decoder.hpp"
+
 namespace gw::server {
 
 namespace {
@@ -25,6 +27,7 @@ namespace {
 constexpr int  kReconnectDelaySec = 3;
 constexpr int  kReadTimeoutMs     = 200;
 constexpr int  kCommandAckMs      = 1000;
+constexpr int  kPingProbeMs       = 500;
 constexpr int  kPulseRingMax      = 256;
 constexpr char kDeviceGlob[]      = "/dev/cu.usbmodem*";
 
@@ -54,7 +57,7 @@ void parse_kv_tokens(std::string_view body, std::unordered_map<std::string, std:
 }  // namespace
 
 struct PinState {
-    std::deque<std::pair<uint32_t, uint32_t>> pulses;  // {teensy_idx, t_us}
+    std::deque<std::pair<uint32_t, uint64_t>> pulses;  // {teensy_idx, t_us}
     std::optional<uint64_t> last_camera_frame_id;
 };
 
@@ -66,6 +69,25 @@ struct TeensyManager::Impl {
     int                        fd = -1;
     std::string                line_buf;
     std::optional<std::string> open_port;
+
+    // Binary telemetry interface (second USB-CDC, fw=2). Absent on fw=1.
+    int                                    telemetry_fd = -1;
+    std::optional<std::string>             telemetry_port;
+    std::chrono::steady_clock::time_point  last_telemetry_attempt{};
+    TelemetryDecoder                       decoder;
+    gw::MeasurementBus<gw::ImuSample>      imu_bus;
+
+    // IMU rate window + heartbeat-derived state. Guarded by status_mu.
+    std::chrono::steady_clock::time_point imu_window_start{};
+    uint64_t                              imu_window_count = 0;
+    double                                imu_rate_hz      = 0.0;
+    std::chrono::steady_clock::time_point imu_last_sample_at{};
+    bool                                  imu_sample_seen = false;
+    bool                                  imu_ok          = false;
+    uint64_t                              imu_fw_drops    = 0;
+    uint64_t                              imu_samples_total = 0;  // mirror of decoder stats
+    uint64_t                              imu_crc_errors    = 0;  // (decoder runs unlocked
+    std::optional<int>                    fw_version;             //  on io_thread)
 
     // Configuration cache (push_config payload). Re-sent after every
     // (re)connect. Guarded by cfg_mu.
@@ -100,19 +122,25 @@ struct TeensyManager::Impl {
 
     void run();
     bool try_connect();
+    void try_connect_telemetry();
     void close_fd();
+    void close_telemetry_fd();
     bool write_line_locked(std::string_view s, std::string& err);
     bool send_command(std::string_view cmd, std::string& err);  // takes cmd_mu
     void handle_incoming_line(std::string_view line);
+    void note_fw_version(std::string_view line);  // parses "fw=<n>" tokens
     bool send_full_config(const std::vector<TeensyManager::GroupConfig>& groups,
                           bool want_armed, std::string& err);
     void resync_config();           // pushes the cfg_mu-stashed snapshot
     void note_error(std::string msg);
+    void setup_decoder_callbacks();
 
     void set_group_pins(const std::vector<TeensyManager::GroupConfig>& groups);
 };
 
-TeensyManager::TeensyManager()  : impl_(std::make_unique<Impl>()) {}
+TeensyManager::TeensyManager()  : impl_(std::make_unique<Impl>()) {
+    impl_->setup_decoder_callbacks();
+}
 TeensyManager::~TeensyManager() { stop(); }
 
 void TeensyManager::start() {
@@ -125,7 +153,12 @@ void TeensyManager::stop() {
     if (!impl_->io_thread.joinable()) return;
     impl_->stop_flag.store(true);
     impl_->io_thread.join();
+    impl_->close_telemetry_fd();
     impl_->close_fd();
+}
+
+gw::MeasurementBus<gw::ImuSample>& TeensyManager::imu_bus() {
+    return impl_->imu_bus;
 }
 
 TeensyManager::Status TeensyManager::status() const {
@@ -136,10 +169,23 @@ TeensyManager::Status TeensyManager::status() const {
     s.armed       = impl_->armed;
     s.total_pulses = impl_->total_pulses;
     s.last_error  = impl_->last_error;
+    s.fw_version  = impl_->fw_version;
     if (impl_->last_pulse_seen) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - impl_->last_pulse_at).count();
         s.last_pulse_age_ms = ms;
+    }
+
+    s.telemetry_connected = impl_->telemetry_port.has_value();
+    s.imu_ok              = impl_->imu_ok;
+    s.imu_rate_hz         = impl_->imu_rate_hz;
+    s.imu_samples         = impl_->imu_samples_total;
+    s.imu_fw_drops        = impl_->imu_fw_drops;
+    s.imu_crc_errors      = impl_->imu_crc_errors;
+    if (impl_->imu_sample_seen) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - impl_->imu_last_sample_at).count();
+        s.imu_last_sample_age_ms = ms;
     }
     return s;
 }
@@ -237,7 +283,7 @@ uint64_t TeensyManager::pop_pulse_ns(uint8_t pin, uint64_t camera_frame_id) {
     (void)idx;
     state.pulses.pop_front();
     state.last_camera_frame_id = camera_frame_id;
-    return static_cast<uint64_t>(t_us) * 1000ull;
+    return t_us * 1000ull;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +293,7 @@ uint64_t TeensyManager::pop_pulse_ns(uint8_t pin, uint64_t camera_frame_id) {
 void TeensyManager::Impl::run() {
     while (!stop_flag.load(std::memory_order_acquire)) {
         if (fd < 0) {
+            close_telemetry_fd();
             if (!try_connect()) {
                 std::this_thread::sleep_for(std::chrono::seconds(kReconnectDelaySec));
                 continue;
@@ -259,9 +306,16 @@ void TeensyManager::Impl::run() {
                 resync_config();
             }).detach();
         }
+        if (telemetry_fd < 0) try_connect_telemetry();
 
-        struct pollfd pfd{ fd, POLLIN, 0 };
-        const int pr = ::poll(&pfd, 1, kReadTimeoutMs);
+        struct pollfd pfds[2];
+        pfds[0] = { fd, POLLIN, 0 };
+        nfds_t nfds = 1;
+        if (telemetry_fd >= 0) {
+            pfds[1] = { telemetry_fd, POLLIN, 0 };
+            nfds = 2;
+        }
+        const int pr = ::poll(pfds, nfds, kReadTimeoutMs);
         if (pr < 0) {
             if (errno == EINTR) continue;
             note_error(std::string("poll: ") + std::strerror(errno));
@@ -269,78 +323,178 @@ void TeensyManager::Impl::run() {
             continue;
         }
         if (pr == 0) continue;
-        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+
+        // Command/TRIG interface (ASCII lines).
+        if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
             note_error("serial disconnected");
             close_fd();
             continue;
         }
-        if (!(pfd.revents & POLLIN)) continue;
-
-        char chunk[256];
-        const ssize_t n = ::read(fd, chunk, sizeof(chunk));
-        if (n <= 0) {
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-            note_error("serial read EOF");
-            close_fd();
-            continue;
-        }
-        for (ssize_t i = 0; i < n; ++i) {
-            const char c = chunk[i];
-            if (c == '\r') continue;
-            if (c == '\n') {
-                if (!line_buf.empty()) handle_incoming_line(line_buf);
-                line_buf.clear();
-                continue;
+        if (pfds[0].revents & POLLIN) {
+            char chunk[256];
+            const ssize_t n = ::read(fd, chunk, sizeof(chunk));
+            if (n <= 0) {
+                if (!(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+                    note_error("serial read EOF");
+                    close_fd();
+                    continue;
+                }
             }
-            if (line_buf.size() < 1024) line_buf.push_back(c);
+            for (ssize_t i = 0; i < n; ++i) {
+                const char c = chunk[i];
+                if (c == '\r') continue;
+                if (c == '\n') {
+                    if (!line_buf.empty()) handle_incoming_line(line_buf);
+                    line_buf.clear();
+                    continue;
+                }
+                if (line_buf.size() < 1024) line_buf.push_back(c);
+            }
+        }
+
+        // Telemetry interface (binary frames). Telemetry loss is not fatal
+        // to triggering — close just this fd and retry.
+        if (nfds == 2) {
+            if (pfds[1].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+                close_telemetry_fd();
+            } else if (pfds[1].revents & POLLIN) {
+                uint8_t chunk[1024];
+                const ssize_t n = ::read(telemetry_fd, chunk, sizeof(chunk));
+                if (n <= 0) {
+                    if (!(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+                        close_telemetry_fd();
+                    }
+                } else {
+                    decoder.feed(chunk, static_cast<size_t>(n));
+                    std::lock_guard lk(status_mu);
+                    imu_samples_total = decoder.stats().imu_samples;
+                    imu_crc_errors    = decoder.stats().crc_errors;
+                }
+            }
         }
     }
 }
 
-bool TeensyManager::Impl::try_connect() {
-    glob_t gl{};
-    if (::glob(kDeviceGlob, 0, nullptr, &gl) != 0) return false;
-    std::optional<std::string> picked;
-    for (size_t i = 0; i < gl.gl_pathc; ++i) {
-        picked = gl.gl_pathv[i];
-        break;  // first match wins; user can plug in just the Teensy if there
-                // are multiple CDC devices around.
-    }
-    ::globfree(&gl);
-    if (!picked) return false;
+namespace {
 
-    const int candidate = ::open(picked->c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (candidate < 0) {
-        note_error("open " + *picked + ": " + std::strerror(errno));
-        return false;
-    }
-    // termios: raw 8N1, no flow control, no canonical processing.
+// Open a serial device raw 8N1, no flow control, non-blocking. Returns -1
+// on failure. USB-CDC ignores the configured baud; pick a standard rate so
+// termios is happy — the actual link is 12/480 Mbps USB.
+int open_serial(const std::string& path) {
+    const int candidate = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (candidate < 0) return -1;
     termios tio{};
     if (::tcgetattr(candidate, &tio) != 0) {
         ::close(candidate);
-        return false;
+        return -1;
     }
     cfmakeraw(&tio);
     tio.c_cflag |=  CLOCAL | CREAD;
     tio.c_cflag &= ~CRTSCTS;
     tio.c_cc[VMIN]  = 0;
     tio.c_cc[VTIME] = 0;
-    // USB-CDC ignores the configured baud; pick a standard rate so termios is
-    // happy. The actual link is 12 Mbps full-speed or 480 Mbps high-speed USB.
     cfsetispeed(&tio, B115200);
     cfsetospeed(&tio, B115200);
     ::tcsetattr(candidate, TCSANOW, &tio);
+    return candidate;
+}
 
-    fd        = candidate;
-    open_port = *picked;
-    line_buf.clear();
-    {
-        std::lock_guard lk(status_mu);
-        connected  = true;
-        last_error.reset();
+std::vector<std::string> glob_devices() {
+    std::vector<std::string> out;
+    glob_t gl{};
+    if (::glob(kDeviceGlob, 0, nullptr, &gl) == 0) {
+        for (size_t i = 0; i < gl.gl_pathc; ++i) out.emplace_back(gl.gl_pathv[i]);
     }
-    std::cerr << "TeensyManager: connected " << *picked << "\n";
-    return true;
+    ::globfree(&gl);
+    return out;
+}
+
+// Writes PING and waits up to kPingProbeMs for a PONG line. Only the ASCII
+// command interface answers — the binary telemetry interface never parses
+// input, so this distinguishes the two CDC interfaces of one Teensy (and
+// rejects unrelated usbmodem devices). Returns the matched PONG line via
+// `pong_line` for fw-version extraction.
+bool probe_command_port(int fd, std::string& pong_line) {
+    const char ping[] = "PING\n";
+    if (::write(fd, ping, sizeof(ping) - 1) != static_cast<ssize_t>(sizeof(ping) - 1)) {
+        return false;
+    }
+    std::string acc;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kPingProbeMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        struct pollfd pfd{ fd, POLLIN, 0 };
+        const int pr = ::poll(&pfd, 1, 50);
+        if (pr < 0 && errno != EINTR) return false;
+        if (pr <= 0 || !(pfd.revents & POLLIN)) continue;
+        char chunk[256];
+        const ssize_t n = ::read(fd, chunk, sizeof(chunk));
+        if (n <= 0) continue;
+        acc.append(chunk, static_cast<size_t>(n));
+        size_t pos = 0, nl;
+        while ((nl = acc.find('\n', pos)) != std::string::npos) {
+            std::string_view line = trim(std::string_view(acc).substr(pos, nl - pos));
+            if (line.substr(0, 4) == "PONG") {
+                pong_line = std::string(line);
+                return true;
+            }
+            pos = nl + 1;
+        }
+        acc.erase(0, pos);
+        if (acc.size() > 4096) acc.clear();  // binary noise — keep bounded
+    }
+    return false;
+}
+
+}  // namespace
+
+bool TeensyManager::Impl::try_connect() {
+    for (const auto& path : glob_devices()) {
+        const int candidate = open_serial(path);
+        if (candidate < 0) continue;
+        std::string pong;
+        if (!probe_command_port(candidate, pong)) {
+            ::close(candidate);
+            continue;
+        }
+        fd        = candidate;
+        open_port = path;
+        line_buf.clear();
+        {
+            std::lock_guard lk(status_mu);
+            connected = true;
+            last_error.reset();
+        }
+        note_fw_version(pong);
+        std::cerr << "TeensyManager: connected " << path << " (" << pong << ")\n";
+        return true;
+    }
+    return false;
+}
+
+void TeensyManager::Impl::try_connect_telemetry() {
+    if (fd < 0 || !open_port) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_telemetry_attempt < std::chrono::seconds(kReconnectDelaySec)) return;
+    last_telemetry_attempt = now;
+
+    // The two CDC interfaces of one Teensy enumerate as sibling device nodes
+    // differing only in the trailing interface digit (e.g. …01 / …03).
+    for (const auto& path : glob_devices()) {
+        if (path == *open_port) continue;
+        if (path.size() != open_port->size()) continue;
+        if (path.compare(0, path.size() - 1, *open_port, 0,
+                         open_port->size() - 1) != 0) continue;
+        const int candidate = open_serial(path);
+        if (candidate < 0) continue;
+        telemetry_fd = candidate;
+        {
+            std::lock_guard lk(status_mu);
+            telemetry_port = path;
+        }
+        std::cerr << "TeensyManager: telemetry connected " << path << "\n";
+        return;
+    }
 }
 
 void TeensyManager::Impl::close_fd() {
@@ -350,6 +504,49 @@ void TeensyManager::Impl::close_fd() {
     std::lock_guard lk(status_mu);
     connected = false;
     armed     = false;
+}
+
+void TeensyManager::Impl::close_telemetry_fd() {
+    if (telemetry_fd >= 0) ::close(telemetry_fd);
+    telemetry_fd = -1;
+    std::lock_guard lk(status_mu);
+    telemetry_port.reset();
+    imu_ok          = false;
+    imu_rate_hz     = 0.0;
+    imu_window_count = 0;
+    imu_sample_seen = false;
+}
+
+void TeensyManager::Impl::setup_decoder_callbacks() {
+    decoder.on_imu = [this](const gw::ImuSample& s) {
+        imu_bus.publish(s);
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lk(status_mu);
+        imu_last_sample_at = now;
+        imu_sample_seen    = true;
+        if (imu_window_count == 0) imu_window_start = now;
+        ++imu_window_count;
+        const auto elapsed = now - imu_window_start;
+        if (elapsed >= std::chrono::seconds(1)) {
+            imu_rate_hz = static_cast<double>(imu_window_count) /
+                          std::chrono::duration<double>(elapsed).count();
+            imu_window_count = 0;
+        }
+    };
+    decoder.on_heartbeat = [this](const TelemetryDecoder::Heartbeat& hb) {
+        std::lock_guard lk(status_mu);
+        imu_ok       = hb.imu_ok;
+        imu_fw_drops = hb.imu_drops;
+    };
+}
+
+void TeensyManager::Impl::note_fw_version(std::string_view line) {
+    const size_t pos = line.find("fw=");
+    if (pos == std::string_view::npos) return;
+    const int v = std::atoi(std::string(line.substr(pos + 3)).c_str());
+    if (v <= 0) return;
+    std::lock_guard lk(status_mu);
+    fw_version = v;
 }
 
 bool TeensyManager::Impl::write_line_locked(std::string_view s, std::string& err) {
@@ -411,7 +608,9 @@ void TeensyManager::Impl::handle_incoming_line(std::string_view line) {
             pins = pit->second;
         }
         const uint32_t idx  = static_cast<uint32_t>(std::strtoul(i_it->second.c_str(), nullptr, 10));
-        const uint32_t t_us = static_cast<uint32_t>(std::strtoul(t_it->second.c_str(), nullptr, 10));
+        // fw=2 sends a wrap-extended 64-bit microsecond timestamp; fw=1 sent
+        // raw 32-bit micros(). Parsing as u64 accepts both wire formats.
+        const uint64_t t_us = std::strtoull(t_it->second.c_str(), nullptr, 10);
         {
             std::lock_guard lk(pulses_mu);
             for (auto p : pins) {
@@ -440,7 +639,8 @@ void TeensyManager::Impl::handle_incoming_line(std::string_view line) {
     }
 
     // READY / PONG / STATUS / GROUP lines are informational right now.
-    if (line.substr(0, 6) == "READY ") {
+    if (line.substr(0, 6) == "READY " || line.substr(0, 5) == "PONG ") {
+        note_fw_version(line);
         std::cerr << "TeensyManager: " << line << "\n";
         return;
     }

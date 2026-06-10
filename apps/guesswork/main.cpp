@@ -13,6 +13,7 @@
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
 #include "server/http_server.hpp"
+#include "server/imu_config_repository.hpp"
 #include "server/teensy_manager.hpp"
 #include "server/trigger_group_repository.hpp"
 
@@ -67,6 +68,7 @@ int main(int argc, char** argv) {
     gw::server::Database               database(db_path);
     gw::server::CameraRepository       cameras(database);
     gw::server::TriggerGroupRepository trigger_groups(database);
+    gw::server::ImuConfigRepository    imu_config(database);
     gw::server::TeensyManager          teensy;
     teensy.start();
     std::cerr << "guesswork: database at " << db_path << "\n";
@@ -94,7 +96,7 @@ int main(int argc, char** argv) {
     std::cerr << "guesswork: listening on http://localhost:" << cli.port << "\n";
 
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
-                                  trigger_groups, teensy, started_at);
+                                  trigger_groups, teensy, imu_config, started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;

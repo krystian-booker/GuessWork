@@ -7,7 +7,7 @@
 // Line-based ASCII protocol over the Teensy's USB-CDC `Serial` interface.
 //
 // Host → Teensy commands (one per line, '\n' terminated, '\r' ignored):
-//   PING                                       -> "PONG fw=1"
+//   PING                                       -> "PONG fw=2"
 //   STATUS                                     -> one or more lines, ends with "OK"
 //   CFG_CLEAR                                  -> "OK" (stops first if armed)
 //   CFG name=<g> fps=<f> pins=<1,3,4>          -> "OK" or "ERR <msg>"
@@ -18,7 +18,12 @@
 //   TRIG g=<name> idx=<n> t_us=<u>            -> one per rising edge per group
 //
 // Boot greeting:
-//   READY fw=1 outputs=6
+//   READY fw=2 outputs=6
+//
+// fw=2 changes vs fw=1: t_us in TRIG lines is a wrap-extended 64-bit
+// microsecond value (see time64.h) instead of raw 32-bit micros(); binary
+// telemetry (IMU/odometry) streams on the second USB-CDC interface (see
+// binary_proto.h). The ASCII command surface is unchanged.
 //
 // Parsing is allocation-free: a single 256-byte line buffer accumulates the
 // command, then a small inline tokenizer reads `key=value` pairs.
@@ -26,7 +31,7 @@
 namespace gw_fw {
 
 constexpr int     kSerialLineBufLen = 256;
-constexpr uint8_t kFirmwareVersion  = 1;
+constexpr uint8_t kFirmwareVersion  = 2;
 
 class SerialProto {
 public:

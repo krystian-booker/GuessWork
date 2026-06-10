@@ -30,7 +30,7 @@ constexpr uint32_t kPulseWidthUs = 100;
 
 struct PulseEvent {
     uint32_t idx;     // group-local rising-edge counter, starts at 1 after arm()
-    uint32_t t_us;    // micros() captured at the rising edge
+    uint64_t t_us;    // wrap-extended micros() captured at the rising edge (time64.h)
 };
 
 class TriggerEngine {

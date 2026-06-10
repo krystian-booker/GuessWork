@@ -173,7 +173,10 @@ add_library(gw_server
     src/server/database.cpp
     src/server/camera_repository.cpp
     src/server/trigger_group_repository.cpp
+    src/server/imu_config_repository.cpp
+    src/server/routes_imu.cpp
     src/server/teensy_manager.cpp
+    src/server/telemetry_decoder.cpp
 )
 target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 
@@ -280,6 +283,9 @@ if(GW_BUILD_TESTS)
         tests/test_rosbag_writer.cpp
         tests/test_rosbag_recording_consumer.cpp
         tests/test_subprocess_job.cpp
+        tests/test_telemetry_decoder.cpp
+        tests/test_measurement_bus.cpp
+        tests/test_imu_config_repository.cpp
     )
     target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server GTest::gtest_main)
     include(GoogleTest)

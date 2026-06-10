@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "time64.h"
+
 namespace gw_fw {
 
 TriggerEngine* TriggerEngine::s_self_ = nullptr;
@@ -100,7 +102,7 @@ void TriggerEngine::on_group_fire(int i) {
 
     // Latch the timestamp BEFORE driving the pins so we report what the
     // host actually saw arrive at the camera, not the time after the spin.
-    const uint32_t t_us = micros();
+    const uint64_t t_us = now_us64();
     const uint32_t idx  = ++g.pulse_idx;
 
     // Rising edge — drive every pin in the mask HIGH simultaneously, hold

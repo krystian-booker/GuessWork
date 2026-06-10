@@ -11,6 +11,7 @@ class CameraSupervisor;
 class CalibrationSupervisor;
 class TriggerGroupRepository;
 class TeensyManager;
+class ImuConfigRepository;
 
 // Thin wrapper around a Crow application. The Crow SDK headers are heavyweight
 // (asio, boost-style metaprogramming) so we hide them behind a Pimpl: consumers
@@ -23,6 +24,7 @@ public:
                CalibrationSupervisor&                calibration,
                TriggerGroupRepository&               trigger_groups,
                TeensyManager&                        teensy,
+               ImuConfigRepository&                  imu_config,
                std::chrono::steady_clock::time_point started_at);
     ~HttpServer();
 
