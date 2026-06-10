@@ -196,6 +196,42 @@ std::string serialize_single_camera(const CamchainEntry& entry) {
     return out.str();
 }
 
+std::optional<GuessworkMeta> parse_guesswork_meta(const std::string& yaml_text) {
+    YAML::Node root;
+    try {
+        root = YAML::Load(yaml_text);
+    } catch (const YAML::Exception& e) {
+        throw CalibrationParseError(std::string("guesswork_meta: invalid YAML: ") +
+                                    e.what());
+    }
+    if (!root.IsMap()) return std::nullopt;
+    const auto meta = root["guesswork_meta"];
+    if (!meta || !meta.IsMap()) return std::nullopt;
+
+    GuessworkMeta out;
+    const auto get_d = [&](const char* key) -> std::optional<double> {
+        const auto n = meta[key];
+        if (!n) return std::nullopt;
+        try {
+            return n.as<double>();
+        } catch (const YAML::Exception&) {
+            return std::nullopt;  // tolerate malformed individual fields
+        }
+    };
+    if (const auto n = meta["session_id"]) {
+        try { out.session_id = n.as<std::string>(); } catch (const YAML::Exception&) {}
+    }
+    out.reprojection_error_px        = get_d("reprojection_error_px");
+    out.reprojection_error_mean_px   = get_d("reprojection_error_mean_px");
+    out.reprojection_error_median_px = get_d("reprojection_error_median_px");
+    out.reprojection_error_std_px    = get_d("reprojection_error_std_px");
+    out.timeshift_cam_imu_s          = get_d("timeshift_cam_imu_s");
+    if (const auto n = meta["source_cam_index"]) {
+        try { out.source_cam_index = n.as<int>(); } catch (const YAML::Exception&) {}
+    }
+    return out;
+}
+
 Mat4 parse_t_robot_imu(const std::string& json_text) {
     YAML::Node root;
     try {

@@ -71,6 +71,23 @@ std::string serialize_camchain(const Camchain& chain);
 // position in the chain — the uniform shape stored per camera row.
 std::string serialize_single_camera(const CamchainEntry& entry);
 
+// The guesswork_meta block our Kalibr jobs append to stored calibration
+// YAML (quality + provenance). All fields optional — older calibrations
+// predate some of them.
+struct GuessworkMeta {
+    std::optional<std::string> session_id;
+    std::optional<double>      reprojection_error_px;        // intrinsics RMS
+    std::optional<double>      reprojection_error_mean_px;   // imucam per-cam
+    std::optional<double>      reprojection_error_median_px;
+    std::optional<double>      reprojection_error_std_px;
+    std::optional<double>      timeshift_cam_imu_s;
+    std::optional<int>         source_cam_index;
+};
+
+// nullopt when the document has no guesswork_meta block. Throws
+// CalibrationParseError only on invalid YAML.
+std::optional<GuessworkMeta> parse_guesswork_meta(const std::string& yaml_text);
+
 // imu_config.t_imu_robot_json schema (defined here, Phase 3):
 //   {"T_robot_imu": [[r00,r01,r02,t0], [...], [...], [0,0,0,1]]}
 // 4×4 row-major homogeneous transform mapping IMU-frame points into the

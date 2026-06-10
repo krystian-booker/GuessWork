@@ -19,6 +19,8 @@
 #include "server/routes_apriltag.hpp"
 #include "server/teensy_manager.hpp"
 #include "server/trigger_group_repository.hpp"
+#include "server/vio_config_repository.hpp"
+#include "server/vio_supervisor.hpp"
 
 namespace {
 
@@ -91,12 +93,21 @@ int main(int argc, char** argv) {
             return apriltag.make_consumer(row);
         });
 
+    // OpenVINS stereo VIO: per-camera feeder consumers ride the same slot
+    // lifecycle; the runner itself lives in the supervisor and is gated on
+    // calibration quality.
+    gw::server::VioConfigRepository vio_config(database);
+    gw::server::VioSupervisor vio(cameras, imu_config, vio_config, teensy);
+    supervisor.register_consumer_factory(
+        [&vio](const gw::server::Camera& row) { return vio.make_consumer(row); });
+
     try {
         supervisor.start();
     } catch (const std::exception& e) {
         std::cerr << "guesswork: supervisor start failed: " << e.what() << "\n";
         return 1;
     }
+    vio.reload();  // evaluate gating once the boot-time slots are up
 
     const auto calibration_root = gw::server::Database::data_dir() / "calibrations";
     gw::server::CalibrationSupervisor calibration(supervisor, cameras, teensy,
@@ -112,7 +123,8 @@ int main(int argc, char** argv) {
 
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
                                   trigger_groups, teensy, imu_config,
-                                  field_layouts, apriltag, started_at);
+                                  field_layouts, apriltag, vio, vio_config,
+                                  started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;

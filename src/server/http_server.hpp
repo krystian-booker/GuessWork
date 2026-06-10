@@ -14,6 +14,8 @@ class TeensyManager;
 class ImuConfigRepository;
 class FieldLayoutRepository;
 class ApriltagSupervisor;
+class VioSupervisor;
+class VioConfigRepository;
 
 // Thin wrapper around a Crow application. The Crow SDK headers are heavyweight
 // (asio, boost-style metaprogramming) so we hide them behind a Pimpl: consumers
@@ -29,6 +31,8 @@ public:
                ImuConfigRepository&                  imu_config,
                FieldLayoutRepository&                field_layouts,
                ApriltagSupervisor&                   apriltag,
+               VioSupervisor&                        vio,
+               VioConfigRepository&                  vio_config,
                std::chrono::steady_clock::time_point started_at);
     ~HttpServer();
 

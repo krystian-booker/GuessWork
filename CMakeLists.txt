@@ -219,6 +219,29 @@ target_link_libraries(gw_apriltag
 target_include_directories(gw_apriltag PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # ----------------------------------------------------------------------------
+# VIO library (OpenVINS stereo+IMU MSCKF, built from source — see
+# cmake/openvins.cmake for the pin and the macOS arm64 fixes). OpenVINS is
+# GPL-3.0; distributed guesswork binaries are effectively GPLv3.
+# ----------------------------------------------------------------------------
+find_package(Eigen3 REQUIRED)
+# VioManager.h pulls in boost/filesystem.hpp — our TUs need the headers (the
+# OpenVINS dylib itself already links the Boost libraries).
+find_package(Boost REQUIRED COMPONENTS filesystem)
+include(${CMAKE_SOURCE_DIR}/cmake/openvins.cmake)
+
+add_library(gw_vio
+    src/vio/stereo_sync_consumer.cpp
+    src/vio/vio_config_builder.cpp
+    src/vio/openvins_runner.cpp
+)
+target_include_directories(gw_vio PUBLIC src)
+target_link_libraries(gw_vio
+    PUBLIC  gw_core gw_calibration gw_apriltag
+    PRIVATE ov_msckf_lib Eigen3::Eigen Boost::filesystem ${OpenCV_LIBS}
+)
+target_include_directories(gw_vio PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# ----------------------------------------------------------------------------
 # HTTP server library
 # ----------------------------------------------------------------------------
 add_library(gw_server
@@ -244,10 +267,13 @@ add_library(gw_server
     src/server/field_layout_repository.cpp
     src/server/apriltag_supervisor.cpp
     src/server/routes_apriltag.cpp
+    src/server/vio_config_repository.cpp
+    src/server/vio_supervisor.cpp
+    src/server/routes_vio.cpp
     src/server/teensy_manager.cpp
     src/server/telemetry_decoder.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag gw_vio Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -377,8 +403,11 @@ if(GW_BUILD_TESTS)
         tests/test_tag_pose_estimator.cpp
         tests/test_apriltag_consumer.cpp
         tests/test_field_layout_repository.cpp
+        tests/test_stereo_sync_pairer.cpp
+        tests/test_vio_config_builder.cpp
+        tests/test_vio_config_repository.cpp
     )
-    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag GTest::gtest_main)
+    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag gw_vio GTest::gtest_main)
     # The estimator tests build synthetic projections with OpenCV directly,
     # the consumer test renders a real tag bitmap via the apriltag library,
     # and the field-layout test parses the shipped season fixture.

@@ -97,6 +97,28 @@ constexpr const char* kSchemaImuConfig =
     ");"
     "INSERT OR IGNORE INTO imu_config (id) VALUES (1);";
 
+// Single-row VIO (OpenVINS) configuration. Tunables only — which cameras
+// participate is driven by cameras.role ('vio_left'/'vio_right'), and the
+// noise model comes from imu_config.
+constexpr const char* kSchemaVioConfig =
+    "CREATE TABLE IF NOT EXISTS vio_config ("
+    "  id                   INTEGER PRIMARY KEY CHECK (id = 1),"
+    "  enabled              INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),"
+    "  num_pts              INTEGER NOT NULL DEFAULT 150 CHECK (num_pts BETWEEN 50 AND 400),"
+    "  fast_threshold       INTEGER NOT NULL DEFAULT 20 CHECK (fast_threshold BETWEEN 5 AND 100),"
+    // CPU lever: pyrDown the images + halve intrinsics before tracking.
+    "  downsample           INTEGER NOT NULL DEFAULT 1 CHECK (downsample IN (0,1)),"
+    // Calibration-quality gate: reject extrinsics whose Kalibr per-camera
+    // reprojection std exceeds this (bad calibration silently destroys VIO).
+    "  max_reproj_std_px    REAL NOT NULL DEFAULT 1.0 CHECK (max_reproj_std_px > 0),"
+    "  auto_reinit          INTEGER NOT NULL DEFAULT 1 CHECK (auto_reinit IN (0,1)),"
+    "  reinit_min_features  INTEGER NOT NULL DEFAULT 15 CHECK (reinit_min_features > 0),"
+    "  reinit_window_frames INTEGER NOT NULL DEFAULT 15 CHECK (reinit_window_frames > 0),"
+    "  reinit_max_pos_std_m REAL NOT NULL DEFAULT 2.0 CHECK (reinit_max_pos_std_m > 0),"
+    "  updated_at           INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    ");"
+    "INSERT OR IGNORE INTO vio_config (id) VALUES (1);";
+
 }  // namespace
 
 Database::Database(const std::filesystem::path& db_path) {
@@ -118,6 +140,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, kSchemaTriggerGroups);
     exec_or_throw(db_, kSchemaFieldLayouts);
     exec_or_throw(db_, kSchemaImuConfig);
+    exec_or_throw(db_, kSchemaVioConfig);
 }
 
 void Database::remove_files(const std::filesystem::path& db_path) {
