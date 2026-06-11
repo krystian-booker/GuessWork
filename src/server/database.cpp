@@ -131,6 +131,33 @@ constexpr const char* kSchemaCanConfig =
     ");"
     "INSERT OR IGNORE INTO can_config (id) VALUES (1);";
 
+// Single-row fusion (GTSAM fixed-lag smoother) configuration. Sigma units:
+// odom_sigma_* are 1σ velocity error (m/s, rad/s — interval noise scales
+// linearly with dt); vio_sigma_* are random-walk densities (rad/√s, m/√s).
+constexpr const char* kSchemaFusionConfig =
+    "CREATE TABLE IF NOT EXISTS fusion_config ("
+    "  id                   INTEGER PRIMARY KEY CHECK (id = 1),"
+    "  enabled              INTEGER NOT NULL DEFAULT 1     CHECK (enabled IN (0,1)),"
+    "  lag_s                REAL    NOT NULL DEFAULT 2.0   CHECK (lag_s BETWEEN 0.5 AND 10.0),"
+    "  min_state_dt_ms      INTEGER NOT NULL DEFAULT 25    CHECK (min_state_dt_ms BETWEEN 5 AND 200),"
+    "  output_hz            INTEGER NOT NULL DEFAULT 100   CHECK (output_hz BETWEEN 10 AND 200),"
+    "  max_extrapolation_ms INTEGER NOT NULL DEFAULT 150   CHECK (max_extrapolation_ms BETWEEN 0 AND 1000),"
+    "  tag_gate_chi2        REAL    NOT NULL DEFAULT 22.46 CHECK (tag_gate_chi2 > 0),"
+    "  tag_huber_k          REAL    NOT NULL DEFAULT 1.345 CHECK (tag_huber_k > 0),"
+    "  vio_huber_k          REAL    NOT NULL DEFAULT 1.345 CHECK (vio_huber_k > 0),"
+    "  odom_cauchy_k        REAL    NOT NULL DEFAULT 0.5   CHECK (odom_cauchy_k > 0),"
+    "  odom_sigma_vx        REAL    NOT NULL DEFAULT 0.05  CHECK (odom_sigma_vx > 0),"
+    "  odom_sigma_vy        REAL    NOT NULL DEFAULT 0.05  CHECK (odom_sigma_vy > 0),"
+    "  odom_sigma_omega     REAL    NOT NULL DEFAULT 0.05  CHECK (odom_sigma_omega > 0),"
+    "  vio_sigma_rot        REAL    NOT NULL DEFAULT 0.01  CHECK (vio_sigma_rot > 0),"
+    "  vio_sigma_trans      REAL    NOT NULL DEFAULT 0.01  CHECK (vio_sigma_trans > 0),"
+    "  collision_inflation  REAL    NOT NULL DEFAULT 10.0  CHECK (collision_inflation >= 1.0),"
+    "  collision_window     INTEGER NOT NULL DEFAULT 20    CHECK (collision_window BETWEEN 5 AND 200),"
+    "  reinit_pos_std_m     REAL    NOT NULL DEFAULT 1.0   CHECK (reinit_pos_std_m > 0),"
+    "  updated_at           INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    ");"
+    "INSERT OR IGNORE INTO fusion_config (id) VALUES (1);";
+
 }  // namespace
 
 Database::Database(const std::filesystem::path& db_path) {
@@ -154,6 +181,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, kSchemaImuConfig);
     exec_or_throw(db_, kSchemaVioConfig);
     exec_or_throw(db_, kSchemaCanConfig);
+    exec_or_throw(db_, kSchemaFusionConfig);
 }
 
 void Database::remove_files(const std::filesystem::path& db_path) {

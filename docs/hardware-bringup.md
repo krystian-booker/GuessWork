@@ -1,6 +1,6 @@
 # GuessWork — Implementation Status & Hardware Bring-Up Plan
 
-*Last updated: 2026-06-11 (Phases 1–5 complete)*
+*Last updated: 2026-06-11 (Phases 1–6 complete)*
 
 GuessWork is the onboard pose-estimation system for an FRC robot: a Mac Mini M4
 runs 6 hardware-synced FLIR Chameleon3 cameras (4 AprilTag + 2 stereo VIO), a
@@ -77,8 +77,16 @@ used for estimation math.
 Protocol reference: **`docs/can-protocol.md`** (frame layouts, ID map,
 time-sync scheme, controller-side WPILib sketch).
 
-**Test totals:** 204/204 passing. Phases 6 (GTSAM fusion) and 7 (hardening)
-are planned but not yet implemented.
+### Phase 6 — GTSAM fusion engine
+| Piece | Status |
+|---|---|
+| `gw_fusion`: IncrementalFixedLagSmoother (GTSAM 4.3a1 from source, Boost-free) fusing tag priors (Mahalanobis-gated + Huber), VIO equal-epoch deltas (robot-frame conjugation + Adjoint cov transport, lazily attached to in-lag keys), chassis-speeds twist betweens (Cauchy, slip-robust, soft planarity) | ✅ **hardware-free simulation suite**: figure-8 truth, clean-run RMSE < 5 cm / < 2°, 10 % outlier tags rejected, collision detect+recover, VIO death degradation, epoch-reset safety, tag drought > lag, std-explosion reinit |
+| Medoid init, collision monitor (gate-open + noise inflation), auto-reinit (pos-std / solver throw / NaN / unresolved collision), connectivity bridge factors, solve-time p95 tracking | ✅ unit-tested via the same suite |
+| `FusionSupervisor` (3 bus drainers → engine thread → output thread), `TeensyNowEstimator`, planar extrapolation → `TeensyManager::send_pose` at `output_hz` | ✅ unit-tested (estimator, extrapolation) + live-server verified (boot gating, config round-trip incl. `restarted` semantics, reset, clean SIGINT joins) |
+| Fused pose accuracy on a real field course; solve-time budget under real measurement rates; VIO-kill / collision behavior on hardware | ⬜ **hardware-pending** (Stage 7 — needs the full rig) |
+
+**Test totals:** 228/228 passing. Phase 7 (hardening) is planned but not yet
+implemented.
 
 ---
 
@@ -108,6 +116,9 @@ interface or a real-world signal path:
    `RioClockSync` health/drift on real crystals, the FPGA u32 time wrap,
    pose downlink on the controller, and the (unofficial) classic↔fd runtime
    mode switch.
+10. **Fused pose on a real course** — waypoint accuracy against a tape
+    measure, solve-time budget at real measurement rates, VIO-kill
+    degradation and physical collision/jostle behavior.
 
 ### Equipment checklist
 
@@ -276,21 +287,52 @@ at 100 Hz with `RobotController.getFPGATime()` and a pose listener on
 **Pass:** steps 2–6 green; the headline numbers to record are the sync
 `drift_ppm` and the offset stability band.
 
+### Stage 7 — Fusion field course (after Stages 3, 4, and 6 pass)
+
+Requires: ≥2 calibrated AprilTag cameras + the stereo VIO rig + IMU + the
+CAN bench (chassis speeds flowing). Tape a small course (3×3 m is enough)
+with 4–6 printed tags at surveyed positions entered as a custom field layout;
+mark 5+ waypoints with tape-measured field coordinates.
+
+1. All sources up: `GET /api/fusion/status` → `initialized: true` within a
+   second of tags being visible, `sources.*` rates live, `solve_ms.p95` well
+   under `min_state_dt_ms` (25 ms).
+2. **Waypoint accuracy:** park the robot on each waypoint → fused
+   `pose.x_m/y_m` within **±3 cm** and heading within **±2°** of the tape
+   measurements. Watch `quality` sit high (> 200).
+3. **Motion:** push the robot around the course at walking pace —
+   `tag.rejected_gate` stays near zero, no `reinits`, pose tracks visibly in
+   the status output.
+4. **VIO kill:** cover the stereo cameras (or `PUT /api/vio/config
+   {"enabled":false}`) mid-run → fusion continues on tags + chassis speeds;
+   `sources.vio.rate_hz` drops to 0, no reinit, accuracy degrades but stays
+   bounded.
+5. **Collision:** physically jolt/slide the robot (wheels not rolling) →
+   `collision_mode: true` within ~1 s, pose snaps to the tag solution within
+   2 s, collision mode clears, `reinits` unchanged.
+6. **Tag blackout:** cover all tags > 5 s → `quality` decays, no exception;
+   uncover → recovery within a second.
+7. **Downlink:** confirm the RIO test program sees the fused pose at
+   `output_hz` with an advancing counter (`output.sent` tracking
+   `pose_tx_fw`).
+
+**Pass:** waypoints ±3 cm/±2°, `solve_ms.p95` < 25 ms, all degradation
+scenarios recover without manual intervention. The covariance/sigma tuning
+loop (Phase 7) starts from whatever this stage measures.
+
 ### Record as you go
 
 Append results (dates, measured numbers, any tuning changes like
 `init_imu_thresh`) to this file — Stage 2's `timeshift_cam_imu`, Stage 4's
-drift number, and Stage 6's clock-sync stability are the headline metrics
-worth tracking over time.
+drift number, Stage 6's clock-sync stability, and Stage 7's waypoint error
+are the headline metrics worth tracking over time.
 
 ---
 
 ## 4. What comes after hardware sign-off
 
-- **Phase 6 — GTSAM fusion:** consumes `TagPoseBus` + `VioBus` (covariance
-  conventions already aligned; VIO via per-epoch deltas) + `OdomBus` chassis
-  speeds (body-frame twist, integrated into relative factors — drive-type
-  agnostic) → single fused pose at 50–100 Hz, shipped via
-  `TeensyManager::send_pose`.
 - **Phase 7 — Hardening:** end-to-end latency budget (< 50 ms tag-to-pose),
-  degraded-mode matrix, Allan-variance IMU noise refinement.
+  degraded-mode matrix, Allan-variance IMU noise refinement, fusion
+  covariance/sigma tuning from Stage 7 data, and the IMU-preintegration
+  fallback for VIO-unhealthy (the reserved `feed_imu` seam in
+  `src/fusion/fusion_engine.hpp`).

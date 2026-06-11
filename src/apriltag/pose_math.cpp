@@ -148,4 +148,45 @@ Mat4 mat4_from_rt(const Mat3& R, const std::array<double, 3>& t) {
     return T;
 }
 
+Mat6 adjoint_se3(const Mat4& T) {
+    const Mat3 tx = skew(T[0][3], T[1][3], T[2][3]);
+    Mat6 ad{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            const double R = T[r][c];
+            ad[r * 6 + c]             = R;  // ω ← ω block
+            ad[(r + 3) * 6 + (c + 3)] = R;  // v ← v block
+            // v ← ω block: [t]× R.
+            double txr = 0;
+            for (int k = 0; k < 3; ++k) txr += tx[r][k] * T[k][c];
+            ad[(r + 3) * 6 + c] = txr;
+        }
+    }
+    return ad;
+}
+
+Mat6 mat6_mul(const Mat6& a, const Mat6& b) {
+    Mat6 out{};
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            for (int k = 0; k < 6; ++k) out[r * 6 + c] += a[r * 6 + k] * b[k * 6 + c];
+    return out;
+}
+
+Mat6 congruence(const Mat6& A, const Mat6& S) {
+    // A · S · Aᵀ, then symmetrize against accumulated round-off.
+    Mat6 as = mat6_mul(A, S);
+    Mat6 out{};
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            for (int k = 0; k < 6; ++k) out[r * 6 + c] += as[r * 6 + k] * A[c * 6 + k];
+    for (int r = 0; r < 6; ++r) {
+        for (int c = r + 1; c < 6; ++c) {
+            const double m = 0.5 * (out[r * 6 + c] + out[c * 6 + r]);
+            out[r * 6 + c] = out[c * 6 + r] = m;
+        }
+    }
+    return out;
+}
+
 }  // namespace gw::apriltag

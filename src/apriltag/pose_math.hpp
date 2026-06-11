@@ -41,4 +41,20 @@ Mat3 quat_wxyz_to_mat3(double w, double x, double y, double z);
 // Builds a Mat4 from rotation + translation.
 Mat4 mat4_from_rt(const Mat3& R, const std::array<double, 3>& t);
 
+// Row-major 6×6 (tangent-space operator / covariance), same [ω, v] ordering
+// as Vec6.
+using Mat6 = std::array<double, 36>;
+
+// SE(3) Adjoint of T in the [ω, v] tangent ordering:
+//   Ad_T = [[ R,      0 ],
+//           [ [t]×R,  R ]]
+// satisfying log(T · Exp(ξ) · T⁻¹) = Ad_T · ξ. Rotates body-tangent deltas
+// and covariances between frames: Σ' = Ad_T · Σ · Ad_Tᵀ.
+Mat6 adjoint_se3(const Mat4& T);
+
+Mat6 mat6_mul(const Mat6& a, const Mat6& b);
+
+// Covariance congruence A · S · Aᵀ, result explicitly symmetrized.
+Mat6 congruence(const Mat6& A, const Mat6& S);
+
 }  // namespace gw::apriltag

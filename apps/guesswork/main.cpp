@@ -15,6 +15,8 @@
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
 #include "server/field_layout_repository.hpp"
+#include "server/fusion_config_repository.hpp"
+#include "server/fusion_supervisor.hpp"
 #include "server/http_server.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/routes_apriltag.hpp"
@@ -126,6 +128,13 @@ int main(int argc, char** argv) {
                                                   imu_config, calibration_root);
     std::cerr << "guesswork: calibration recordings at " << calibration_root << "\n";
 
+    // GTSAM fusion: subscribes the tag/VIO/odom buses (all live for the
+    // supervisors' lifetimes) and ships the fused pose via teensy.send_pose.
+    // Declared after apriltag/vio/teensy so it tears down first.
+    gw::server::FusionConfigRepository fusion_config(database);
+    gw::server::FusionSupervisor fusion(fusion_config, imu_config, apriltag,
+                                        vio, teensy);
+
     const auto started_at = std::chrono::steady_clock::now();
     std::cerr << "guesswork: stream defaults "
               << cli.stream_width << "x" << cli.stream_height
@@ -136,7 +145,8 @@ int main(int argc, char** argv) {
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
                                   trigger_groups, teensy, imu_config,
                                   field_layouts, apriltag, vio, vio_config,
-                                  can_config, started_at);
+                                  can_config, fusion, fusion_config,
+                                  started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;

@@ -243,6 +243,22 @@ target_link_libraries(gw_vio
 target_include_directories(gw_vio PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 # ----------------------------------------------------------------------------
+# Fusion library (GTSAM fixed-lag smoother, built from source — see
+# cmake/gtsam.cmake for the 4.3a1 pin rationale). GTSAM is BSD.
+# ----------------------------------------------------------------------------
+include(${CMAKE_SOURCE_DIR}/cmake/gtsam.cmake)
+
+add_library(gw_fusion
+    src/fusion/fusion_engine.cpp
+    src/fusion/teensy_now.cpp
+)
+target_include_directories(gw_fusion PUBLIC src)
+target_link_libraries(gw_fusion
+    PUBLIC  gw_core gw_calibration gw_apriltag
+    PRIVATE gtsam_lib Eigen3::Eigen
+)
+
+# ----------------------------------------------------------------------------
 # HTTP server library
 # ----------------------------------------------------------------------------
 add_library(gw_server
@@ -273,10 +289,13 @@ add_library(gw_server
     src/server/routes_vio.cpp
     src/server/can_config_repository.cpp
     src/server/routes_can.cpp
+    src/server/fusion_config_repository.cpp
+    src/server/fusion_supervisor.cpp
+    src/server/routes_fusion.cpp
     src/server/teensy_manager.cpp
     src/server/telemetry_decoder.cpp
 )
-target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag gw_vio Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
+target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag gw_vio gw_fusion Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
 # teensy_manager.cpp includes the freestanding CAN wire contract straight from
 # the firmware tree ("firmware/src/can_payloads.h") — one copy, no drift.
 target_include_directories(gw_server PRIVATE ${PROJECT_SOURCE_DIR})
@@ -415,8 +434,11 @@ if(GW_BUILD_TESTS)
         tests/test_can_payloads.cpp
         tests/test_rio_clock_sync.cpp
         tests/test_can_config_repository.cpp
+        tests/test_teensy_now.cpp
+        tests/test_fusion_engine.cpp
+        tests/test_fusion_config_repository.cpp
     )
-    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag gw_vio GTest::gtest_main)
+    target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag gw_vio gw_fusion GTest::gtest_main)
     # The estimator tests build synthetic projections with OpenCV directly,
     # the consumer test renders a real tag bitmap via the apriltag library,
     # and the field-layout test parses the shipped season fixture.

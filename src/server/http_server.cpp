@@ -6,6 +6,7 @@
 #include "server/routes_calibration.hpp"
 #include "server/routes_camera.hpp"
 #include "server/routes_can.hpp"
+#include "server/routes_fusion.hpp"
 #include "server/routes_hardware_sync.hpp"
 #include "server/routes_imu.hpp"
 #include "server/routes_status.hpp"
@@ -31,6 +32,8 @@ struct HttpServer::Impl {
          VioSupervisor&                        vio,
          VioConfigRepository&                  vio_config,
          CanConfigRepository&                  can_config,
+         FusionSupervisor&                     fusion,
+         FusionConfigRepository&               fusion_config,
          std::chrono::steady_clock::time_point started_at)
         : port(p) {
         register_status_routes(app, supervisor, started_at);
@@ -38,10 +41,11 @@ struct HttpServer::Impl {
         register_camera_routes(app, cameras, supervisor);
         register_calibration_routes(app, cameras, calibration, supervisor);
         register_hardware_sync_routes(app, trigger_groups, teensy);
-        register_imu_routes(app, imu_config, teensy, apriltag);
+        register_imu_routes(app, imu_config, teensy, apriltag, fusion);
         register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_vio_routes(app, vio, vio_config);
         register_can_routes(app, can_config, teensy);
+        register_fusion_routes(app, fusion, fusion_config);
         register_static_routes(app);
     }
 };
@@ -58,11 +62,14 @@ HttpServer::HttpServer(uint16_t                              port,
                        VioSupervisor&                        vio,
                        VioConfigRepository&                  vio_config,
                        CanConfigRepository&                  can_config,
+                       FusionSupervisor&                     fusion,
+                       FusionConfigRepository&               fusion_config,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
                                    trigger_groups, teensy, imu_config,
                                    field_layouts, apriltag, vio, vio_config,
-                                   can_config, started_at)) {}
+                                   can_config, fusion, fusion_config,
+                                   started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

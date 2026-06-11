@@ -6,6 +6,7 @@
 
 #include "calibration/calibration_store.hpp"
 #include "server/apriltag_supervisor.hpp"
+#include "server/fusion_supervisor.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/route_helpers.hpp"
 #include "server/teensy_manager.hpp"
@@ -53,7 +54,8 @@ bool parse_positive_number(const crow::json::rvalue& body, const char* field,
 void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
                          TeensyManager&       teensy,
-                         ApriltagSupervisor&  apriltag) {
+                         ApriltagSupervisor&  apriltag,
+                         FusionSupervisor&    fusion) {
     CROW_ROUTE(app, "/api/imu/status").methods("GET"_method)
     ([&teensy] {
         const auto s = teensy.status();
@@ -80,7 +82,7 @@ void register_imu_routes(crow::SimpleApp&     app,
     });
 
     CROW_ROUTE(app, "/api/imu/config").methods("PUT"_method)
-    ([&imu_config, &apriltag](const crow::request& req) {
+    ([&imu_config, &apriltag, &fusion](const crow::request& req) {
         const auto body = crow::json::load(req.body);
         if (!body) return error_response(400, "invalid JSON body");
 
@@ -121,6 +123,8 @@ void register_imu_routes(crow::SimpleApp&     app,
         try {
             auto resp = json_response(200, config_to_json(imu_config.update(patch)));
             if (patch.t_imu_robot_json) apriltag.reload_shared();
+            // T_robot_imu and noise changes both matter to fusion.
+            fusion.reload();
             return resp;
         } catch (const std::exception& e) {
             return error_response(500, e.what());

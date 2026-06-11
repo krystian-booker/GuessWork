@@ -85,4 +85,65 @@ TEST(PoseMathTest, QuaternionGoldens) {
     EXPECT_NEAR(N[0][0], 1.0, 1e-12);
 }
 
+TEST(PoseMathTest, AdjointMatchesConjugation) {
+    // The defining identity: log(T · Exp(ξ) · T⁻¹) = Ad_T · ξ (exact for
+    // small ξ to first order; use a small perturbation + tight tolerance).
+    const Mat4 T = exp_se3({0.4, -0.3, 0.7, 1.2, -0.8, 2.0});
+    const Vec6 xi{1e-4, -2e-4, 1.5e-4, 3e-4, -1e-4, 2e-4};
+
+    const Mat4 conj = mat4_mul(mat4_mul(T, exp_se3(xi)), mat4_inverse_se3(T));
+    const Vec6 lhs  = log_se3(conj);
+
+    const Mat6 ad = adjoint_se3(T);
+    Vec6 rhs{};
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c) rhs[r] += ad[r * 6 + c] * xi[c];
+
+    for (int i = 0; i < 6; ++i) EXPECT_NEAR(lhs[i], rhs[i], 1e-9);
+}
+
+TEST(PoseMathTest, AdjointOfIdentityIsIdentity) {
+    const Mat6 ad = adjoint_se3(mat4_identity());
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            EXPECT_NEAR(ad[r * 6 + c], r == c ? 1.0 : 0.0, 1e-12);
+}
+
+TEST(PoseMathTest, AdjointOfInverseIsInverse) {
+    const Mat4 T = exp_se3({-0.2, 0.5, 0.1, 0.7, 1.1, -0.4});
+    const Mat6 prod = mat6_mul(adjoint_se3(T), adjoint_se3(mat4_inverse_se3(T)));
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            EXPECT_NEAR(prod[r * 6 + c], r == c ? 1.0 : 0.0, 1e-9);
+}
+
+TEST(PoseMathTest, CongruencePreservesSymmetryAndPsd) {
+    // Σ = Lᵀ·L + εI is symmetric PSD by construction.
+    Mat6 S{};
+    const double L[6][6] = {{1, 0, 0, 0, 0, 0},    {0.5, 2, 0, 0, 0, 0},
+                            {0.1, -0.3, 1.5, 0, 0, 0}, {0, 0.2, 0, 1, 0, 0},
+                            {-0.4, 0, 0.6, 0.1, 2.5, 0}, {0, 0, 0, -0.2, 0.3, 0.8}};
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            for (int k = 0; k < 6; ++k) S[r * 6 + c] += L[r][k] * L[c][k];
+
+    const Mat4 T   = exp_se3({0.3, 0.2, -0.5, 0.4, -1.0, 0.6});
+    const Mat6 out = congruence(adjoint_se3(T), S);
+
+    for (int r = 0; r < 6; ++r) {
+        for (int c = 0; c < 6; ++c) EXPECT_NEAR(out[r * 6 + c], out[c * 6 + r], 1e-12);
+        EXPECT_GE(out[r * 6 + r], 0.0);
+    }
+    // Congruence by an invertible map preserves PSD; spot-check with a few
+    // quadratic forms xᵀΣ'x ≥ 0.
+    const double probes[3][6] = {
+        {1, -1, 0.5, 2, 0, -0.3}, {0, 1, 0, -1, 1, 0}, {0.2, 0.2, 0.2, 1, 1, 1}};
+    for (const auto& x : probes) {
+        double q = 0;
+        for (int r = 0; r < 6; ++r)
+            for (int c = 0; c < 6; ++c) q += x[r] * out[r * 6 + c] * x[c];
+        EXPECT_GE(q, -1e-12);
+    }
+}
+
 }  // namespace gw::apriltag
