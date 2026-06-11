@@ -5,6 +5,7 @@
 #include "server/routes_apriltag.hpp"
 #include "server/routes_calibration.hpp"
 #include "server/routes_camera.hpp"
+#include "server/routes_can.hpp"
 #include "server/routes_hardware_sync.hpp"
 #include "server/routes_imu.hpp"
 #include "server/routes_status.hpp"
@@ -29,6 +30,7 @@ struct HttpServer::Impl {
          ApriltagSupervisor&                   apriltag,
          VioSupervisor&                        vio,
          VioConfigRepository&                  vio_config,
+         CanConfigRepository&                  can_config,
          std::chrono::steady_clock::time_point started_at)
         : port(p) {
         register_status_routes(app, supervisor, started_at);
@@ -39,6 +41,7 @@ struct HttpServer::Impl {
         register_imu_routes(app, imu_config, teensy, apriltag);
         register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_vio_routes(app, vio, vio_config);
+        register_can_routes(app, can_config, teensy);
         register_static_routes(app);
     }
 };
@@ -54,11 +57,12 @@ HttpServer::HttpServer(uint16_t                              port,
                        ApriltagSupervisor&                   apriltag,
                        VioSupervisor&                        vio,
                        VioConfigRepository&                  vio_config,
+                       CanConfigRepository&                  can_config,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
                                    trigger_groups, teensy, imu_config,
                                    field_layouts, apriltag, vio, vio_config,
-                                   started_at)) {}
+                                   can_config, started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

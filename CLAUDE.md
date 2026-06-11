@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project status & hardware testing
+
+Implementation status (Phases 1–5 of the pose-estimation roadmap done) and
+the staged real-hardware bring-up/test plan live in
+**`docs/hardware-bringup.md`** — update it as hardware tests are completed.
+The CAN wire contract is **`docs/can-protocol.md`** ↔ `firmware/src/can_payloads.h`.
+
 ## Platform constraints
 
 macOS / Apple Silicon only — CMake hard-fails on non-Apple. The pipeline depends on CoreVideo / IOSurface / Metal / VideoToolbox, and a system install of the FLIR **Spinnaker SDK** at `/usr/local/{include,lib}` is required to link `gw_producer` (and therefore everything that pulls it in, including `guesswork` and `gw_tests`). Homebrew OpenSSL at `/opt/homebrew/opt/openssl@3` is used by the vendored libdatachannel WebRTC stack; Homebrew **OpenCV** (`brew install opencv`) is required by `gw_apriltag`.
@@ -97,6 +104,14 @@ Field layouts: `field_layouts` table (verbatim WPILib AprilTagFieldLayout JSON, 
 OpenVINS is built from source by `cmake/openvins.cmake` (ExternalProject, pinned master SHA — v2.7 doesn't compile against Homebrew Ceres 2.2; macOS arm64 fixes: drop the `boost_system` component for Boost ≥ 1.90, `-include cassert`). Build deps: `brew install eigen boost ceres-solver` (+ opencv). It produces ONE `libov_msckf_lib.dylib`; headers under `openvins-install/include/open_vins/`. **OpenVINS is GPL-3.0** — distributed guesswork binaries are effectively GPLv3. `use_aruco=false` is mandatory at runtime (built with ENABLE_ARUCO_TAGS=OFF).
 
 Data flow: per-camera `VioFeederConsumer`s (ConsumerFactory products, slot-lifecycle-safe) fast-copy frames into the `StereoSyncPairer` (exact `camera_ts_ns` equality match — both cams share one trigger group; zero-stamp frames dropped); one `OpenVinsRunner` thread drains pairs + the `ImuBus` and feeds `VioManager` (the camera path has no internal locking — single-threaded feeding by design). Calibration is consumed programmatically: `VioConfigBuilder` maps stored camchain-imucam blocks + `imu_config` noise into `VioManagerOptions` (Kalibr `T_cam_imu` → OpenVINS `q_ItoC`+`p_IinC` with NO inversion; downsampling halves intrinsics in the mapping, matching upstream's YAML loader). `VioSupervisor` gates enablement (both roles, parseable extrinsics, `guesswork_meta.reprojection_error_std_px ≤ vio_config.max_reproj_std_px`) and rebuilds the runner on fingerprint changes; divergence (feature collapse / covariance explosion / >2 s frame gap) auto-reinits. API: `GET /api/vio/status`, `GET/PUT /api/vio/config` (single-row `vio_config` table), `POST /api/vio/restart`.
+
+### CAN bridge (`firmware/src/can_bridge.*`, `src/core/rio_clock_sync.*`, `src/server/routes_can.*`)
+
+fw=3 adds a CAN bridge on Teensy **CAN3** (pins 30/31, TJA1051T/3 — the only FD-capable FlexCAN on Teensy 4.x). The controller streams WPILib **ChassisSpeeds** (robot-frame vx/vy/ω + `rio_time_us` FPGA sample stamp — drive-type-agnostic, no wheel math in this repo) at 50–100 Hz → CAN RX ISR stamps arrival with `now_us64()` → ODOM telemetry (0x03) → host publishes `ChassisSpeeds` on `TeensyManager::odom_bus()`. Downlink: `TeensyManager::send_pose` writes a POSE packet (0x10) host→Teensy on the **telemetry CDC's reverse direction** → one FD frame / classic XY+THETA pair with a rolling counter (controller staleness rule: counter frozen >200 ms). **The wire contract is `firmware/src/can_payloads.h`** — freestanding (no Arduino.h), compiled by firmware, `gw_server`, and `gw_tests` alike (`docs/can-protocol.md` is the prose copy; change together).
+
+Two runtime modes in one firmware, persisted in the single-row `can_config` table (additive — no `--reset-db`) and pushed as `CAN_MODE mode=off|classic|fd` on update + every reconnect: **`roborio`** = classic CAN 2.0 @ 1 Mbps (8-byte frames, int16 milli-units, separate STAMP frame paired by counter, RIO u32 µs wrap-extended on the Teensy) and **`systemcore`** = CAN FD 1 Mbps/4 Mbps (24-byte float32 frames; TJA1051 caps at 5 Mbps). FlexCAN_T4 gotchas (can_bridge.cpp is the ONLY TU that may include FlexCAN_T4.h): both class constructors set the per-TU ISR dispatch pointer `_CAN3` at static init, so `set_mode` reassigns it before `begin()`; **never call `events()`** — it permanently moves RX callbacks out of ISR context and ruins arrival stamps; FD needs `CLK_80MHz` + `setRegions(32)`; runtime mode switching is unofficial (power-cycle fallback; resync self-heals).
+
+Time sync lives ONLY on the host: `gw::RioClockSync` (pure, unit-tested) fits `teensy ≈ rio + offset(t)` from per-250 ms bucket minima of (arrival − rio) over a 6 s window — min rejects one-sided transit jitter, the fit tracks crystal drift, and backward-rio-jump / >50 ms offset-step resets handle controller reboots (~1 s re-warm-up, arrival-stamp fallback meanwhile). `ChassisSpeeds.t_ns` = mapped RIO sample time when healthy, else CAN arrival. API: `GET/PUT /api/can/config` (PUT returns `pushed`/`push_error`; DB update succeeds with the Teensy offline), `GET /api/can/status` (mode, odom rate, counters, clock_sync), `POST /api/can/pose` (bench downlink until Phase 6). fw=2↔fw=3 compat: heartbeat parse is length-gated (17 vs 34 bytes), CAN_MODE push is gated on `fw_version ≥ 3`.
 
 ### React frontend (`web/`)
 

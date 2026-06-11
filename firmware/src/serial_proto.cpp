@@ -94,6 +94,7 @@ void SerialProto::handle_line(char* line) {
         return;
     }
     if (strcmp(verb, "CFG") == 0) { handle_cfg(args);             return; }
+    if (strcmp(verb, "CAN_MODE") == 0) { handle_can_mode(args);   return; }
     if (strcmp(verb, "ARM") == 0) {
         const char* err = nullptr;
         if (engine_.arm(err)) Serial.println(F("OK"));
@@ -156,6 +157,37 @@ void SerialProto::handle_cfg(char* args) {
     }
 }
 
+void SerialProto::handle_can_mode(char* args) {
+    if (!args) {
+        Serial.println(F("ERR CAN_MODE requires mode=off|classic|fd"));
+        return;
+    }
+    char* save = nullptr;
+    char* tok  = strtok_r(args, " ", &save);
+    const char* key   = nullptr;
+    const char* value = nullptr;
+    if (!tok || !split_kv(tok, key, value) || strcmp(key, "mode") != 0) {
+        Serial.println(F("ERR CAN_MODE requires mode=off|classic|fd"));
+        return;
+    }
+    CanMode mode;
+    if (strcmp(value, "off") == 0)          mode = CanMode::Off;
+    else if (strcmp(value, "classic") == 0) mode = CanMode::Classic;
+    else if (strcmp(value, "fd") == 0)      mode = CanMode::Fd;
+    else {
+        Serial.print(F("ERR bad mode: "));
+        Serial.println(value);
+        return;
+    }
+    const char* err = nullptr;
+    if (can_.set_mode(mode, err)) {
+        Serial.println(F("OK"));
+    } else {
+        Serial.print(F("ERR "));
+        Serial.println(err ? err : "CAN configuration failed");
+    }
+}
+
 void SerialProto::handle_status() {
     Serial.print(F("STATUS armed="));
     Serial.print(engine_.is_armed() ? 1 : 0);
@@ -178,6 +210,14 @@ void SerialProto::handle_status() {
         }
         Serial.println();
     }
+    Serial.print(F("CAN mode="));
+    switch (can_.mode()) {
+        case CanMode::Off:     Serial.print(F("off"));     break;
+        case CanMode::Classic: Serial.print(F("classic")); break;
+        case CanMode::Fd:      Serial.print(F("fd"));      break;
+    }
+    Serial.print(F(" ok="));
+    Serial.println(can_.ok() ? 1 : 0);
     Serial.println(F("OK"));
 }
 

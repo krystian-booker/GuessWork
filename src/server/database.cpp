@@ -119,6 +119,18 @@ constexpr const char* kSchemaVioConfig =
     ");"
     "INSERT OR IGNORE INTO vio_config (id) VALUES (1);";
 
+// Single-row CAN bridge configuration. 'roborio' = classic CAN 2.0 @ 1 Mbps,
+// 'systemcore' = CAN FD 1M/4M; the host pushes the matching CAN_MODE command
+// to the Teensy on update and on every reconnect (docs/can-protocol.md).
+constexpr const char* kSchemaCanConfig =
+    "CREATE TABLE IF NOT EXISTS can_config ("
+    "  id         INTEGER PRIMARY KEY CHECK (id = 1),"
+    "  mode       TEXT NOT NULL DEFAULT 'off'"
+    "             CHECK (mode IN ('off','roborio','systemcore')),"
+    "  updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
+    ");"
+    "INSERT OR IGNORE INTO can_config (id) VALUES (1);";
+
 }  // namespace
 
 Database::Database(const std::filesystem::path& db_path) {
@@ -141,6 +153,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, kSchemaFieldLayouts);
     exec_or_throw(db_, kSchemaImuConfig);
     exec_or_throw(db_, kSchemaVioConfig);
+    exec_or_throw(db_, kSchemaCanConfig);
 }
 
 void Database::remove_files(const std::filesystem::path& db_path) {

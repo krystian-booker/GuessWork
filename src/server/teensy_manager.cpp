@@ -18,6 +18,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include "core/rio_clock_sync.hpp"
+#include "firmware/src/can_payloads.h"
 #include "server/telemetry_decoder.hpp"
 
 namespace gw::server {
@@ -54,6 +56,15 @@ void parse_kv_tokens(std::string_view body, std::unordered_map<std::string, std:
     }
 }
 
+const char* can_mode_arg(CanMode m) {
+    switch (m) {
+        case CanMode::Classic: return "classic";
+        case CanMode::Fd:      return "fd";
+        case CanMode::Off:     break;
+    }
+    return "off";
+}
+
 }  // namespace
 
 struct PinState {
@@ -70,12 +81,28 @@ struct TeensyManager::Impl {
     std::string                line_buf;
     std::optional<std::string> open_port;
 
-    // Binary telemetry interface (second USB-CDC, fw=2). Absent on fw=1.
+    // Binary telemetry interface (second USB-CDC, fw≥2). Absent on fw=1.
+    // Read by io_thread; written (POSE downlink) by HTTP threads under
+    // pose_tx_mu — close_telemetry_fd() also takes pose_tx_mu so the fd
+    // can't be recycled under a writer.
     int                                    telemetry_fd = -1;
     std::optional<std::string>             telemetry_port;
     std::chrono::steady_clock::time_point  last_telemetry_attempt{};
     TelemetryDecoder                       decoder;
     gw::MeasurementBus<gw::ImuSample>      imu_bus;
+    gw::OdomBus                            odom_bus;
+
+    // RIO ↔ Teensy clock sync. Fed on io_thread (on_odom), read by status()
+    // and send_pose() on HTTP threads.
+    mutable std::mutex sync_mu;
+    RioClockSync       rio_sync;
+    uint64_t           sync_last_arrival_us = 0;  // "now" proxy for healthy()
+
+    // POSE downlink serialization (counter + fd writes).
+    std::mutex            pose_tx_mu;
+    uint8_t               pose_counter = 0;
+    std::atomic<uint64_t> pose_sent{0};
+    std::atomic<uint64_t> pose_send_errors{0};
 
     // IMU rate window + heartbeat-derived state. Guarded by status_mu.
     std::chrono::steady_clock::time_point imu_window_start{};
@@ -89,11 +116,27 @@ struct TeensyManager::Impl {
     uint64_t                              imu_crc_errors    = 0;  // (decoder runs unlocked
     std::optional<int>                    fw_version;             //  on io_thread)
 
-    // Configuration cache (push_config payload). Re-sent after every
-    // (re)connect. Guarded by cfg_mu.
+    // CAN / odometry state. Guarded by status_mu.
+    bool     can_ok           = false;
+    int      can_mode_fw      = -1;
+    uint64_t can_rx           = 0;
+    uint64_t can_rx_drops     = 0;
+    uint64_t odom_tx_fw_drops = 0;
+    uint64_t pose_tx_fw       = 0;
+    std::chrono::steady_clock::time_point odom_window_start{};
+    uint64_t                              odom_window_count = 0;
+    double                                odom_rate_hz      = 0.0;
+    std::chrono::steady_clock::time_point odom_last_at{};
+    bool                                  odom_seen = false;
+    std::optional<gw::ChassisSpeeds>      odom_last;
+    uint64_t                              odom_packets_total = 0;  // decoder mirror
+
+    // Configuration cache (push_config payload + CAN mode). Re-sent after
+    // every (re)connect. Guarded by cfg_mu.
     std::mutex                                  cfg_mu;
     std::vector<TeensyManager::GroupConfig>     desired_cfg;
     bool                                        want_armed = false;
+    CanMode                                     desired_can_mode = CanMode::Off;
 
     // Group → pin-mask lookup so each TRIG event can fan out to its pins.
     std::mutex                                  group_pins_mu;
@@ -131,6 +174,7 @@ struct TeensyManager::Impl {
     void note_fw_version(std::string_view line);  // parses "fw=<n>" tokens
     bool send_full_config(const std::vector<TeensyManager::GroupConfig>& groups,
                           bool want_armed, std::string& err);
+    bool send_can_mode(CanMode mode, std::string& err);  // CAN_MODE command, fw≥3 only
     void resync_config();           // pushes the cfg_mu-stashed snapshot
     void note_error(std::string msg);
     void setup_decoder_callbacks();
@@ -161,6 +205,71 @@ gw::MeasurementBus<gw::ImuSample>& TeensyManager::imu_bus() {
     return impl_->imu_bus;
 }
 
+gw::OdomBus& TeensyManager::odom_bus() {
+    return impl_->odom_bus;
+}
+
+bool TeensyManager::set_can_mode(CanMode mode, std::string& err) {
+    {
+        std::lock_guard lk(impl_->cfg_mu);
+        impl_->desired_can_mode = mode;
+    }
+    if (!impl_->connected) {
+        err = "Teensy not connected";
+        return false;
+    }
+    return impl_->send_can_mode(mode, err);
+}
+
+bool TeensyManager::send_pose(const gw::FusedPose& pose, std::string& err) {
+    gw_fw::canp::PoseWire wire;
+    wire.x       = pose.x_m;
+    wire.y       = pose.y_m;
+    wire.theta   = pose.theta_rad;
+    wire.quality = pose.quality;
+    {
+        std::lock_guard lk(impl_->sync_mu);
+        // 0 = unmapped is part of the wire contract; the controller's
+        // staleness detection is counter-based, so still send.
+        wire.rio_time_us = impl_->rio_sync.to_rio_us(pose.t_ns).value_or(0);
+    }
+
+    std::lock_guard lk(impl_->pose_tx_mu);
+    if (impl_->telemetry_fd < 0) {
+        err = "telemetry interface not connected";
+        impl_->pose_send_errors.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    wire.counter = ++impl_->pose_counter;
+
+    uint8_t payload[gw_fw::canp::kPoseTelemetryPayloadLen];
+    gw_fw::canp::encode_pose_telemetry(wire, payload);
+    uint8_t frame[6 + sizeof(payload)];
+    const size_t frame_len = gw_fw::canp::build_telemetry_frame(
+        gw_fw::canp::kBinTypePose, payload, sizeof(payload), frame);
+
+    size_t off = 0;
+    while (off < frame_len) {
+        const ssize_t n =
+            ::write(impl_->telemetry_fd, frame + off, frame_len - off);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                // Non-blocking fd with a full USB buffer — drop this pose
+                // (the next one supersedes it anyway).
+                err = "telemetry write would block";
+            } else {
+                err = std::string("telemetry write: ") + std::strerror(errno);
+            }
+            impl_->pose_send_errors.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        off += static_cast<size_t>(n);
+    }
+    impl_->pose_sent.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 TeensyManager::Status TeensyManager::status() const {
     Status s;
     std::lock_guard lk(impl_->status_mu);
@@ -186,6 +295,35 @@ TeensyManager::Status TeensyManager::status() const {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - impl_->imu_last_sample_at).count();
         s.imu_last_sample_age_ms = ms;
+    }
+
+    s.can_ok           = impl_->can_ok;
+    s.can_mode_fw      = impl_->can_mode_fw;
+    s.can_rx           = impl_->can_rx;
+    s.can_rx_drops     = impl_->can_rx_drops;
+    s.odom_tx_fw_drops = impl_->odom_tx_fw_drops;
+    s.pose_tx_fw       = impl_->pose_tx_fw;
+    s.odom_rate_hz     = impl_->odom_rate_hz;
+    s.odom_packets     = impl_->odom_packets_total;
+    s.odom_last        = impl_->odom_last;
+    if (impl_->odom_seen) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - impl_->odom_last_at).count();
+        s.odom_last_age_ms = ms;
+    }
+    s.pose_sent        = impl_->pose_sent.load(std::memory_order_relaxed);
+    s.pose_send_errors = impl_->pose_send_errors.load(std::memory_order_relaxed);
+    {
+        std::lock_guard sync_lk(impl_->sync_mu);
+        s.sync_healthy   = impl_->rio_sync.healthy(impl_->sync_last_arrival_us);
+        s.sync_offset_us = impl_->rio_sync.offset_us();
+        s.sync_drift_ppm = impl_->rio_sync.drift_ppm();
+        s.sync_samples   = impl_->rio_sync.samples();
+        s.sync_resets    = impl_->rio_sync.resets();
+    }
+    {
+        std::lock_guard cfg_lk(impl_->cfg_mu);
+        s.can_mode_desired = impl_->desired_can_mode;
     }
     return s;
 }
@@ -367,8 +505,9 @@ void TeensyManager::Impl::run() {
                 } else {
                     decoder.feed(chunk, static_cast<size_t>(n));
                     std::lock_guard lk(status_mu);
-                    imu_samples_total = decoder.stats().imu_samples;
-                    imu_crc_errors    = decoder.stats().crc_errors;
+                    imu_samples_total  = decoder.stats().imu_samples;
+                    imu_crc_errors     = decoder.stats().crc_errors;
+                    odom_packets_total = decoder.stats().odom_packets;
                 }
             }
         }
@@ -507,14 +646,24 @@ void TeensyManager::Impl::close_fd() {
 }
 
 void TeensyManager::Impl::close_telemetry_fd() {
-    if (telemetry_fd >= 0) ::close(telemetry_fd);
-    telemetry_fd = -1;
+    {
+        // send_pose writes this fd from HTTP threads; don't recycle it under
+        // a writer.
+        std::lock_guard pose_lk(pose_tx_mu);
+        if (telemetry_fd >= 0) ::close(telemetry_fd);
+        telemetry_fd = -1;
+    }
     std::lock_guard lk(status_mu);
     telemetry_port.reset();
     imu_ok          = false;
     imu_rate_hz     = 0.0;
     imu_window_count = 0;
     imu_sample_seen = false;
+    can_ok           = false;
+    can_mode_fw      = -1;
+    odom_rate_hz     = 0.0;
+    odom_window_count = 0;
+    odom_seen        = false;
 }
 
 void TeensyManager::Impl::setup_decoder_callbacks() {
@@ -537,6 +686,56 @@ void TeensyManager::Impl::setup_decoder_callbacks() {
         std::lock_guard lk(status_mu);
         imu_ok       = hb.imu_ok;
         imu_fw_drops = hb.imu_drops;
+        if (hb.can_present) {
+            can_ok           = hb.can_ok;
+            can_mode_fw      = hb.can_mode;
+            can_rx           = hb.can_rx;
+            can_rx_drops     = hb.can_rx_drops;
+            odom_tx_fw_drops = hb.odom_tx_drops;
+            pose_tx_fw       = hb.pose_tx;
+        }
+    };
+    decoder.on_odom = [this](const TelemetryDecoder::Odom& o) {
+        gw::ChassisSpeeds s;
+        s.t_arrival_ns = o.t_arrival_us * 1000ull;
+        s.rio_time_us  = o.rio_time_us;
+        s.vx_mps       = o.vx;
+        s.vy_mps       = o.vy;
+        s.omega_radps  = o.omega;
+        s.status_flags = o.status_flags;
+        s.counter      = o.counter;
+        {
+            // Scoped: status() nests sync_mu inside status_mu, so never hold
+            // sync_mu while acquiring status_mu below.
+            std::lock_guard sync_lk(sync_mu);
+            if (o.rio_time_us != 0) {
+                rio_sync.feed(o.rio_time_us, o.t_arrival_us);
+            }
+            sync_last_arrival_us = o.t_arrival_us;
+            // Best-estimate sample time: mapped RIO sample time when the
+            // sync fit is usable, CAN arrival stamp otherwise.
+            s.t_ns = s.t_arrival_ns;
+            if (o.rio_time_us != 0 && rio_sync.healthy(o.t_arrival_us)) {
+                if (const auto mapped = rio_sync.to_teensy_ns(o.rio_time_us)) {
+                    s.t_ns = *mapped;
+                }
+            }
+        }
+        odom_bus.publish(s);
+
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lk(status_mu);
+        odom_last_at = now;
+        odom_seen    = true;
+        odom_last    = s;
+        if (odom_window_count == 0) odom_window_start = now;
+        ++odom_window_count;
+        const auto elapsed = now - odom_window_start;
+        if (elapsed >= std::chrono::seconds(1)) {
+            odom_rate_hz = static_cast<double>(odom_window_count) /
+                           std::chrono::duration<double>(elapsed).count();
+            odom_window_count = 0;
+        }
     };
 }
 
@@ -667,13 +866,36 @@ bool TeensyManager::Impl::send_full_config(
     return true;
 }
 
+bool TeensyManager::Impl::send_can_mode(CanMode mode, std::string& err) {
+    {
+        std::lock_guard lk(status_mu);
+        if (!fw_version || *fw_version < 3) {
+            err = "firmware too old for CAN (need fw>=3)";
+            return false;
+        }
+    }
+    std::string cmd = "CAN_MODE mode=";
+    cmd += can_mode_arg(mode);
+    return send_command(cmd, err);
+}
+
 void TeensyManager::Impl::resync_config() {
     std::vector<TeensyManager::GroupConfig> snapshot;
-    bool want_armed_snap = false;
+    bool    want_armed_snap = false;
+    CanMode can_mode_snap   = CanMode::Off;
     {
         std::lock_guard lk(cfg_mu);
-        snapshot       = desired_cfg;
+        snapshot        = desired_cfg;
         want_armed_snap = want_armed;
+        can_mode_snap   = desired_can_mode;
+    }
+    // CAN mode first — independent of trigger config, and cheap. The Teensy
+    // boots with CAN off, so Off needs no push.
+    if (can_mode_snap != CanMode::Off) {
+        std::string err;
+        if (!send_can_mode(can_mode_snap, err)) {
+            note_error("resync CAN_MODE: " + err);
+        }
     }
     if (snapshot.empty()) return;
     std::string err;

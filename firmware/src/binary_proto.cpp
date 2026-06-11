@@ -29,4 +29,64 @@ size_t build_frame(BinType type, const uint8_t* payload, uint8_t payload_len,
     return off;
 }
 
+void BinRxParser::feed(uint8_t b) {
+    switch (state_) {
+        case State::Magic0:
+            if (b == kBinMagic0) state_ = State::Magic1;
+            break;
+        case State::Magic1:
+            state_ = (b == kBinMagic1) ? State::Type : State::Magic0;
+            break;
+        case State::Type:
+            type_  = b;
+            state_ = State::Len;
+            break;
+        case State::Len:
+            if (b > kMaxPayload) {
+                ++crc_errors_;
+                state_ = State::Magic0;
+                break;
+            }
+            len_   = b;
+            got_   = 0;
+            state_ = (len_ == 0) ? State::CrcLo : State::Payload;
+            break;
+        case State::Payload:
+            buf_[got_++] = b;
+            if (got_ == len_) state_ = State::CrcLo;
+            break;
+        case State::CrcLo:
+            crc_lo_ = b;
+            state_  = State::CrcHi;
+            break;
+        case State::CrcHi: {
+            const uint16_t rx_crc = static_cast<uint16_t>(crc_lo_ | (b << 8));
+            uint16_t crc = crc16_ccitt(&type_, 1);
+            crc          = crc16_ccitt(&len_, 1, crc);
+            crc          = crc16_ccitt(buf_, len_, crc);
+            if (crc == rx_crc) {
+                // Latest-wins latch: an unconsumed frame is overwritten
+                // (the main loop drains far faster than the host sends).
+                pend_type_ = type_;
+                pend_len_  = len_;
+                memcpy(pend_buf_, buf_, len_);
+                pending_ = true;
+            } else {
+                ++crc_errors_;
+            }
+            state_ = State::Magic0;
+            break;
+        }
+    }
+}
+
+bool BinRxParser::take(uint8_t& type, uint8_t* payload, uint8_t& len) {
+    if (!pending_) return false;
+    type = pend_type_;
+    len  = pend_len_;
+    memcpy(payload, pend_buf_, pend_len_);
+    pending_ = false;
+    return true;
+}
+
 }  // namespace gw_fw

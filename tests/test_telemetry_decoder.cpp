@@ -71,14 +71,54 @@ std::vector<uint8_t> heartbeat_frame(uint64_t t_us, bool imu_ok,
     return frame(0x02, payload);
 }
 
+// fw=3 heartbeat: the fw=2 prefix plus the CAN extension (binary_proto.h).
+std::vector<uint8_t> heartbeat_v3_frame(uint64_t t_us, uint8_t flags,
+                                        uint32_t imu_samples, uint32_t imu_drops,
+                                        uint32_t can_rx, uint32_t can_rx_drops,
+                                        uint32_t odom_tx_drops, uint32_t pose_tx,
+                                        uint8_t can_mode) {
+    std::vector<uint8_t> payload;
+    put_u64(payload, t_us);
+    payload.push_back(flags);
+    put_u32(payload, imu_samples);
+    put_u32(payload, imu_drops);
+    put_u32(payload, can_rx);
+    put_u32(payload, can_rx_drops);
+    put_u32(payload, odom_tx_drops);
+    put_u32(payload, pose_tx);
+    payload.push_back(can_mode);
+    return frame(0x02, payload);
+}
+
+std::vector<uint8_t> odom_payload(uint64_t t_arrival_us, uint64_t rio_time_us,
+                                  float vx, float vy, float omega,
+                                  uint16_t status_flags, uint8_t counter,
+                                  uint8_t mode) {
+    std::vector<uint8_t> payload;
+    put_u64(payload, t_arrival_us);
+    put_u64(payload, rio_time_us);
+    put_f32(payload, vx);
+    put_f32(payload, vy);
+    put_f32(payload, omega);
+    payload.push_back(static_cast<uint8_t>(status_flags));
+    payload.push_back(static_cast<uint8_t>(status_flags >> 8));
+    payload.push_back(counter);
+    payload.push_back(mode);
+    return payload;
+}
+
 struct Collector {
-    std::vector<gw::ImuSample>             imu;
+    std::vector<gw::ImuSample>               imu;
     std::vector<TelemetryDecoder::Heartbeat> hb;
+    std::vector<TelemetryDecoder::Odom>      odom;
 
     void attach(TelemetryDecoder& d) {
         d.on_imu       = [this](const gw::ImuSample& s) { imu.push_back(s); };
         d.on_heartbeat = [this](const TelemetryDecoder::Heartbeat& h) {
             hb.push_back(h);
+        };
+        d.on_odom = [this](const TelemetryDecoder::Odom& o) {
+            odom.push_back(o);
         };
     }
 };
@@ -199,6 +239,119 @@ TEST(TelemetryDecoderTest, SkipsUnknownTypeWithValidCrc) {
 
     EXPECT_EQ(d.stats().unknown_types, 1u);
     ASSERT_EQ(c.hb.size(), 1u);
+}
+
+TEST(TelemetryDecoderTest, DecodesFw2HeartbeatWithoutCanFields) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    const auto f = heartbeat_frame(5'000'000, true, 2000, 3);  // len 17
+    d.feed(f.data(), f.size());
+
+    ASSERT_EQ(c.hb.size(), 1u);
+    EXPECT_FALSE(c.hb[0].can_present);
+    EXPECT_FALSE(c.hb[0].can_ok);
+    EXPECT_EQ(c.hb[0].can_rx, 0u);
+}
+
+TEST(TelemetryDecoderTest, DecodesFw3HeartbeatCanExtension) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    // flags: imu_ok | can_ok.
+    const auto f = heartbeat_v3_frame(9'000'000, 0x03, 4000, 1,
+                                      12345, 7, 2, 99, /*can_mode=*/1);
+    d.feed(f.data(), f.size());
+
+    ASSERT_EQ(c.hb.size(), 1u);
+    EXPECT_TRUE(c.hb[0].imu_ok);
+    EXPECT_TRUE(c.hb[0].can_present);
+    EXPECT_TRUE(c.hb[0].can_ok);
+    EXPECT_EQ(c.hb[0].imu_samples, 4000u);
+    EXPECT_EQ(c.hb[0].can_rx, 12345u);
+    EXPECT_EQ(c.hb[0].can_rx_drops, 7u);
+    EXPECT_EQ(c.hb[0].odom_tx_drops, 2u);
+    EXPECT_EQ(c.hb[0].pose_tx, 99u);
+    EXPECT_EQ(c.hb[0].can_mode, 1);
+}
+
+TEST(TelemetryDecoderTest, DecodesOdomPacket) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    const auto f = frame(0x03, odom_payload(123'456'789ull, 55'000'000ull,
+                                            1.5f, -0.25f, 0.75f,
+                                            0x0003, 42, /*mode=*/2));
+    d.feed(f.data(), f.size());
+
+    ASSERT_EQ(c.odom.size(), 1u);
+    EXPECT_EQ(c.odom[0].t_arrival_us, 123'456'789ull);
+    EXPECT_EQ(c.odom[0].rio_time_us, 55'000'000ull);
+    EXPECT_FLOAT_EQ(c.odom[0].vx, 1.5f);
+    EXPECT_FLOAT_EQ(c.odom[0].vy, -0.25f);
+    EXPECT_FLOAT_EQ(c.odom[0].omega, 0.75f);
+    EXPECT_EQ(c.odom[0].status_flags, 0x0003);
+    EXPECT_EQ(c.odom[0].counter, 42);
+    EXPECT_EQ(c.odom[0].mode, 2);
+    EXPECT_EQ(d.stats().odom_packets, 1u);
+}
+
+TEST(TelemetryDecoderTest, DecodesOdomWithUnknownRioTime) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    const auto f = frame(0x03, odom_payload(1'000ull, /*rio=*/0ull,
+                                            0.0f, 0.0f, 0.0f, 0, 1, 1));
+    d.feed(f.data(), f.size());
+
+    ASSERT_EQ(c.odom.size(), 1u);
+    EXPECT_EQ(c.odom[0].rio_time_us, 0ull);  // 0 = unknown, per contract
+}
+
+TEST(TelemetryDecoderTest, DropsWrongLengthOdomWithValidCrc) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    auto payload = odom_payload(1'000ull, 2'000ull, 1, 2, 3, 0, 1, 1);
+    payload.pop_back();  // 31 bytes — valid CRC, wrong length
+    const auto bad  = frame(0x03, payload);
+    const auto good = heartbeat_frame(7, true, 0, 0);
+    std::vector<uint8_t> stream;
+    stream.insert(stream.end(), bad.begin(), bad.end());
+    stream.insert(stream.end(), good.begin(), good.end());
+    d.feed(stream.data(), stream.size());
+
+    EXPECT_TRUE(c.odom.empty());
+    EXPECT_EQ(d.stats().odom_packets, 0u);
+    ASSERT_EQ(c.hb.size(), 1u);  // stream recovered
+}
+
+TEST(TelemetryDecoderTest, OdomInterleavedWithImuAcrossFragments) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    std::vector<uint8_t> stream;
+    const auto imu1 = imu_batch_frame({{1000, {1, 2, 3, 4, 5, 6}}});
+    const auto odo  = frame(0x03, odom_payload(2'000ull, 1'500ull,
+                                               0.5f, 0.0f, -0.5f, 0, 9, 1));
+    const auto imu2 = imu_batch_frame({{3000, {6, 5, 4, 3, 2, 1}}});
+    stream.insert(stream.end(), imu1.begin(), imu1.end());
+    stream.insert(stream.end(), odo.begin(), odo.end());
+    stream.insert(stream.end(), imu2.begin(), imu2.end());
+
+    // Worst-case fragmentation: byte at a time.
+    for (uint8_t b : stream) d.feed(&b, 1);
+
+    ASSERT_EQ(c.imu.size(), 2u);
+    ASSERT_EQ(c.odom.size(), 1u);
+    EXPECT_EQ(c.odom[0].counter, 9);
+    EXPECT_EQ(d.stats().packets, 3u);
 }
 
 TEST(TelemetryDecoderTest, RejectsMalformedBatchCount) {

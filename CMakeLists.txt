@@ -66,6 +66,7 @@ add_library(gw_core
     src/core/frame.cpp
     src/core/frame_pool.cpp
     src/core/frame_channel.cpp
+    src/core/rio_clock_sync.cpp
 )
 target_include_directories(gw_core PUBLIC src)
 target_link_libraries(gw_core PUBLIC
@@ -270,10 +271,15 @@ add_library(gw_server
     src/server/vio_config_repository.cpp
     src/server/vio_supervisor.cpp
     src/server/routes_vio.cpp
+    src/server/can_config_repository.cpp
+    src/server/routes_can.cpp
     src/server/teensy_manager.cpp
     src/server/telemetry_decoder.cpp
 )
 target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag gw_vio Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
+# teensy_manager.cpp includes the freestanding CAN wire contract straight from
+# the firmware tree ("firmware/src/can_payloads.h") — one copy, no drift.
+target_include_directories(gw_server PRIVATE ${PROJECT_SOURCE_DIR})
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
 # `operator"" _method` literal operator form). Silence them on the server lib
@@ -406,12 +412,18 @@ if(GW_BUILD_TESTS)
         tests/test_stereo_sync_pairer.cpp
         tests/test_vio_config_builder.cpp
         tests/test_vio_config_repository.cpp
+        tests/test_can_payloads.cpp
+        tests/test_rio_clock_sync.cpp
+        tests/test_can_config_repository.cpp
     )
     target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag gw_vio GTest::gtest_main)
     # The estimator tests build synthetic projections with OpenCV directly,
     # the consumer test renders a real tag bitmap via the apriltag library,
     # and the field-layout test parses the shipped season fixture.
-    target_include_directories(gw_tests PRIVATE ${OpenCV_INCLUDE_DIRS})
+    # test_can_payloads includes the freestanding firmware wire-contract
+    # header ("firmware/src/can_payloads.h") directly.
+    target_include_directories(gw_tests PRIVATE ${OpenCV_INCLUDE_DIRS}
+                                                ${PROJECT_SOURCE_DIR})
     target_link_libraries(gw_tests PRIVATE ${OpenCV_LIBS} apriltag)
     target_compile_definitions(gw_tests PRIVATE
         GW_FIELD_LAYOUT_DEFAULT="${GW_FIELD_LAYOUT_DEFAULT}")

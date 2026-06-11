@@ -11,6 +11,7 @@
 #include "server/apriltag_supervisor.hpp"
 #include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
+#include "server/can_config_repository.hpp"
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
 #include "server/field_layout_repository.hpp"
@@ -74,7 +75,18 @@ int main(int argc, char** argv) {
     gw::server::CameraRepository       cameras(database);
     gw::server::TriggerGroupRepository trigger_groups(database);
     gw::server::ImuConfigRepository    imu_config(database);
+    gw::server::CanConfigRepository    can_config(database);
     gw::server::TeensyManager          teensy;
+    // Seed the desired CAN mode from the DB before the I/O thread starts so
+    // the first connect's resync already carries it.
+    {
+        const std::string mode = can_config.get().mode;
+        gw::server::CanMode m  = gw::server::CanMode::Off;
+        if (mode == "roborio")    m = gw::server::CanMode::Classic;
+        if (mode == "systemcore") m = gw::server::CanMode::Fd;
+        std::string ignored;
+        teensy.set_can_mode(m, ignored);  // offline now — remembered for resync
+    }
     teensy.start();
     std::cerr << "guesswork: database at " << db_path << "\n";
 
@@ -124,7 +136,7 @@ int main(int argc, char** argv) {
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
                                   trigger_groups, teensy, imu_config,
                                   field_layouts, apriltag, vio, vio_config,
-                                  started_at);
+                                  can_config, started_at);
     server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
 
     return 0;
