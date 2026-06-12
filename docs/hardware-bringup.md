@@ -131,7 +131,9 @@ interface or a real-world signal path:
 
 ### Equipment checklist
 
-- [ ] Teensy 4.1 on USB, outputs 1–6 wired to camera opto-isolated trigger inputs (Line0)
+Full wiring reference (every pin, with electrical notes): **`docs/teensy-pinout.md`**.
+
+- [ ] Teensy 4.1 on USB, outputs 1–6 (pins 2–7) wired to camera opto-isolated trigger inputs (Line0)
 - [ ] BMI088 breakout: SPI0 (MOSI=11, MISO=12, SCK=13), **CS accel=10, CS gyro=9, gyro INT3→pin 8**, 3V3 + GND
 - [ ] At least 2 (ideally all 6) Chameleon3 cameras + lenses; the stereo pair rigidly mounted at the chosen baseline with the BMI088 hard-mounted next to the left camera
 - [ ] Printed 36h11 AprilTag, **black square exactly 6.5 in / 165.1 mm — verify with a ruler, printer scaling is the classic 2 % error**
