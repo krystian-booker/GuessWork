@@ -1,5 +1,9 @@
 import { asJson, readError } from './http'
 
+export type CameraRole = 'apriltag' | 'vio_left' | 'vio_right'
+
+export const CAMERA_ROLES: CameraRole[] = ['apriltag', 'vio_left', 'vio_right']
+
 export interface Camera {
   id: number
   name: string
@@ -25,6 +29,10 @@ export interface Camera {
   // physical wire to the Teensy is recorded in trigger_output_pin (1..6).
   hardware_sync_enabled: boolean
   trigger_output_pin: number | null
+  // Pipeline role. 'apriltag' feeds the tag detector; 'vio_left'/'vio_right'
+  // feed stereo VIO (each unique system-wide — server replies 409 on
+  // conflict). null = stream-only.
+  role: CameraRole | null
   online: boolean
   created_at: number
   // Unix seconds when the calibration was last uploaded; null if uncalibrated.
@@ -34,6 +42,8 @@ export interface Camera {
   // guesswork_meta enrichment (uploaded manually before the auto-pipeline).
   // Rule of thumb: ≤ 0.5 px is a good calibration; > 0.5 px is poor.
   reprojection_error_px: number | null
+  // Unix seconds of the last cam-IMU extrinsics calibration; null if none.
+  extrinsics_calibrated_at: number | null
 }
 
 // Threshold + presentation helpers for the Good / Poor visual cue shared
@@ -151,7 +161,7 @@ export interface CameraHardwareSyncPatch {
 
 export async function updateCamera(
   id: number,
-  patch: { name?: string; mode?: string; focal_length_mm?: number }
+  patch: { name?: string; mode?: string; focal_length_mm?: number; role?: CameraRole | null }
        & CameraSettingsPatch
        & CameraHardwareSyncPatch,
 ): Promise<Camera> {

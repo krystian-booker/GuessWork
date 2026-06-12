@@ -55,9 +55,10 @@ ctest --test-dir build --output-on-failure
 
 End-to-end (Playwright, in `web/`):
 ```bash
-cd web && npx playwright test
+cd web && npx playwright test              # mocked project: no backend, no camera needed
+GW_E2E_HW=1 npx playwright test            # + hardware project (hw.*.spec.ts): real camera
 ```
-The Playwright config spins up **two** webservers: `../build-fresh/guesswork --port 8080` and `npm run dev` on :5173. You must build `guesswork` into `build-fresh/` before running e2e tests, or edit the path in `web/playwright.config.ts`.
+The default **mocked** project intercepts every API call with `page.route()` (shared payloads in `web/e2e/helpers.ts`) and only starts the Vite dev server. With `GW_E2E_HW=1` the config also boots `../build-fresh/guesswork --port 8080` and runs the `hw.*.spec.ts` suite (WebRTC streaming + the camera-lifecycle heap regression) — build `guesswork` into `build-fresh/` first, and a Spinnaker camera must be plugged in.
 
 ## Architecture
 
@@ -134,7 +135,7 @@ Engine rules worth knowing: single-threaded by design (`FusionSupervisor`'s engi
 
 ### React frontend (`web/`)
 
-Vite + React 18 + react-router. Three pages: `/` (StreamPage, the WebRTC video), `/cameras` (CRUD UI), and `/cameras/:id/calibrate` (CalibratePage — live preview + record/stop, suggested Kalibr docker command, camchain YAML upload; `js-yaml` parses the camchain client-side for display). API client wrappers live in `web/src/api/`. The dev server proxies `/api` to `:8080`; the production build is embedded into the binary by CMake — there is no separate static-file deploy step.
+Vite 7 + React 19 + TypeScript, **Tailwind 4 + shadcn/ui** (dark-only industrial theme; tokens in `src/index.css` `@theme`, components in `src/components/ui/` — regenerate with `npx shadcn add`, don't hand-write), **TanStack Query v5** (typed fetchers in `src/api/`, hooks + central query-key factory in `src/queries/keys.ts`, polling tiers in `src/lib/query-client.ts` — status endpoints poll at 1–2 s only while a consuming component is mounted; the global `MutationCache.onError` toasts every 409/503 envelope via sonner), Recharts (`RollingChart` over the `use-time-series` rolling buffer). Pages (sidebar layout in `components/layout/`): `/` Dashboard, `/cameras(/:id)` CRUD + live WebRTC detail (`components/stream/WebRtcPlayer.tsx`, non-trickle signaling, `window.__pc` e2e hook), `/calibration` hub + intrinsics wizard (SSE Kalibr log via `hooks/use-event-source`) + extrinsics + Allan, `/field` (SVG field view — pure geometry in `components/field/fieldGeometry.ts`), `/vio`, `/fusion`, `/can` (CAN + IMU config incl. `T_robot_imu`), `/hardware-sync`, `/settings` (config export/import). Config pages use the explicit-save `components/config/ConfigForm.tsx`. The dev server proxies `/api` to `:8080`; the production build is embedded into the binary by CMake (**build hosts need Node ≥ 22.12** for Vite 7) — there is no separate static-file deploy step.
 
 ## Conventions worth knowing
 

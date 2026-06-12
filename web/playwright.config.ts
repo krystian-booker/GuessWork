@@ -1,9 +1,12 @@
 import { defineConfig, devices } from '@playwright/test'
 
-// Two webServers: the headless guesswork binary on :8080 (pipeline + WebRTC
-// signaling + status), and Vite on :5173 (proxies /api to :8080). The test
-// drives a real Chromium against the Vite dev server, exercising the same
-// codepath a developer browser would.
+// Two projects:
+//  - mocked (default): every API call is intercepted with page.route(); only
+//    the Vite dev server runs. Works with no camera and no backend.
+//  - hardware (GW_E2E_HW=1): also boots ../build-fresh/guesswork on :8080 and
+//    runs the hw.*.spec.ts suite against real Spinnaker hardware.
+const HW = !!process.env.GW_E2E_HW
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
@@ -13,14 +16,18 @@ export default defineConfig({
   reporter: 'list',
 
   webServer: [
-    {
-      command: '../build-fresh/guesswork --port 8080 --stream-fps 30',
-      url: 'http://localhost:8080/api/status',
-      reuseExistingServer: false,
-      timeout: 30_000,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
+    ...(HW
+      ? [
+          {
+            command: '../build-fresh/guesswork --port 8080 --stream-fps 30',
+            url: 'http://localhost:8080/api/status',
+            reuseExistingServer: false,
+            timeout: 30_000,
+            stdout: 'pipe' as const,
+            stderr: 'pipe' as const,
+          },
+        ]
+      : []),
     {
       command: 'npm run dev -- --strictPort',
       url: 'http://localhost:5173',
@@ -37,8 +44,18 @@ export default defineConfig({
 
   projects: [
     {
-      name: 'chromium',
+      name: 'mocked',
+      testIgnore: /hw\./,
       use: { ...devices['Desktop Chrome'] },
     },
+    ...(HW
+      ? [
+          {
+            name: 'hardware',
+            testMatch: /hw\./,
+            use: { ...devices['Desktop Chrome'] },
+          },
+        ]
+      : []),
   ],
 })
