@@ -31,6 +31,23 @@ struct FusionStatus {
     bool        vio_enabled = false;  // T_robot_imu configured + parseable
     std::string vio_reason;           // why not, when disabled
 
+    // Degraded-modes matrix string (derive_fusion_mode / docs/pose_pipeline.md).
+    std::string mode = "uninitialized";
+
+    // Per-stage latency (docs/pose_pipeline.md § latency stages):
+    //   tag_pulse_to_fusion — trigger pulse → tag measurement entering fusion
+    //   queue_wait          — internal queue dwell (drainer push → engine pop)
+    //   pose_staleness      — teensy_now − newest state at each CAN send;
+    //                         the headline trigger-pulse→pose-on-CAN number
+    //                         (target p95 < 50 ms). Solve time lives in
+    //                         counters.solve_ms_*.
+    struct LatencyEntry {
+        double   last_ms = 0.0;
+        double   p95_ms  = 0.0;
+        uint64_t count   = 0;
+    };
+    LatencyEntry lat_tag_pulse_to_fusion, lat_queue_wait, lat_pose_staleness;
+
     double lag_s = 0.0;  // active engine lag (config copy)
 
     bool   teensy_now_healthy = false;

@@ -11,11 +11,13 @@
 #include <vector>
 
 #include "calibration/calibration_store.hpp"
+#include "core/latency_stats.hpp"
 #include "core/odom_types.hpp"
 #include "fusion/fusion_engine.hpp"
 #include "fusion/teensy_now.hpp"
 #include "server/apriltag_supervisor.hpp"
 #include "server/fusion_config_repository.hpp"
+#include "server/fusion_mode.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/teensy_manager.hpp"
 #include "server/vio_supervisor.hpp"
@@ -106,9 +108,18 @@ struct Reconfigure {
 };
 struct Reset {};
 
-using Event = std::variant<gw::apriltag::TagPoseMeasurement,
-                           gw::vio::VioOdometry, gw::ChassisSpeeds,
-                           Reconfigure, Reset>;
+using EventPayload = std::variant<gw::apriltag::TagPoseMeasurement,
+                                  gw::vio::VioOdometry, gw::ChassisSpeeds,
+                                  Reconfigure, Reset>;
+
+struct Event {
+    EventPayload payload;
+    int64_t      pushed_ns = 0;  // host steady clock at push (queue_wait stage)
+};
+
+int64_t steady_now_ns() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
 
 }  // namespace
 
@@ -140,9 +151,15 @@ struct FusionSupervisor::Impl {
     std::atomic<int64_t>        output_period_ns{10'000'000};
     std::atomic<int64_t>        max_extrapolation_ns{150'000'000};
 
-    // --- Teensy-now (odom drainer writes, output/status read) -----------------
+    // --- Teensy-now (odom + tag drainers write, output/status read) -----------
     std::mutex                     now_mu;
     gw::fusion::TeensyNowEstimator teensy_now;
+
+    // --- per-stage latency (drainer/engine/output threads write) --------------
+    std::mutex       lat_mu;
+    gw::LatencyStats tag_lat;        // trigger pulse → tag entering fusion
+    gw::LatencyStats queue_lat;      // internal queue dwell
+    gw::LatencyStats staleness_lat;  // teensy_now − newest state at CAN send
 
     // --- per-source stats + output counters -----------------------------------
     SourceStats           tag_stats, vio_stats, odom_stats;
@@ -164,14 +181,14 @@ struct FusionSupervisor::Impl {
          ApriltagSupervisor& at, VioSupervisor& v, TeensyManager& t)
         : fusion_config(fc), imu_config(ic), apriltag(at), vio(v), teensy(t) {}
 
-    void push(Event e) {
+    void push(EventPayload payload) {
         {
             std::lock_guard lk(q_mu);
             if (queue.size() >= kQueueCap) {
                 queue.pop_front();
                 queue_dropped.fetch_add(1, std::memory_order_relaxed);
             }
-            queue.push_back(std::move(e));
+            queue.push_back(Event{std::move(payload), steady_now_ns()});
         }
         q_cv.notify_one();
     }
@@ -240,7 +257,14 @@ struct FusionSupervisor::Impl {
                     queue.pop_front();
                 }
             }
-            for (auto& e : batch) {
+            const int64_t pop_ns = steady_now_ns();
+            {
+                std::lock_guard lk(lat_mu);
+                for (const auto& e : batch) {
+                    queue_lat.add(static_cast<double>(pop_ns - e.pushed_ns) * 1e-6);
+                }
+            }
+            for (auto& ev : batch) {
                 std::visit(
                     [&](auto&& m) {
                         using T = std::decay_t<decltype(m)>;
@@ -263,7 +287,7 @@ struct FusionSupervisor::Impl {
                             if (engine) engine->feed_odom(m);
                         }
                     },
-                    e);
+                    ev.payload);
             }
             batch.clear();
             publish_snapshot();
@@ -293,10 +317,17 @@ struct FusionSupervisor::Impl {
             }
             if (!t_now) continue;
 
+            // Pre-clamp staleness IS the headline trigger-pulse→pose-on-CAN
+            // latency (st.t_ns is the newest fused state's pulse stamp).
+            // Signed: slightly negative when the estimator is tag-biased.
+            const int64_t raw_ns = *t_now - st.t_ns;
+            {
+                std::lock_guard lat_lk(lat_mu);
+                staleness_lat.add(static_cast<double>(raw_ns) * 1e-6);
+            }
             const int64_t max_ns =
                 max_extrapolation_ns.load(std::memory_order_relaxed);
-            const int64_t dt_ns =
-                std::clamp<int64_t>(*t_now - st.t_ns, 0, max_ns);
+            const int64_t dt_ns = std::clamp<int64_t>(raw_ns, 0, max_ns);
             const double dt_s = static_cast<double>(dt_ns) * 1e-9;
 
             const auto T = gw::fusion::extrapolate_planar(
@@ -340,6 +371,26 @@ FusionSupervisor::FusionSupervisor(FusionConfigRepository& fusion_config,
         gw::apriltag::TagPoseMeasurement m;
         while (impl_->tag_bus->wait_pop(impl_->tag_sub, m)) {
             impl_->tag_stats.note();
+            if (m.clock_source ==
+                gw::apriltag::TagPoseMeasurement::Clock::kTeensy) {
+                // Tags also feed the Teensy-now estimator so it survives
+                // CAN-odom death. The ~15–40 ms detect latency biases the
+                // estimate EARLY (the EMA mixes it with the dominant
+                // higher-rate odom feed when that's alive), which only
+                // shortens output extrapolation — never overshoots it.
+                const int64_t host_now = steady_now_ns();
+                std::optional<int64_t> t_now;
+                {
+                    std::lock_guard lk(impl_->now_mu);
+                    impl_->teensy_now.feed(m.t_ns, host_now);
+                    t_now = impl_->teensy_now.now(host_now);
+                }
+                if (t_now) {
+                    std::lock_guard lk(impl_->lat_mu);
+                    impl_->tag_lat.add(
+                        static_cast<double>(*t_now - m.t_ns) * 1e-6);
+                }
+            }
             impl_->push(m);
         }
     });
@@ -448,6 +499,23 @@ FusionStatus FusionSupervisor::status() {
     st.tag.bus_dropped  = im.tag_bus->dropped(im.tag_sub);
     st.vio.bus_dropped  = im.vio_bus->dropped(im.vio_sub);
     st.odom.bus_dropped = im.teensy.odom_bus().dropped(im.odom_sub);
+
+    st.mode = derive_fusion_mode(st.state.initialized, st.tag.last_age_ms,
+                                 st.vio.last_age_ms, st.odom.last_age_ms,
+                                 st.vio_enabled, st.state.collision_mode);
+
+    {
+        std::lock_guard lk(im.lat_mu);
+        const auto fill = [](FusionStatus::LatencyEntry& e,
+                             const gw::LatencyStats& s) {
+            e.last_ms = s.last_ms();
+            e.p95_ms  = s.p95_ms();
+            e.count   = s.count();
+        };
+        fill(st.lat_tag_pulse_to_fusion, im.tag_lat);
+        fill(st.lat_queue_wait, im.queue_lat);
+        fill(st.lat_pose_staleness, im.staleness_lat);
+    }
 
     {
         std::lock_guard lk(im.now_mu);

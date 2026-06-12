@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status & hardware testing
 
-Implementation status (Phases 1–6 of the pose-estimation roadmap done) and
-the staged real-hardware bring-up/test plan live in
-**`docs/hardware-bringup.md`** — update it as hardware tests are completed.
-The CAN wire contract is **`docs/can-protocol.md`** ↔ `firmware/src/can_payloads.h`.
+Implementation status (Phases 1–7 of the pose-estimation roadmap done — the
+full software roadmap) and the staged real-hardware bring-up/test plan live
+in **`docs/hardware-bringup.md`** — update it as hardware tests are
+completed. The CAN wire contract is **`docs/can-protocol.md`** ↔
+`firmware/src/can_payloads.h`. **Every coordinate frame, clock domain,
+covariance convention and the degraded-modes matrix: `docs/pose_pipeline.md`**
+(frame mix-ups are the #1 bug source — read it before touching pose math).
 
 ## Platform constraints
 
@@ -120,6 +123,14 @@ Time sync lives ONLY on the host: `gw::RioClockSync` (pure, unit-tested) fits `t
 GTSAM is built from source by `cmake/gtsam.cmake` (ExternalProject, pinned **4.3a1**, BSD license): Boost-free build (`GTSAM_ENABLE_BOOST_SERIALIZATION=OFF`, `GTSAM_USE_BOOST_FEATURES=OFF` — dodges the Homebrew Boost 1.90 hazard; if it regresses, both flags ON are safe at this tag), **`IncrementalFixedLagSmoother` lives in core gtsam at 4.3a1** (unstable OFF), system Eigen, TBB off, `-include cassert` (same libc++ fix as OpenVINS). GTSAM appears ONLY inside `fusion_engine.cpp`'s Pimpl.
 
 Engine rules worth knowing: single-threaded by design (`FusionSupervisor`'s engine thread owns it; 3 bus drainers feed an internal queue; tests drive it directly); init = geometric medoid of the first 5 kTeensy tags (kHost tags always rejected); **VIO betweens are emitted lazily** onto in-lag historical keys (OpenVINS publishes ~50–100 ms behind the pulse stamp); every new key gets an odom between or a constant-velocity bridge ×10 noise (connectivity invariant — prevents `IndeterminantLinearSystemException`, plus QR factorization + try/catch→auto-reinit); VIO per-sample delta noise comes from config sigmas, NOT published-cov differencing (no cross-cov ⇒ not PSD-safe; published cov only health-gates); collision mode (>50% of the last `collision_window` gated tags rejected) opens the gate and inflates VIO/odom ×`collision_inflation` — tags are the truth source; full reinit on pos-std > `reinit_pos_std_m`, solver throw, NaN, or 5 s unresolved collision. `T_robot_imu` unset disables VIO ingestion only. IMU preintegration is a reserved Phase 7 seam (`feed_imu` commented in fusion_engine.hpp). API: `GET /api/fusion/status`, `GET/PUT /api/fusion/config` (single-row `fusion_config` table, additive; PUT returns `restarted` — engine-relevant changes rebuild, output_hz/max_extrapolation are live-applied), `POST /api/fusion/reset`. An imu-config PUT also reloads fusion (T_robot_imu gating).
+
+### Hardening & ops (Phase 7)
+
+- **Latency**: `/api/fusion/status.latency` carries four stages (`tag_pulse_to_fusion`, `queue_wait`, `solve`, `pose_staleness`); **`pose_staleness` p95 is the trigger-pulse→pose-on-CAN headline (< 50 ms target)**. Shared ring helper: `gw::LatencyStats` (src/core/latency_stats.hpp, not thread-safe — owner locks). The `TeensyNowEstimator` is fed by both the odom AND tag drainers (tag feed is early-biased by detect latency — only shortens extrapolation; it keeps teensy-now alive through CAN-odom death).
+- **Degraded modes**: `mode` string from pure `derive_fusion_mode` (src/server/fusion_mode.hpp); the matrix lives in docs/pose_pipeline.md §6 and its rows mirror `tests/test_fusion_mode.cpp` 1:1. No publish before init and no publish while teensy-now is unwarmed are deliberate (CAN counter staleness signals both).
+- **Allan refinement** (`/api/imu/allan/*`): record a static IMU log (32-byte binary records → `~/.guesswork/imu_logs/`), analyze (`gw::compute_allan` — overlapping ADEV, N at τ=1 s on the −1/2 slope, K at τ=3 s on +1/2, Kalibr units), apply worst-axis values into imu_config. ≥3 h static data for a credible K (overnight recommended); motion/short-data/fit warnings come back in the response.
+- **Config snapshot** (`GET /api/config/export`, `POST /api/config/import`): full robot identity incl. calibration blobs (verbatim strings). Import = non-destructive merge (cameras by serial w/ pin pre-clear for swaps, groups/layouts by name, snapshot-active layout activated last), per-section error report, then propagation (CameraSupervisor notifications → apriltag/vio/fusion reloads → CAN-mode push). Logic is HTTP-free in src/server/config_snapshot.{hpp,cpp} (unit-tested round trip).
+- **Soak**: `scripts/soak_check.sh` polls status endpoints → CSV + PASS/FAIL verdict; the sanitizer-soak procedure is bring-up Stage 8. **GTSAM/OpenVINS ExternalProjects do NOT inherit sanitizer flags** (independent configures — uninstrumented dylibs; acceptable: engine thread is GTSAM's only user). The no-hardware TSAN target is `gw_tests --gtest_filter='FusionSupervisor*'`.
 
 ### React frontend (`web/`)
 

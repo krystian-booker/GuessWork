@@ -131,6 +131,26 @@ FieldLayoutRow FieldLayoutRepository::create(std::string_view name,
     });
 }
 
+std::optional<FieldLayoutRow> FieldLayoutRepository::update_json(
+        int64_t id, std::string_view json) {
+    const std::string json_str(json);
+    return db_.with_handle([&](sqlite3* h) -> std::optional<FieldLayoutRow> {
+        StmtGuard g;
+        const std::string sql =
+            std::string("UPDATE field_layouts SET json = ? WHERE id = ? "
+                        "RETURNING ") + kSelectColumns + ";";
+        if (sqlite3_prepare_v2(h, sql.c_str(), -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "field_layouts update_json: prepare");
+        }
+        sqlite3_bind_text (g.stmt, 1, json_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(g.stmt, 2, id);
+        const int rc = sqlite3_step(g.stmt);
+        if (rc == SQLITE_ROW) return read_row(g.stmt);
+        if (rc == SQLITE_DONE) return std::nullopt;
+        throw_sqlite(h, "field_layouts update_json: step");
+    });
+}
+
 bool FieldLayoutRepository::activate(int64_t id) {
     return db_.with_handle([id](sqlite3* h) {
         // Single transaction keeps "exactly one active" invariant atomic.

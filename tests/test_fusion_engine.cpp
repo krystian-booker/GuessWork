@@ -158,6 +158,7 @@ struct Scenario {
     double vio_latency   = 0.06;
     bool   with_vio      = true;
     double vio_stop_at   = 1e18;  // VIO death
+    double odom_stop_at  = 1e18;  // chassis-speeds death
     double vio_epoch_at  = 1e18;  // epoch reset (new odom frame)
     double tags_off_from = 1e18, tags_off_to = -1.0;  // tag drought window
     int    tag_outlier_every = 0;  // every Nth tag is gross
@@ -187,7 +188,8 @@ RunResult run_scenario(FusionEngine& engine, const Sim& sim, const Scenario& sc,
     };
     std::vector<Event> events;
 
-    for (double t = 0; t < sc.duration_s; t += sc.odom_period) {
+    for (double t = 0; t < std::min(sc.duration_s, sc.odom_stop_at);
+         t += sc.odom_period) {
         events.push_back({t, 0, t});
     }
     int tag_idx = 0;
@@ -369,6 +371,39 @@ TEST(FusionEngineTest, VioDeathDegradesGracefully) {
     EXPECT_EQ(engine.counters().reinits, 0u);
     EXPECT_LT(res.rmse_pos_m, 0.10);
     EXPECT_GT(engine.counters().vio_fused_intervals, 0u);
+}
+
+TEST(FusionEngineTest, OdomDeathMidRunStaysBounded) {
+    // CAN odom dies; tag-created states fall back to bridge factors while
+    // VIO betweens keep covering intervals — the `no_odom` matrix row.
+    FusionEngine engine(test_params());
+    Sim sim;
+    Lcg rng;
+    Scenario sc;
+    sc.odom_stop_at = 6.0;
+    const auto res = run_scenario(engine, sim, sc, rng);
+
+    EXPECT_EQ(engine.counters().reinits, 0u);
+    EXPECT_LT(res.rmse_pos_m, 0.15);
+    EXPECT_LT(res.max_pos_after_s, 0.5);
+    EXPECT_GT(engine.counters().bridge_factors, 0u);
+    EXPECT_TRUE(engine.state().initialized);
+}
+
+TEST(FusionEngineTest, TagsOnlyStaysBounded) {
+    // Both relative sources gone — pure tag operation (`tags_only` row).
+    FusionEngine engine(test_params());
+    Sim sim;
+    Lcg rng;
+    Scenario sc;
+    sc.with_vio     = false;
+    sc.odom_stop_at = 6.0;
+    const auto res = run_scenario(engine, sim, sc, rng);
+
+    EXPECT_EQ(engine.counters().reinits, 0u);
+    EXPECT_LT(res.rmse_pos_m, 0.3);
+    EXPECT_GT(engine.counters().bridge_factors, 0u);
+    EXPECT_TRUE(engine.state().initialized);
 }
 
 TEST(FusionEngineTest, EpochResetNeverDifferencesAcross) {

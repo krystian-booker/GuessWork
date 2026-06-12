@@ -6,6 +6,7 @@
 #include "server/routes_calibration.hpp"
 #include "server/routes_camera.hpp"
 #include "server/routes_can.hpp"
+#include "server/routes_config.hpp"
 #include "server/routes_fusion.hpp"
 #include "server/routes_hardware_sync.hpp"
 #include "server/routes_imu.hpp"
@@ -34,6 +35,7 @@ struct HttpServer::Impl {
          CanConfigRepository&                  can_config,
          FusionSupervisor&                     fusion,
          FusionConfigRepository&               fusion_config,
+         ImuAllanService&                      allan,
          std::chrono::steady_clock::time_point started_at)
         : port(p) {
         register_status_routes(app, supervisor, started_at);
@@ -41,11 +43,15 @@ struct HttpServer::Impl {
         register_camera_routes(app, cameras, supervisor);
         register_calibration_routes(app, cameras, calibration, supervisor);
         register_hardware_sync_routes(app, trigger_groups, teensy);
-        register_imu_routes(app, imu_config, teensy, apriltag, fusion);
+        register_imu_routes(app, imu_config, teensy, apriltag, fusion, allan);
         register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_vio_routes(app, vio, vio_config);
         register_can_routes(app, can_config, teensy);
         register_fusion_routes(app, fusion, fusion_config);
+        register_config_routes(app, cameras, trigger_groups, field_layouts,
+                               imu_config, vio_config, can_config,
+                               fusion_config, supervisor, apriltag, vio,
+                               fusion, teensy);
         register_static_routes(app);
     }
 };
@@ -64,11 +70,12 @@ HttpServer::HttpServer(uint16_t                              port,
                        CanConfigRepository&                  can_config,
                        FusionSupervisor&                     fusion,
                        FusionConfigRepository&               fusion_config,
+                       ImuAllanService&                      allan,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
                                    trigger_groups, teensy, imu_config,
                                    field_layouts, apriltag, vio, vio_config,
-                                   can_config, fusion, fusion_config,
+                                   can_config, fusion, fusion_config, allan,
                                    started_at)) {}
 
 HttpServer::~HttpServer() = default;

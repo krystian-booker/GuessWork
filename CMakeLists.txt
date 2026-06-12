@@ -67,6 +67,7 @@ add_library(gw_core
     src/core/frame_pool.cpp
     src/core/frame_channel.cpp
     src/core/rio_clock_sync.cpp
+    src/core/allan_variance.cpp
 )
 target_include_directories(gw_core PUBLIC src)
 target_link_libraries(gw_core PUBLIC
@@ -154,6 +155,12 @@ FetchContent_MakeAvailable(crow)
 # SQLite (system-installed; macOS ships sqlite3 in the SDK)
 # ----------------------------------------------------------------------------
 find_package(SQLite3 REQUIRED)
+# FindSQLite3 resolves the header inside an SDK's usr/include. When that SDK
+# differs from the compiler's implicit sysroot (e.g. Xcode.app vs
+# CommandLineTools), the resulting `-isystem <SDK>/usr/include` jumps ahead
+# of libc++'s headers and every <cstddef>-style include breaks. sqlite3.h is
+# on the implicit search path anyway — drop the interface include dir.
+set_target_properties(SQLite3::SQLite3 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
 
 # ----------------------------------------------------------------------------
 # yaml-cpp (fetched) + calibration library. gw_calibration parses/serializes
@@ -292,6 +299,10 @@ add_library(gw_server
     src/server/fusion_config_repository.cpp
     src/server/fusion_supervisor.cpp
     src/server/routes_fusion.cpp
+    src/server/imu_log_recorder.cpp
+    src/server/imu_allan_service.cpp
+    src/server/config_snapshot.cpp
+    src/server/routes_config.cpp
     src/server/teensy_manager.cpp
     src/server/telemetry_decoder.cpp
 )
@@ -437,6 +448,12 @@ if(GW_BUILD_TESTS)
         tests/test_teensy_now.cpp
         tests/test_fusion_engine.cpp
         tests/test_fusion_config_repository.cpp
+        tests/test_latency_stats.cpp
+        tests/test_allan_variance.cpp
+        tests/test_fusion_mode.cpp
+        tests/test_fusion_supervisor.cpp
+        tests/test_imu_log_recorder.cpp
+        tests/test_config_snapshot.cpp
     )
     target_link_libraries(gw_tests PRIVATE gw_core gw_consumer gw_encoder gw_server gw_apriltag gw_vio gw_fusion GTest::gtest_main)
     # The estimator tests build synthetic projections with OpenCV directly,

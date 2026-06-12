@@ -15,6 +15,8 @@
 #include <limits>
 #include <vector>
 
+#include "core/latency_stats.hpp"
+
 // Implementation notes (the design rules live in the Phase 6 plan and the
 // header; the non-obvious ones):
 //
@@ -85,8 +87,7 @@ constexpr double kTwistFloorTrans = 4.0;  // m/s
 constexpr double kPlanarSigmaZ   = 0.02;  // m per interval
 constexpr double kPlanarSigmaRot = 0.02;  // rad per interval
 
-constexpr double kVioMaxPosStd  = 2.0;  // published-cov health gate, m
-constexpr int    kSolveRingSize = 256;
+constexpr double kVioMaxPosStd = 2.0;  // published-cov health gate, m
 
 }  // namespace
 
@@ -140,8 +141,7 @@ struct FusionEngine::Impl {
     int64_t          collision_since_ns_ = 0;
 
     // --- solve timing ----------------------------------------------------------------
-    std::array<double, kSolveRingSize> solve_ring_{};
-    size_t solve_n_ = 0;
+    gw::LatencyStats solve_lat_;
 
     // ---------------------------------------------------------------------------
     void feed_tag(const gw::apriltag::TagPoseMeasurement& m);
@@ -265,13 +265,9 @@ bool FusionEngine::Impl::update(
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - start)
                           .count();
-    solve_ring_[solve_n_ % kSolveRingSize] = ms;
-    ++solve_n_;
-    c_.solve_ms_last = ms;
-    const size_t n = std::min(solve_n_, static_cast<size_t>(kSolveRingSize));
-    std::array<double, kSolveRingSize> sorted = solve_ring_;
-    std::sort(sorted.begin(), sorted.begin() + static_cast<ptrdiff_t>(n));
-    c_.solve_ms_p95 = sorted[static_cast<size_t>(0.95 * static_cast<double>(n - 1))];
+    solve_lat_.add(ms);
+    c_.solve_ms_last = solve_lat_.last_ms();
+    c_.solve_ms_p95  = solve_lat_.p95_ms();
     if (ok) refresh_state();
     return ok;
 }

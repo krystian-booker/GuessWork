@@ -1,6 +1,6 @@
 # GuessWork — Implementation Status & Hardware Bring-Up Plan
 
-*Last updated: 2026-06-11 (Phases 1–6 complete)*
+*Last updated: 2026-06-11 (Phases 1–7 complete — the full software roadmap)*
 
 GuessWork is the onboard pose-estimation system for an FRC robot: a Mac Mini M4
 runs 6 hardware-synced FLIR Chameleon3 cameras (4 AprilTag + 2 stereo VIO), a
@@ -85,8 +85,17 @@ time-sync scheme, controller-side WPILib sketch).
 | `FusionSupervisor` (3 bus drainers → engine thread → output thread), `TeensyNowEstimator`, planar extrapolation → `TeensyManager::send_pose` at `output_hz` | ✅ unit-tested (estimator, extrapolation) + live-server verified (boot gating, config round-trip incl. `restarted` semantics, reset, clean SIGINT joins) |
 | Fused pose accuracy on a real field course; solve-time budget under real measurement rates; VIO-kill / collision behavior on hardware | ⬜ **hardware-pending** (Stage 7 — needs the full rig) |
 
-**Test totals:** 228/228 passing. Phase 7 (hardening) is planned but not yet
-implemented.
+### Phase 7 — Hardening & ops
+| Piece | Status |
+|---|---|
+| Per-stage latency instrumentation in `/api/fusion/status` (`tag_pulse_to_fusion`, `queue_wait`, `solve`, **`pose_staleness`** — the trigger-pulse→pose-on-CAN headline, target p95 < 50 ms) + degraded-mode `mode` string; teensy_now now also tag-fed (survives CAN-odom death) | ✅ unit-tested (`LatencyStats`, `derive_fusion_mode`) + threaded supervisor integration test + live-server verified |
+| Degraded-modes matrix (docs/pose_pipeline.md §6) + new engine sim cases (odom death, tags-only) | ✅ simulation-tested; matrix rows mirror the mode unit tests 1:1 |
+| Allan-variance IMU refinement, fully API-integrated: `POST /api/imu/allan/recording` → binary log in `~/.guesswork/imu_logs/` → `analyze` (overlapping ADEV, N/K fits, static-ness warnings) → `apply` into imu_config | ✅ math unit-tested (synthetic white noise + random walk recovered ±10–25%); recorder bit-exact-tested; **real overnight BMI088 recording pending (Stage 8 prep)** |
+| Config snapshot export/import (`/api/config/export\|import`): cameras incl. calibration blobs, trigger groups, field layouts, all tunables; non-destructive merge with per-section error reporting | ✅ round-trip + conflict-case unit tests + live verified |
+| `scripts/soak_check.sh` + threaded `test_fusion_supervisor` (the TSAN target) + `docs/pose_pipeline.md` | ✅ in repo; sanitizer soak itself is Stage 8 |
+
+**Test totals:** 259/259 passing. The software roadmap is complete — what
+remains is hardware execution (Stages 0–8) and data-driven tuning.
 
 ---
 
@@ -316,9 +325,54 @@ mark 5+ waypoints with tape-measured field coordinates.
    `output_hz` with an advancing counter (`output.sent` tracking
    `pose_tx_fw`).
 
-**Pass:** waypoints ±3 cm/±2°, `solve_ms.p95` < 25 ms, all degradation
-scenarios recover without manual intervention. The covariance/sigma tuning
-loop (Phase 7) starts from whatever this stage measures.
+**Pass:** waypoints ±3 cm/±2°, `solve_ms.p95` < 25 ms,
+`latency.pose_staleness.p95_ms` < 50 (the trigger-pulse→pose-on-CAN
+headline), all degradation scenarios recover without manual intervention.
+The covariance/sigma tuning loop starts from whatever this stage measures.
+
+### Stage 8 — 3-hour sanitizer soak + Allan refinement (overnight + 1 day)
+
+**Prep (overnight before the soak):** with the robot powered and perfectly
+still (IMU rigid, nobody touching the cart):
+`POST /api/imu/allan/recording {"duration_s": 28800}` (8 h). In the morning:
+`POST /api/imu/allan/analyze` → review per-axis fits + warnings (motion
+heuristics, fit-quality flags) → `POST /api/imu/allan/apply` to replace the
+datasheet noise values in imu_config. Less than 3 h of data earns an
+explicit "random-walk fit unreliable" warning — don't apply those.
+
+**Sanitizer builds** (one-time per dir; the first configure builds GTSAM +
+OpenVINS again inside each dir — budget 30–60 min each):
+
+```bash
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DGW_ENABLE_TSAN=ON && cmake --build build-tsan -j
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGW_ENABLE_ASAN=ON && cmake --build build-asan -j
+```
+
+Note: the GTSAM/OpenVINS ExternalProjects are **not instrumented** (they
+configure independently of our sanitizer flags). Acceptable by design — the
+fusion engine thread is GTSAM's only user and OpenVINS is fed
+single-threaded; our own threading is fully instrumented. The headline
+software check runs without hardware:
+`TSAN_OPTIONS=halt_on_error=1 build-tsan/gw_tests --gtest_filter='FusionSupervisor*'`.
+
+**Soak runs** (all cameras + IMU + CAN attached, triggers armed, RIO test
+program streaming):
+
+```bash
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 ./build-tsan/guesswork &
+scripts/soak_check.sh --duration-s 10800
+# then again with:
+MallocNanoZone=0 ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:detect_leaks=0 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./build-asan/guesswork &
+scripts/soak_check.sh --duration-s 10800
+```
+
+(Reduce camera rates under TSAN if frame drops appear — the 5–15× slowdown
+is expected; the soak is hunting races and leaks, not throughput.)
+
+**Pass:** zero sanitizer reports across both 3-hour runs; `soak_check.sh`
+prints PASS (flat crc/exception/queue-drop counters, reinits ≤ 3,
+`pose_staleness` p95 < 50 ms, RSS growth < 20% from the 5-minute baseline).
 
 ### Record as you go
 
@@ -331,8 +385,13 @@ are the headline metrics worth tracking over time.
 
 ## 4. What comes after hardware sign-off
 
-- **Phase 7 — Hardening:** end-to-end latency budget (< 50 ms tag-to-pose),
-  degraded-mode matrix, Allan-variance IMU noise refinement, fusion
-  covariance/sigma tuning from Stage 7 data, and the IMU-preintegration
-  fallback for VIO-unhealthy (the reserved `feed_imu` seam in
-  `src/fusion/fusion_engine.hpp`).
+The software roadmap (Phases 1–7) is complete. What remains is data-driven:
+
+- **Fusion covariance/sigma tuning** from Stage 7 waypoint numbers — every
+  knob is live-tunable via `PUT /api/fusion/config`.
+- **Allan-refined IMU noise** (Stage 8 prep) feeding both Kalibr and VIO.
+- **Config snapshot discipline:** after calibration + tuning, download
+  `GET /api/config/export` and commit/back it up — it restores the robot's
+  full identity (calibrations included) onto a fresh install or spare Mac.
+- **Future season:** the IMU-preintegration fallback for VIO-unhealthy via
+  the reserved `feed_imu` seam (`src/fusion/fusion_engine.hpp`).

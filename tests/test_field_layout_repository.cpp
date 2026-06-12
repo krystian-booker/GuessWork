@@ -103,4 +103,18 @@ TEST_F(FieldLayoutRepositoryTest, GetReturnsVerbatimJson) {
     EXPECT_FALSE(repo_->get(9999).has_value());
 }
 
+TEST_F(FieldLayoutRepositoryTest, UpdateJsonReplacesDocumentOnly) {
+    const auto a = repo_->create("a", kStubLayoutJson);  // auto-active
+    const char* updated_json =
+        R"({"field": {"length": 17.0, "width": 8.0}, "tags": []})";
+
+    const auto updated = repo_->update_json(a.id, updated_json);
+    ASSERT_TRUE(updated.has_value());
+    EXPECT_EQ(updated->json, updated_json);
+    EXPECT_EQ(updated->name, "a");
+    EXPECT_TRUE(updated->active);  // the active row is updatable in place
+
+    EXPECT_FALSE(repo_->update_json(9999, updated_json).has_value());
+}
+
 }  // namespace gw::server

@@ -6,6 +6,7 @@ namespace gw::server {
 
 class ApriltagSupervisor;
 class FusionSupervisor;
+class ImuAllanService;
 class ImuConfigRepository;
 class TeensyManager;
 
@@ -15,10 +16,19 @@ class TeensyManager;
 // PUT validates t_imu_robot through gw::calib::parse_t_robot_imu, pushes a
 // fresh shared config into the AprilTag pipeline, and reloads the fusion
 // supervisor (T_robot_imu gates its VIO ingestion) on success.
+//
+// Allan-variance refinement (record a long static IMU log → analyze →
+// apply suggested noise values):
+//   POST   /api/imu/allan/recording {"duration_s":N}  (409 while running)
+//   DELETE /api/imu/allan/recording                   (409 when idle)
+//   GET    /api/imu/allan/status
+//   POST   /api/imu/allan/analyze   {"file"?: basename}
+//   POST   /api/imu/allan/apply                       (409 without analysis)
 void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
                          TeensyManager&       teensy,
                          ApriltagSupervisor&  apriltag,
-                         FusionSupervisor&    fusion);
+                         FusionSupervisor&    fusion,
+                         ImuAllanService&     allan);
 
 }  // namespace gw::server

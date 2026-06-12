@@ -48,6 +48,12 @@ public:
     // before insert). Throws DuplicateLayoutNameError on UNIQUE conflict.
     FieldLayoutRow create(std::string_view name, std::string_view json);
 
+    // Replaces just the layout document; name and active flag untouched.
+    // Returns the updated row, or nullopt if id doesn't exist. Caller
+    // validates json (used by config-snapshot import to update a layout in
+    // place — the active row can't be remove()+create()d).
+    std::optional<FieldLayoutRow> update_json(int64_t id, std::string_view json);
+
     // Returns false if id doesn't exist.
     bool activate(int64_t id);
 

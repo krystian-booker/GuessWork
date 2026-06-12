@@ -7,6 +7,7 @@
 #include "calibration/calibration_store.hpp"
 #include "server/apriltag_supervisor.hpp"
 #include "server/fusion_supervisor.hpp"
+#include "server/imu_allan_service.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/route_helpers.hpp"
 #include "server/teensy_manager.hpp"
@@ -55,7 +56,8 @@ void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
                          TeensyManager&       teensy,
                          ApriltagSupervisor&  apriltag,
-                         FusionSupervisor&    fusion) {
+                         FusionSupervisor&    fusion,
+                         ImuAllanService&     allan) {
     CROW_ROUTE(app, "/api/imu/status").methods("GET"_method)
     ([&teensy] {
         const auto s = teensy.status();
@@ -129,6 +131,137 @@ void register_imu_routes(crow::SimpleApp&     app,
         } catch (const std::exception& e) {
             return error_response(500, e.what());
         }
+    });
+
+    // --- Allan-variance refinement -----------------------------------------
+
+    const auto analysis_to_json = [](const ImuAllanService::Analysis& a) {
+        crow::json::wvalue j;
+        j["file"]       = a.file;
+        j["samples"]    = a.samples;
+        j["duration_s"] = a.duration_s;
+        j["rate_hz"]    = a.rate_hz;
+
+        crow::json::wvalue sug;
+        sug["accel_noise_density"] = a.accel_noise_density;
+        sug["accel_random_walk"]   = a.accel_random_walk;
+        sug["gyro_noise_density"]  = a.gyro_noise_density;
+        sug["gyro_random_walk"]    = a.gyro_random_walk;
+        j["suggested"] = std::move(sug);
+
+        static const char* kAxisNames[6] = {"accel_x", "accel_y", "accel_z",
+                                            "gyro_x",  "gyro_y",  "gyro_z"};
+        crow::json::wvalue axes;
+        for (int i = 0; i < 6; ++i) {
+            crow::json::wvalue ax;
+            ax["noise_density"]    = a.axes[i].noise_density;
+            ax["random_walk"]      = a.axes[i].random_walk;
+            ax["noise_density_ok"] = a.axes[i].noise_density_ok;
+            ax["random_walk_ok"]   = a.axes[i].random_walk_ok;
+            ax["fit_quality"]      = a.axes[i].fit_quality;
+            axes[kAxisNames[i]] = std::move(ax);
+        }
+        j["axes"] = std::move(axes);
+
+        crow::json::wvalue::list warns;
+        for (const auto& w : a.warnings) warns.emplace_back(w);
+        j["warnings"]    = std::move(warns);
+        j["analyzed_at"] = a.analyzed_at;
+        return j;
+    };
+
+    CROW_ROUTE(app, "/api/imu/allan/recording").methods("POST"_method)
+    ([&allan](const crow::request& req) {
+        const auto body = crow::json::load(req.body);
+        if (!body || !body.has("duration_s") ||
+            body["duration_s"].t() != crow::json::type::Number) {
+            return error_response(400, "body must carry numeric duration_s");
+        }
+        const int64_t duration_s = body["duration_s"].i();
+        std::string   err;
+        if (!allan.start_recording(duration_s, err)) {
+            const int code =
+                err.find("in progress") != std::string::npos ? 409 : 400;
+            return error_response(code, err);
+        }
+        const auto st = allan.recording_status();
+        crow::json::wvalue j;
+        j["recording"]  = true;
+        put_opt(j, "file", st.file);
+        j["duration_s"] = duration_s;
+        return json_response(200, std::move(j));
+    });
+
+    CROW_ROUTE(app, "/api/imu/allan/recording").methods("DELETE"_method)
+    ([&allan] {
+        const auto before = allan.recording_status();
+        if (!allan.stop_recording()) {
+            return error_response(409, "no recording in progress");
+        }
+        crow::json::wvalue j;
+        j["stopped"] = true;
+        j["samples"] = before.samples;
+        put_opt(j, "file", before.file);
+        return json_response(200, std::move(j));
+    });
+
+    CROW_ROUTE(app, "/api/imu/allan/status").methods("GET"_method)
+    ([&allan, analysis_to_json] {
+        const auto st = allan.recording_status();
+        crow::json::wvalue rec;
+        rec["recording"] = st.recording;
+        put_opt(rec, "file", st.file);
+        rec["samples"]     = st.samples;
+        rec["bytes"]       = st.bytes;
+        rec["rate_hz"]     = st.rate_hz;
+        rec["remaining_s"] = st.remaining_s;
+
+        crow::json::wvalue j;
+        j["recording"] = std::move(rec);
+        if (const auto last = allan.last_analysis()) {
+            j["last_analysis"] = analysis_to_json(*last);
+        } else {
+            j["last_analysis"] = nullptr;
+        }
+        return json_response(200, std::move(j));
+    });
+
+    CROW_ROUTE(app, "/api/imu/allan/analyze").methods("POST"_method)
+    ([&allan, analysis_to_json](const crow::request& req) {
+        std::string file;
+        if (!req.body.empty()) {
+            const auto body = crow::json::load(req.body);
+            if (!body) return error_response(400, "invalid JSON body");
+            if (body.has("file")) {
+                if (body["file"].t() != crow::json::type::String) {
+                    return error_response(400, "file must be a string");
+                }
+                file = body["file"].s();
+            }
+        }
+        try {
+            return json_response(200, analysis_to_json(allan.analyze(file)));
+        } catch (const std::exception& e) {
+            const std::string msg = e.what();
+            const int code = msg.find("no IMU logs") != std::string::npos ? 404 : 400;
+            return error_response(code, msg);
+        }
+    });
+
+    CROW_ROUTE(app, "/api/imu/allan/apply").methods("POST"_method)
+    ([&allan, &imu_config, &fusion] {
+        std::string err;
+        if (!allan.apply(err)) {
+            const int code =
+                err.find("no analysis") != std::string::npos ? 409 : 500;
+            return error_response(code, err);
+        }
+        // Noise changes matter to fusion (and VIO picks them up on its next
+        // reload, per the imu-config PUT convention).
+        const bool restarted = fusion.reload();
+        auto j = config_to_json(imu_config.get());
+        j["restarted"] = restarted;
+        return json_response(200, std::move(j));
     });
 }
 
