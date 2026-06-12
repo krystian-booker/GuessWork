@@ -64,7 +64,7 @@ export function FieldView({
 
         {tags.map((t) => {
           const hot = highlightTagIds?.has(t.id) ?? false
-          const color = hot ? 'var(--primary)' : 'var(--muted-foreground)'
+          const color = hot ? 'var(--success)' : 'var(--muted-foreground)'
           return (
             <g key={t.id} data-tag-id={t.id}>
               <g transform={`translate(${t.x} ${t.y}) rotate(${(t.yawRad * 180) / Math.PI})`}>
@@ -87,7 +87,7 @@ export function FieldView({
                     y={-0.16}
                     textAnchor="middle"
                     fontSize={0.22}
-                    fill={hot ? 'var(--primary)' : 'var(--muted-foreground)'}
+                    fill={hot ? 'var(--success)' : 'var(--muted-foreground)'}
                     fontFamily="var(--font-mono)"
                   >
                     {t.id}

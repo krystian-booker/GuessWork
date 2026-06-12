@@ -53,6 +53,10 @@ export function useAvailableCameraModes(serial: string | null) {
     queryKey: serial ? qk.availableModes(serial) : ['cameras', 'available', 'none', 'modes'],
     queryFn: () => getAvailableCameraModes(serial!),
     enabled: serial != null,
+    // Mode capabilities are static per camera, and each uncached fetch costs
+    // the backend a full Spinnaker Init/DeInit cycle on the device — don't
+    // refetch on remount/refocus.
+    staleTime: Infinity,
   })
 }
 

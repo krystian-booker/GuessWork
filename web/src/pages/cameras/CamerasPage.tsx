@@ -25,7 +25,7 @@ function CalibBadge({ reproj }: { reproj: number | null }) {
   return (
     <Badge
       variant="outline"
-      className={q === 'good' ? 'border-primary/50 text-primary' : 'border-destructive/50 text-destructive'}
+      className={q === 'good' ? 'border-success/50 text-success' : 'border-destructive/50 text-destructive'}
     >
       {reproj!.toFixed(2)} px
     </Badge>

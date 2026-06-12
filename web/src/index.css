@@ -3,42 +3,48 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Dark-only industrial theme (appliance UI — no light mode). */
+/* Dark-only industrial theme (appliance UI — no light mode).
+   Team 2852 "High Voltage" branding: charcoal base, the exact brand red
+   #d42f12 from 2852.ca as primary (don't lighten it — lighter vermilion
+   reads as orange), and a separate success green so red never reads as an
+   error. */
 :root,
 .dark {
-  --background: #0b1118;
-  --foreground: #e6edf3;
-  --card: #101a26;
-  --card-foreground: #e6edf3;
-  --popover: #0f1822;
-  --popover-foreground: #e6edf3;
-  --primary: #2dd36f;
-  --primary-foreground: #04150b;
-  --secondary: #1a2736;
-  --secondary-foreground: #cdd9e5;
-  --muted: #16202e;
-  --muted-foreground: #8b9bb0;
-  --accent: #1a2736;
-  --accent-foreground: #e6edf3;
+  --background: #101012;
+  --foreground: #ececee;
+  --card: #17171a;
+  --card-foreground: #ececee;
+  --popover: #151517;
+  --popover-foreground: #ececee;
+  --primary: #d42f12;
+  --primary-foreground: #ffffff;
+  --secondary: #222226;
+  --secondary-foreground: #d4d4d8;
+  --muted: #1c1c1f;
+  --muted-foreground: #a1a1aa;
+  --accent: #222226;
+  --accent-foreground: #ececee;
   --destructive: #f0506e;
   --destructive-foreground: #ffffff;
   --warning: #fbbf24;
-  --border: #1d2a3a;
-  --input: #233246;
-  --ring: #2dd36f;
+  --success: #2dd36f;
+  --success-foreground: #04150b;
+  --border: #27272b;
+  --input: #2c2c31;
+  --ring: #d42f12;
   --chart-1: #2dd36f;
   --chart-2: #38bdf8;
   --chart-3: #fbbf24;
   --chart-4: #a78bfa;
   --chart-5: #fb7185;
-  --sidebar: #0d141d;
-  --sidebar-foreground: #cdd9e5;
-  --sidebar-primary: #2dd36f;
-  --sidebar-primary-foreground: #04150b;
-  --sidebar-accent: #182434;
-  --sidebar-accent-foreground: #e6edf3;
-  --sidebar-border: #1d2a3a;
-  --sidebar-ring: #2dd36f;
+  --sidebar: #131315;
+  --sidebar-foreground: #d4d4d8;
+  --sidebar-primary: #d42f12;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #202024;
+  --sidebar-accent-foreground: #ececee;
+  --sidebar-border: #27272b;
+  --sidebar-ring: #d42f12;
   --radius: 0.5rem;
 }
 
@@ -60,6 +66,8 @@
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-warning: var(--warning);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);

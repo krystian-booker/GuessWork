@@ -107,7 +107,7 @@ export function UploadLayoutDialog() {
               (parseError ? (
                 <p className="text-xs text-destructive">{parseError}</p>
               ) : (
-                <p className="text-xs text-primary">{tagCount} tags parsed ✓</p>
+                <p className="text-xs text-success">{tagCount} tags parsed ✓</p>
               ))}
           </div>
         </div>

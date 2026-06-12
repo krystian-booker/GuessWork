@@ -27,6 +27,13 @@ StreamConsumer::StreamConsumer(uint32_t out_w,
 
 StreamConsumer::~StreamConsumer() {
     try { detach(); } catch (...) {}
+    // Tear the encoder down BEFORE implicit member destruction: members are
+    // destroyed in reverse declaration order, so peers_mu_/peers_ would die
+    // ahead of enc_ — and an in-flight VideoToolbox output callback would
+    // then lock a destroyed mutex (std::system_error → terminate) or touch
+    // freed peers. ~H264Encoder completes all pending frames and invalidates
+    // the VT session, so no on_encoded can run past this point.
+    enc_.reset();
 }
 
 void StreamConsumer::attach(gw::FrameChannel& ch) {

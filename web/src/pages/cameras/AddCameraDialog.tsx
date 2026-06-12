@@ -20,11 +20,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
 import { useAvailableCameraModes, useAvailableCameras, useCreateCamera } from '@/queries/cameras'
 import { ModeSelect } from './ModeSelect'
-
-const PINS = [1, 2, 3, 4, 5, 6]
 
 export function AddCameraDialog() {
   const [open, setOpen] = useState(false)
@@ -32,8 +29,6 @@ export function AddCameraDialog() {
   const [name, setName] = useState('')
   const [focal, setFocal] = useState('')
   const [mode, setMode] = useState<string | null>(null)
-  const [hwSync, setHwSync] = useState(false)
-  const [pin, setPin] = useState<number | null>(null)
 
   // Poll while open so plugging a camera in shows up live.
   const available = useAvailableCameras(open)
@@ -45,8 +40,6 @@ export function AddCameraDialog() {
     setName('')
     setFocal('')
     setMode(null)
-    setHwSync(false)
-    setPin(null)
   }
 
   const focalNum = Number(focal)
@@ -55,8 +48,7 @@ export function AddCameraDialog() {
     name.trim().length > 0 &&
     Number.isFinite(focalNum) &&
     focalNum > 0 &&
-    focalNum < 1000 &&
-    (!hwSync || pin != null)
+    focalNum < 1000
 
   const submit = () => {
     if (!canSubmit || serial == null) return
@@ -66,8 +58,6 @@ export function AddCameraDialog() {
         serial,
         focal_length_mm: focalNum,
         mode: mode ?? undefined,
-        hardware_sync_enabled: hwSync,
-        trigger_output_pin: hwSync ? (pin ?? undefined) : undefined,
       },
       {
         onSuccess: (cam) => {
@@ -100,7 +90,10 @@ export function AddCameraDialog() {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        {/* min-w-0: DialogContent is a grid; without it the select triggers'
+            nowrap labels set the track's min-content width and overflow the
+            dialog instead of truncating. */}
+        <div className="min-w-0 space-y-4">
           <div className="space-y-1.5">
             <Label>Detected camera</Label>
             <Select value={serial ?? ''} onValueChange={(s) => setSerial(s)}>
@@ -165,30 +158,6 @@ export function AddCameraDialog() {
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <div>
-              <Label>Hardware sync</Label>
-              <p className="text-xs text-muted-foreground">Trigger from a Teensy output pin</p>
-            </div>
-            <Switch checked={hwSync} onCheckedChange={setHwSync} aria-label="Hardware sync" />
-          </div>
-          {hwSync && (
-            <div className="space-y-1.5">
-              <Label>Trigger output pin</Label>
-              <Select value={pin?.toString() ?? ''} onValueChange={(v) => setPin(Number(v))}>
-                <SelectTrigger className="w-full" aria-label="Trigger output pin">
-                  <SelectValue placeholder="Select pin" />
-                </SelectTrigger>
-                <SelectContent>
-                  {PINS.map((p) => (
-                    <SelectItem key={p} value={p.toString()}>
-                      Pin {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
         </div>
 
         <DialogFooter>

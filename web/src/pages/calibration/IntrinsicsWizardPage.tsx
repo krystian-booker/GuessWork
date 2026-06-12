@@ -32,7 +32,7 @@ import { CamchainView } from './CamchainView'
 const JOB_BADGE: Record<JobState, string> = {
   pending: 'border-muted-foreground/50 text-muted-foreground',
   running: 'border-chart-2/60 text-chart-2',
-  succeeded: 'border-primary/50 text-primary',
+  succeeded: 'border-success/50 text-success',
   failed: 'border-destructive/50 text-destructive',
   cancelled: 'border-warning/50 text-warning',
 }

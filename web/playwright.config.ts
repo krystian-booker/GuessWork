@@ -12,6 +12,9 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
+  // The hw.*.spec.ts files all seed/wipe the cameras table around the single
+  // physical camera — parallel workers would stomp each other's rows.
+  workers: HW ? 1 : undefined,
   retries: 0,
   reporter: 'list',
 

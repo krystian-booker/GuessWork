@@ -16,8 +16,8 @@ test.describe('Dashboard (mocked)', () => {
     await expect(page.getByTestId('stat-teensy-value')).toContainText('online')
     await expect(page.getByTestId('stat-vio-value')).toContainText('tracking')
 
-    // 41 ms < 50 ms → good (primary green) staleness tone.
-    await expect(page.getByTestId('stat-fusion-value')).toHaveClass(/text-primary/)
+    // 41 ms < 50 ms → good (success green) staleness tone.
+    await expect(page.getByTestId('stat-fusion-value')).toHaveClass(/text-success/)
 
     // No alerts with everything healthy.
     await expect(page.getByTestId('alerts-strip')).toHaveCount(0)

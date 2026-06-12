@@ -41,7 +41,7 @@ test.describe('Cameras (mocked)', () => {
     await expect(page.getByTestId('camera-row-2')).toContainText('VIO left')
   })
 
-  test('add-camera dialog posts serial, focal length, mode and pin', async ({ page }) => {
+  test('add-camera dialog posts serial, focal length and mode', async ({ page }) => {
     await mockAllStatus(page)
     await json(page, '**/api/cameras', [])
     await json(page, '**/api/cameras/available', [
@@ -78,9 +78,8 @@ test.describe('Cameras (mocked)', () => {
     await page.getByLabel('Focal length (mm)').fill('6')
     await page.getByLabel('Camera mode').click()
     await page.getByRole('option', { name: /Binned/ }).click()
-    await page.getByLabel('Hardware sync').click()
-    await page.getByLabel('Trigger output pin').click()
-    await page.getByRole('option', { name: 'Pin 2' }).click()
+    // Hardware sync is configured on the camera detail page, not at creation.
+    await expect(page.getByLabel('Hardware sync')).toHaveCount(0)
     await page.getByTestId('add-camera-submit').click()
 
     await expect.poll(() => postBody).not.toBeNull()
@@ -89,9 +88,9 @@ test.describe('Cameras (mocked)', () => {
       serial: '33333333',
       focal_length_mm: 6,
       mode: 'Mode1',
-      hardware_sync_enabled: true,
-      trigger_output_pin: 2,
     })
+    expect(postBody).not.toHaveProperty('hardware_sync_enabled')
+    expect(postBody).not.toHaveProperty('trigger_output_pin')
   })
 
   test('role conflict 409 surfaces as a toast', async ({ page }) => {

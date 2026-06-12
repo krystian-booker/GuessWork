@@ -49,6 +49,9 @@ struct CameraStatus {
     uint64_t    frames_dropped  = 0;
     uint64_t    frames_incomplete = 0;
     double      fps_1s          = 0.0;
+    // Why the most recent start attempt failed; empty while online / never
+    // attempted. Lets the UI explain an offline-but-plugged-in camera.
+    std::string last_start_error;
 };
 
 // Multi-camera orchestrator.

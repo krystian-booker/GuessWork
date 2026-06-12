@@ -28,6 +28,7 @@ import {
   useUpdateCamera,
 } from '@/queries/cameras'
 import { useDeleteCalibration } from '@/queries/calibration'
+import { useStatus } from '@/queries/status'
 import { CameraSettingsPanel } from './CameraSettingsPanel'
 import { ModeSelect } from './ModeSelect'
 import { RoleSelect } from './RoleSelect'
@@ -51,6 +52,7 @@ export default function CameraDetailPage() {
   const navigate = useNavigate()
 
   const camera = useCamera(cameraId)
+  const status = useStatus()
   const modes = useCameraModes(cameraId, camera.data?.online ?? false)
   const update = useUpdateCamera(cameraId)
   const deleteCamera = useDeleteCamera()
@@ -74,6 +76,7 @@ export default function CameraDetailPage() {
   const identityDirty = name !== cam.name || Number(focal) !== cam.focal_length_mm
   const aspect =
     cam.mode_width && cam.mode_height ? `${cam.mode_width} / ${cam.mode_height}` : '4 / 3'
+  const startError = status.data?.cameras.find((c) => c.id === cam.id)?.last_start_error
 
   return (
     <div>
@@ -98,10 +101,15 @@ export default function CameraDetailPage() {
             <WebRtcPlayer cameraId={cam.id} aspectRatio={aspect} />
           ) : (
             <div
-              className="flex items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
+              className="flex flex-col items-center justify-center gap-2 rounded-lg border bg-card px-6 text-sm text-muted-foreground"
               style={{ aspectRatio: aspect }}
             >
               Camera offline — no preview
+              {startError && (
+                <p className="max-w-full text-center text-xs text-destructive" data-testid="start-error">
+                  Last start attempt failed: {startError}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -234,7 +242,7 @@ export default function CameraDetailPage() {
                     className={
                       calibrationQuality(cam.reprojection_error_px) === 'poor'
                         ? 'border-destructive/50 text-destructive'
-                        : 'border-primary/50 text-primary'
+                        : 'border-success/50 text-success'
                     }
                   >
                     {cam.reprojection_error_px != null

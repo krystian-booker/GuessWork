@@ -22,7 +22,7 @@ import { useRestartVio, useUpdateVioConfig, useVioConfig, useVioStatus } from '@
 
 function phaseBadge(phase: string, running: boolean): string {
   if (!running) return 'border-muted-foreground/50 text-muted-foreground'
-  if (/track/i.test(phase)) return 'border-primary/50 text-primary'
+  if (/track/i.test(phase)) return 'border-success/50 text-success'
   if (/init/i.test(phase)) return 'border-chart-2/60 text-chart-2'
   return 'border-warning/50 text-warning'
 }

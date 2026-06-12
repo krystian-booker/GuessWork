@@ -6,7 +6,7 @@ export type StatTone = 'default' | 'good' | 'warn' | 'bad'
 
 const valueTone: Record<StatTone, string> = {
   default: 'text-foreground',
-  good: 'text-primary',
+  good: 'text-success',
   warn: 'text-warning',
   bad: 'text-destructive',
 }

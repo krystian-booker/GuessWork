@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils'
 export type DotTone = 'good' | 'warn' | 'bad' | 'idle'
 
 const toneClass: Record<DotTone, string> = {
-  good: 'bg-primary',
+  good: 'bg-success',
   warn: 'bg-warning',
   bad: 'bg-destructive',
   idle: 'bg-muted-foreground/50',

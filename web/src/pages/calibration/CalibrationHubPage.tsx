@@ -52,7 +52,7 @@ export default function CalibrationHubPage() {
                           className={
                             q === 'poor'
                               ? 'border-destructive/50 text-destructive'
-                              : 'border-primary/50 text-primary'
+                              : 'border-success/50 text-success'
                           }
                         >
                           {c.reprojection_error_px != null

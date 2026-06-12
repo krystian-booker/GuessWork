@@ -90,7 +90,7 @@ export function CamchainView({ yamlText }: { yamlText: string }) {
             variant="outline"
             className={
               reproj <= GOOD_REPROJ_ERROR_PX
-                ? 'border-primary/50 text-primary'
+                ? 'border-success/50 text-success'
                 : 'border-destructive/50 text-destructive'
             }
           >

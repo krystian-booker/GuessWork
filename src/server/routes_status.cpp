@@ -27,6 +27,7 @@ void register_status_routes(crow::SimpleApp&                       app,
             j["frames_dropped"]    = c.frames_dropped;
             j["frames_incomplete"] = c.frames_incomplete;
             j["fps_1s"]            = c.fps_1s;
+            if (!c.last_start_error.empty()) j["last_start_error"] = c.last_start_error;
             items.emplace_back(std::move(j));
         }
 

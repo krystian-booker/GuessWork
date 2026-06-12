@@ -9,6 +9,8 @@ export interface CameraStatus {
   frames_dropped: number
   frames_incomplete: number
   fps_1s: number
+  // Why the most recent start attempt failed; absent while online.
+  last_start_error?: string
 }
 
 export interface Status {

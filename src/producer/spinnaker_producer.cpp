@@ -85,24 +85,6 @@ void configure_hardware_trigger(Spinnaker::GenApi::INodeMap& nm) {
     // (e.g. Chameleon3) only expose "Off"; tolerate the absence.
     try { set_enum_node(nm, "TriggerOverlap", "ReadOut"); } catch (...) {}
     set_enum_node(nm, "TriggerMode",       "On");
-
-    // ChunkFrameID gives us a strictly-monotonic per-camera trigger counter
-    // so we can detect dropped frames and re-align the host-side pulse ring.
-    try { set_bool_node(nm, "ChunkModeActive", true);                } catch (...) {}
-    try { set_enum_node(nm, "ChunkSelector",   "FrameID");           } catch (...) {}
-    try { set_bool_node(nm, "ChunkEnable",     true);                } catch (...) {}
-}
-
-// Pull the FrameID off the chunk payload. Returns 0 if chunk data wasn't
-// enabled or the camera didn't ship it for this frame; the producer treats
-// that as "no chunk info available".
-uint64_t read_chunk_frame_id(const Spinnaker::ImagePtr& img) {
-    try {
-        Spinnaker::ChunkData cd = img->GetChunkData();
-        return static_cast<uint64_t>(cd.GetFrameID());
-    } catch (...) {
-        return 0;
-    }
 }
 
 // Per-node helpers for the live-settings path. Each tolerates the node being
@@ -384,6 +366,11 @@ void SpinnakerProducer::start() {
         }
         set_enum_node(dev_nm, "PixelFormat",     "Mono8");
         set_enum_node(dev_nm, "AcquisitionMode", "Continuous");  // belt-and-suspenders, default on Chameleon3
+        // Chunk mode must be off in BOTH modes: it survives until power-cycle
+        // and inflates PayloadSize past width*height, which fails the
+        // buffer-pool size checks below. (Frame-drop tracking uses the U3V
+        // transport-layer frame id instead — see capture_loop.)
+        try { set_bool_node(dev_nm, "ChunkModeActive", false); } catch (...) {}
         if (impl_->hw_sync.enabled) {
             configure_hardware_trigger(dev_nm);
         } else {
@@ -498,6 +485,10 @@ void SpinnakerProducer::Impl::capture_loop() {
         try {
             img = cam->GetNextImage(kGetNextImageTimeoutMs);
         } catch (const Spinnaker::Exception& e) {
+            // Timeouts are expected in hw-sync mode whenever no trigger pulses
+            // arrive (Teensy disarmed/unplugged) — GetNextImage already blocked
+            // for the full timeout, so just poll again quietly.
+            if (e.GetError() == Spinnaker::SPINNAKER_ERR_TIMEOUT) continue;
             std::cerr << "[" << name << "] Spinnaker GetNextImage failed: " << e.what() << "\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -517,7 +508,14 @@ void SpinnakerProducer::Impl::capture_loop() {
         // which is the mechanism behind the "identical timestamps" guarantee.
         uint64_t stamp_ts = camera_ts;
         if (hw_sync.enabled && hw_sync.stamper) {
-            const uint64_t frame_id = read_chunk_frame_id(img);
+            // The U3V leader's block id is a strictly-monotonic per-exposure
+            // counter (gaps = dropped frames), which is all the pulse matcher
+            // needs. +1 keeps the first frame (TL id 0) out of the "no frame
+            // id available" sentinel below — only deltas matter to the
+            // matcher, so a constant offset is harmless. If the camera ever
+            // reports no id (UINT64_MAX), the +1 wraps to 0 and we fall back
+            // to the camera timestamp.
+            const uint64_t frame_id = static_cast<uint64_t>(img->GetFrameID()) + 1;
             if (frame_id != 0) {
                 const uint64_t pulse_ns =
                     hw_sync.stamper->pop_pulse_ns(hw_sync.trigger_output_pin, frame_id);

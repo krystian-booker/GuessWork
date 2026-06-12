@@ -76,6 +76,7 @@ struct CameraSlot {
     std::optional<int64_t>             trigger_output_pin;  // 1..6 when hw-sync is on
     std::unique_ptr<SpinnakerProducer> producer;     // null when offline
     std::shared_ptr<StreamConsumer>    stream;       // null when offline
+    std::string                        last_start_error;  // why offline; empty when online
     // Factory-made role consumers (e.g. AprilTag detection), attached after
     // the stream and detached before the producer dies. The cached role /
     // calibration stamps detect when on_camera_updated must rebuild them.
@@ -139,6 +140,12 @@ struct CameraSupervisor::Impl {
     std::unordered_map<std::string, int64_t> id_by_serial;
     std::vector<ConsumerFactory>             factories;
     bool                                     started = false;
+    // Mode capabilities are static per camera, but enumerating them on an
+    // unregistered camera costs a full Spinnaker Init()/DeInit() cycle on the
+    // device — and rapid cycles can abort inside the SDK's U3V event teardown
+    // (pthread_mutex_destroy assert). Cache per serial for the process
+    // lifetime so the add-camera dialog touches the hardware at most once.
+    std::unordered_map<std::string, gw::VideoModeList> standalone_modes_by_serial;
 
     Impl(CameraRepository& r, StreamParams p, gw::IPulseStamper* s)
         : repo(r), params(p), stamper(s) {}
@@ -193,8 +200,10 @@ void CameraSupervisor::Impl::try_start_slot_locked(CameraSlot& slot, Spinnaker::
     } catch (const std::exception& e) {
         std::cerr << "CameraSupervisor: failed to start camera '" << slot.name
                   << "' (serial " << slot.serial << "): " << e.what() << "\n";
+        slot.last_start_error = e.what();
         return;
     }
+    slot.last_start_error.clear();
 
     auto stream = std::make_shared<StreamConsumer>(
         params.width, params.height, params.fps, params.bitrate_bps);
@@ -409,6 +418,7 @@ std::vector<CameraStatus> CameraSupervisor::snapshot_all() {
             s.frames_incomplete = ps.total_incomplete;
             s.fps_1s            = slot.fps.sample(ps.total_published);
         }
+        s.last_start_error = slot.last_start_error;
         out.push_back(std::move(s));
     }
     return out;
@@ -563,6 +573,11 @@ CameraSupervisor::list_video_modes_for_serial(const std::string& serial) {
     std::lock_guard lk(impl_->mu);
     if (!impl_->system) return std::nullopt;
 
+    if (auto cached = impl_->standalone_modes_by_serial.find(serial);
+        cached != impl_->standalone_modes_by_serial.end()) {
+        return cached->second;
+    }
+
     Spinnaker::CameraList cams = impl_->system->GetCameras();
     const unsigned int n = cams.GetSize();
     std::optional<gw::VideoModeList> out;
@@ -571,6 +586,7 @@ CameraSupervisor::list_video_modes_for_serial(const std::string& serial) {
         if (read_tl_string(cam, "DeviceSerialNumber") == serial) {
             // Spinnaker exceptions propagate to the route layer (mapped to 503).
             out = gw::enumerate_video_modes_standalone(cam);
+            impl_->standalone_modes_by_serial[serial] = *out;
             break;
         }
     }

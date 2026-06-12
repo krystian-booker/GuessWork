@@ -267,7 +267,7 @@ export default function CanPage() {
               <KV
                 label="CAN bus"
                 value={
-                  <span className={s?.can_ok ? 'text-primary' : 'text-destructive'}>
+                  <span className={s?.can_ok ? 'text-success' : 'text-destructive'}>
                     {s ? (s.can_ok ? 'ok' : 'fault') : '—'}
                   </span>
                 }
@@ -276,7 +276,7 @@ export default function CanPage() {
                 label="Clock sync"
                 value={
                   s ? (
-                    <span className={s.clock_sync.healthy ? 'text-primary' : 'text-warning'}>
+                    <span className={s.clock_sync.healthy ? 'text-success' : 'text-warning'}>
                       {s.clock_sync.healthy ? 'healthy' : 'warming up'} ·{' '}
                       {s.clock_sync.drift_ppm.toFixed(1)} ppm · {s.clock_sync.resets} resets
                     </span>
