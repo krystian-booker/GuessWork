@@ -90,8 +90,14 @@ private:
 // MultiTopicBagRecorder::run_pull.
 class VioFeederConsumer final : public gw::IConsumer {
 public:
+    // `rotate_180`: camera physically mounted upside-down — the copy reverses
+    // rows+columns so OpenVINS sees the pair in one consistent roll (its KLT
+    // stereo matcher cannot associate features across a 180° relative roll).
+    // MUST match the calibration recordings (the bag recorders flip with the
+    // same flag) — the calibration's pixel frame is the flipped one.
     VioFeederConsumer(StereoSyncPairer::Side          side,
-                      std::shared_ptr<StereoSyncPairer> pairer);
+                      std::shared_ptr<StereoSyncPairer> pairer,
+                      bool                            rotate_180 = false);
     ~VioFeederConsumer() override;
 
     VioFeederConsumer(const VioFeederConsumer&)            = delete;
@@ -113,6 +119,7 @@ private:
 
     const StereoSyncPairer::Side      side_;
     std::shared_ptr<StereoSyncPairer> pairer_;
+    const bool                        rotate_180_;
 
     gw::FrameChannel*                  channel_ = nullptr;
     gw::FrameChannel::SubscriberHandle sub_;

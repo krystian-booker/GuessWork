@@ -9,4 +9,9 @@ namespace gw::server {
 // the JSON API and the React dev server is expected to run separately.
 void register_static_routes(crow::SimpleApp& app);
 
+// True when this binary embeds the React bundle (GW_BUILD_WEB=ON). The define
+// is PRIVATE to gw_server, so callers (e.g. the startup banner in main) probe
+// it at runtime through this.
+bool has_embedded_web();
+
 }  // namespace gw::server

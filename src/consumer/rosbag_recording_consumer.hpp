@@ -42,11 +42,15 @@ public:
     //   attach() time. Empty path skips the copy.
     // topic / frame_id: ROS topic + Image.header.frame_id. Defaults match
     //   the suggested Kalibr command in CalibrationSupervisor.
+    // rotate_180: record frames rotated 180° (upside-down-mounted VIO
+    //   camera). The calibration's pixel frame must match what the VIO
+    //   feeder delivers at runtime — both flip with the same per-camera rule.
     explicit RosbagRecordingConsumer(std::filesystem::path session_root,
                                      std::filesystem::path target_yaml_source = {},
                                      std::string           topic    = "/cam0/image_raw",
                                      std::string           frame_id = "cam0",
-                                     std::string           name     = "calibration");
+                                     std::string           name     = "calibration",
+                                     bool                  rotate_180 = false);
     ~RosbagRecordingConsumer() override;
 
     RosbagRecordingConsumer(const RosbagRecordingConsumer&)            = delete;
@@ -84,6 +88,7 @@ private:
     std::filesystem::path             target_yaml_source_;
     std::string                       topic_;
     std::string                       frame_id_;
+    bool                              rotate_180_ = false;
 
     std::unique_ptr<RosbagWriter>     writer_;
 

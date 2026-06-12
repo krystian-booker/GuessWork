@@ -72,6 +72,23 @@ TEST_F(CameraRepositoryTest, UpdateFocalLengthMm) {
     EXPECT_DOUBLE_EQ(upd->focal_length_mm, 12.5);
 }
 
+TEST_F(CameraRepositoryTest, OrientationDefaultsToZero) {
+    const auto c = repo_->create("front", "SN001", 6.0);
+    EXPECT_EQ(c.orientation, 0);
+}
+
+TEST_F(CameraRepositoryTest, UpdateOrientationRoundTrips) {
+    const auto c = repo_->create("front", "SN001", 6.0);
+    CameraUpdate u; u.orientation = 90;
+    const auto upd = repo_->update(c.id, u);
+    ASSERT_TRUE(upd.has_value());
+    EXPECT_EQ(upd->orientation, 90);
+
+    const auto fetched = repo_->get(c.id);
+    ASSERT_TRUE(fetched.has_value());
+    EXPECT_EQ(fetched->orientation, 90);
+}
+
 TEST_F(CameraRepositoryTest, CreateWithModeRoundTrips) {
     const auto c = repo_->create("front", "SN001", 6.0, std::string_view("Mode1"));
     ASSERT_TRUE(c.mode.has_value());

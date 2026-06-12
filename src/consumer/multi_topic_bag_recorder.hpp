@@ -39,6 +39,10 @@ struct CameraInputSpec {
     FrameChannel* channel = nullptr;
     std::string   topic;      // e.g. "/cam0/image_raw"
     std::string   frame_id;   // e.g. "cam0"
+    // Record this camera rotated 180° (upside-down VIO mount). Must match the
+    // VIO feeder's flip for the same camera — Kalibr calibrates the pixel
+    // frame OpenVINS will actually consume.
+    bool          rotate_180 = false;
 };
 
 class MultiTopicBagRecorder {

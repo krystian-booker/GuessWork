@@ -32,9 +32,11 @@ export default defineConfig({
         ]
       : []),
     {
+      // Reuse a running dev server — it serves from source with HMR, so it
+      // can't be stale (unlike the guesswork binary above, which stays strict).
       command: 'npm run dev -- --strictPort',
       url: 'http://localhost:5173',
-      reuseExistingServer: false,
+      reuseExistingServer: true,
       timeout: 30_000,
     },
   ],

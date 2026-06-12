@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "core/frame.hpp"
+#include "core/mono8_copy.hpp"
 
 namespace gw {
 
@@ -192,15 +193,8 @@ void MultiTopicBagRecorder::run_pull(size_t camera_idx) {
                 const size_t bytes =
                     static_cast<size_t>(task.width) * static_cast<size_t>(task.height);
                 task.pixels = std::make_unique<uint8_t[]>(bytes);
-                if (stride == task.width) {
-                    std::memcpy(task.pixels.get(), base, bytes);
-                } else {
-                    for (uint32_t y = 0; y < task.height; ++y) {
-                        std::memcpy(task.pixels.get() + y * task.width,
-                                    base + y * stride,
-                                    task.width);
-                    }
-                }
+                copy_mono8(task.pixels.get(), base, stride,
+                           task.width, task.height, cam.spec.rotate_180);
                 copied = true;
             }
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);

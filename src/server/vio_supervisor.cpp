@@ -82,7 +82,8 @@ std::shared_ptr<gw::IConsumer> VioSupervisor::make_consumer(const Camera& row) {
         return nullptr;
     }
 
-    auto feeder = std::make_shared<gw::vio::VioFeederConsumer>(side, pairer_);
+    auto feeder = std::make_shared<gw::vio::VioFeederConsumer>(
+        side, pairer_, vio_flip_180(row));
     feeders_[row.id] = feeder;
 
     // Calibration uploads / role changes re-run the factory via

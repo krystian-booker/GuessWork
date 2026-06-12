@@ -38,7 +38,8 @@ constexpr const char* kSelectColumns =
     "calibration_json, calibrated_at, "
     "hardware_sync_enabled, trigger_output_pin, "
     "created_at, "
-    "role, imu_extrinsics_json, extrinsics_calibrated_at";
+    "role, imu_extrinsics_json, extrinsics_calibrated_at, "
+    "orientation";
 
 std::optional<std::string> column_text_opt(sqlite3_stmt* stmt, int idx) {
     if (sqlite3_column_type(stmt, idx) == SQLITE_NULL) return std::nullopt;
@@ -77,6 +78,7 @@ Camera read_row(sqlite3_stmt* stmt) {
     c.role                     = column_text_opt (stmt, 14);
     c.imu_extrinsics_json      = column_text_opt (stmt, 15);
     c.extrinsics_calibrated_at = column_int64_opt(stmt, 16);
+    c.orientation              = sqlite3_column_int64(stmt, 17);
     return c;
 }
 
@@ -224,6 +226,7 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
         if (patch.hardware_sync_enabled) add_col("hardware_sync_enabled = ?");
         if (patch.trigger_output_pin)    add_col("trigger_output_pin = ?");
         if (patch.role)                  add_col("role = ?");
+        if (patch.orientation)           add_col("orientation = ?");
         sql += " WHERE id = ? RETURNING ";
         sql += kSelectColumns;
         sql += ";";
@@ -264,6 +267,7 @@ std::optional<Camera> CameraRepository::update(int64_t id, const CameraUpdate& p
                 sqlite3_bind_null(g.stmt, idx++);
             }
         }
+        if (patch.orientation) sqlite3_bind_int64(g.stmt, idx++, *patch.orientation);
         sqlite3_bind_int64(g.stmt, idx, id);
 
         const int rc = sqlite3_step(g.stmt);

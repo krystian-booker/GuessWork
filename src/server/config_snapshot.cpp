@@ -84,6 +84,7 @@ crow::json::wvalue export_snapshot(CameraRepository&       cameras,
         cj["hardware_sync_enabled"] = c.hardware_sync_enabled;
         put_opt(cj, "trigger_output_pin", c.trigger_output_pin);
         put_opt(cj, "role", c.role);
+        cj["orientation"] = c.orientation;
         put_opt(cj, "calibration_json", c.calibration_json);
         put_opt(cj, "calibrated_at", c.calibrated_at);  // informational only
         put_opt(cj, "imu_extrinsics_json", c.imu_extrinsics_json);
@@ -242,6 +243,8 @@ void import_cameras(const crow::json::rvalue& snap, CameraRepository& cameras,
             if (cj.has("role")) {
                 patch.role = opt_string(cj, "role");
             }
+            // Absent in old snapshots → leave the stored value alone.
+            patch.orientation = opt_int(cj, "orientation");
             cameras.update(existing->id, patch);
 
             // Blobs: set when present, never cleared by absence.

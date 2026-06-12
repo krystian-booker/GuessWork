@@ -41,6 +41,9 @@ struct Camera {
     // YAML: intrinsics + T_cam_imu + timeshift, T_cn_cnm1 where present).
     std::optional<std::string> imu_extrinsics_json;
     std::optional<int64_t>     extrinsics_calibrated_at;
+    // Physical mounting rotation in degrees, clockwise (0/90/180/270).
+    // Display-only: rotates the web preview; never touches the pixel pipeline.
+    int64_t                    orientation = 0;
     int64_t                    created_at = 0;  // unix seconds
 };
 
@@ -60,13 +63,27 @@ struct CameraUpdate {
     std::optional<std::optional<int64_t>> trigger_output_pin;
     // Same nested-optional pattern: inner nullopt clears the role.
     std::optional<std::optional<std::string>> role;
+    std::optional<int64_t>     orientation;  // 0/90/180/270, validated in routes
 
     bool empty() const {
         return !name && !focal_length_mm && !mode
             && !gain_auto && !gain && !exposure_auto && !exposure
-            && !hardware_sync_enabled && !trigger_output_pin && !role;
+            && !hardware_sync_enabled && !trigger_output_pin && !role
+            && !orientation;
     }
 };
+
+// True when this camera's MEASUREMENT-path pixel frame is rotated 180° from
+// the sensor: VIO-role cameras mounted upside-down get flipped at every copy
+// point (VIO feeder + both calibration bag recorders) so OpenVINS's KLT
+// stereo matcher sees the pair in one consistent roll and Kalibr calibrates
+// the exact frames VIO consumes. All other cameras/consumers (AprilTag,
+// preview encoder, intrinsics of non-VIO cameras) stay sensor-native —
+// they're orientation-agnostic by design.
+inline bool vio_flip_180(const Camera& c) {
+    return c.orientation == 180 && c.role &&
+           (*c.role == "vio_left" || *c.role == "vio_right");
+}
 
 // Thrown when a write violates the UNIQUE(name) constraint. Route layer maps
 // this to HTTP 409 Conflict.

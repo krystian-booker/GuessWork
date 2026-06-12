@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { ArrowLeft, Crosshair } from 'lucide-react'
-import { calibrationQuality } from '@/api/cameras'
+import { CAMERA_ORIENTATIONS, calibrationQuality, type CameraOrientation } from '@/api/cameras'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -98,7 +98,7 @@ export default function CameraDetailPage() {
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <div className="xl:col-span-2">
           {cam.online ? (
-            <WebRtcPlayer cameraId={cam.id} aspectRatio={aspect} />
+            <WebRtcPlayer cameraId={cam.id} aspectRatio={aspect} orientation={cam.orientation} />
           ) : (
             <div
               className="flex flex-col items-center justify-center gap-2 rounded-lg border bg-card px-6 text-sm text-muted-foreground"
@@ -165,6 +165,37 @@ export default function CameraDetailPage() {
               }
               disabledHint="Camera offline — mode can’t be changed."
             />
+          </SectionCard>
+
+          <SectionCard title="Orientation">
+            <div className="space-y-2">
+              <Select
+                value={String(cam.orientation)}
+                onValueChange={(v) =>
+                  update.mutate(
+                    { orientation: Number(v) as CameraOrientation },
+                    { onSuccess: () => toast.success('Orientation updated') },
+                  )
+                }
+              >
+                <SelectTrigger className="w-full" aria-label="Orientation">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CAMERA_ORIENTATIONS.map((deg) => (
+                    <SelectItem key={deg} value={String(deg)}>
+                      {deg === 0 ? '0° — upright' : `${deg}° clockwise`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Rotates the live preview. For VIO cameras, 180° also flips the frames fed to
+                VIO and recorded for its calibration, so an upside-down-mounted stereo camera
+                matches its partner — set before calibrating. AprilTag detection always uses
+                the raw sensor image.
+              </p>
+            </div>
           </SectionCard>
 
           <SectionCard title="Pipeline role">

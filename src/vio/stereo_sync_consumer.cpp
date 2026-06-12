@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "core/frame.hpp"
+#include "core/mono8_copy.hpp"
 
 namespace gw::vio {
 
@@ -106,8 +107,9 @@ StereoSyncPairer::Counters StereoSyncPairer::counters() const {
 // ---------------------------------------------------------------------------
 
 VioFeederConsumer::VioFeederConsumer(StereoSyncPairer::Side            side,
-                                     std::shared_ptr<StereoSyncPairer> pairer)
-    : side_(side), pairer_(std::move(pairer)) {}
+                                     std::shared_ptr<StereoSyncPairer> pairer,
+                                     bool                              rotate_180)
+    : side_(side), pairer_(std::move(pairer)), rotate_180_(rotate_180) {}
 
 VioFeederConsumer::~VioFeederConsumer() {
     detach();
@@ -158,14 +160,8 @@ void VioFeederConsumer::run() {
                 const size_t bytes =
                     static_cast<size_t>(sf.width) * static_cast<size_t>(sf.height);
                 sf.pixels.resize(bytes);
-                if (stride == sf.width) {
-                    std::memcpy(sf.pixels.data(), base, bytes);
-                } else {
-                    for (uint32_t y = 0; y < sf.height; ++y) {
-                        std::memcpy(sf.pixels.data() + y * sf.width,
-                                    base + y * stride, sf.width);
-                    }
-                }
+                gw::copy_mono8(sf.pixels.data(), base, stride,
+                               sf.width, sf.height, rotate_180_);
                 copied = true;
             }
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);

@@ -23,6 +23,7 @@ const camera = {
   calibrated_at: null,
   reprojection_error_px: null,
   extrinsics_calibrated_at: null,
+  orientation: 0,
 }
 
 const CAMCHAIN = [

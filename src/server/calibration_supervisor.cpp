@@ -159,7 +159,9 @@ CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
     s.sensor_width_px = live_sensor_width(camera_id);
     s.consumer        = std::make_unique<gw::RosbagRecordingConsumer>(
                        s.root,
-                       std::filesystem::path(GW_KALIBR_TARGET_DEFAULT));
+                       std::filesystem::path(GW_KALIBR_TARGET_DEFAULT),
+                       "/cam0/image_raw", "cam0", "calibration",
+                       /*rotate_180=*/vio_flip_180(*row));
     s.started_at = std::chrono::steady_clock::now();
     s.consumer->attach(*ch);  // may throw on filesystem error — that's the desired surface
 
@@ -456,7 +458,8 @@ CalibrationSupervisor::start_extrinsics(const std::vector<int64_t>& camera_ids) 
         }
 
         cams.push_back(std::move(p));
-        specs.push_back(gw::CameraInputSpec{ch, cams.back().topic, cams.back().frame_id});
+        specs.push_back(gw::CameraInputSpec{ch, cams.back().topic, cams.back().frame_id,
+                                            vio_flip_180(*row)});
     }
 
     // --- Side effects. ---

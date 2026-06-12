@@ -48,6 +48,10 @@ constexpr const char* kSchemaCameras =
     // extrinsics job stores it.
     "  imu_extrinsics_json      TEXT,"
     "  extrinsics_calibrated_at INTEGER,"
+    // Physical mounting rotation in degrees, clockwise. Display-only: the web
+    // UI rotates the live preview; the vision pipeline always consumes raw
+    // sensor frames (mounting rotation is absorbed by the Kalibr extrinsics).
+    "  orientation           INTEGER NOT NULL DEFAULT 0 CHECK (orientation IN (0,90,180,270)),"
     "  created_at            INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 

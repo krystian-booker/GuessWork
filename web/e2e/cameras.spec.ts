@@ -22,6 +22,7 @@ const cam = (over: Record<string, unknown> = {}) => ({
   calibrated_at: 1700000100,
   reprojection_error_px: 0.31,
   extrinsics_calibrated_at: null,
+  orientation: 0,
   ...over,
 })
 
@@ -91,6 +92,50 @@ test.describe('Cameras (mocked)', () => {
     })
     expect(postBody).not.toHaveProperty('hardware_sync_enabled')
     expect(postBody).not.toHaveProperty('trigger_output_pin')
+  })
+
+  test('orientation select PUTs and rotates the preview', async ({ page }) => {
+    await mockAllStatus(page)
+    // Mutable state: the PUT flips orientation; subsequent GETs serve it so the
+    // invalidation refetch updates the player's data-orientation attribute.
+    const state = { camera: cam({ online: true }) }
+    let putBody: Record<string, unknown> | null = null
+    const serve = (route: import('@playwright/test').Route) => {
+      if (route.request().method() === 'PUT') {
+        putBody = route.request().postDataJSON()
+        state.camera = { ...state.camera, ...putBody }
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(state.camera),
+        })
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(state.camera),
+      })
+    }
+    await page.route('**/api/cameras/1', serve)
+    await page.route('**/api/cameras', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([state.camera]) }),
+    )
+    await json(page, '**/api/cameras/1/modes', { supported: false, current: null, options: [] })
+    await json(page, '**/api/cameras/1/settings/limits', { gain: null, exposure: null })
+    // The player mounts (camera online) but signaling fails — irrelevant: the
+    // orientation attribute lives on the container regardless of stream state.
+    await page.route('**/api/cameras/1/stream/offer', (route) =>
+      route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"no stream"}' }),
+    )
+
+    await page.goto('/cameras/1')
+    await expect(page.getByTestId('webrtc-player')).toHaveAttribute('data-orientation', '0')
+
+    await page.getByLabel('Orientation').click()
+    await page.getByRole('option', { name: '90° clockwise' }).click()
+
+    await expect.poll(() => putBody).toEqual({ orientation: 90 })
+    await expect(page.getByTestId('webrtc-player')).toHaveAttribute('data-orientation', '90')
   })
 
   test('role conflict 409 surfaces as a toast', async ({ page }) => {

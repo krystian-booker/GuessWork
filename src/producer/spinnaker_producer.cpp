@@ -371,6 +371,14 @@ void SpinnakerProducer::start() {
         // buffer-pool size checks below. (Frame-drop tracking uses the U3V
         // transport-layer frame id instead — see capture_loop.)
         try { set_bool_node(dev_nm, "ChunkModeActive", false); } catch (...) {}
+        // Heal sensor readout flips a previous session (or SpinView) may have
+        // latched — the pipeline's pixel frame must always be sensor-native.
+        // NOTE: on-sensor 180° rotation via ReverseX+ReverseY was tried for
+        // upside-down mounts and abandoned: the Chameleon3 accepts and reads
+        // back both nodes but the image never flips (firmware no-op on the
+        // CM3 platform). Don't re-attempt without verifying actual pixels.
+        try { set_bool_node(dev_nm, "ReverseX", false); } catch (...) {}
+        try { set_bool_node(dev_nm, "ReverseY", false); } catch (...) {}
         if (impl_->hw_sync.enabled) {
             configure_hardware_trigger(dev_nm);
         } else {

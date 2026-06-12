@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "core/frame.hpp"
+#include "core/mono8_copy.hpp"
 
 namespace gw {
 
@@ -16,13 +17,15 @@ RosbagRecordingConsumer::RosbagRecordingConsumer(
     std::filesystem::path target_yaml_source,
     std::string           topic,
     std::string           frame_id,
-    std::string           name)
+    std::string           name,
+    bool                  rotate_180)
     : name_(std::move(name)),
       session_root_(std::move(session_root)),
       bag_path_(session_root_ / "calibration.bag"),
       target_yaml_source_(std::move(target_yaml_source)),
       topic_(std::move(topic)),
-      frame_id_(std::move(frame_id)) {}
+      frame_id_(std::move(frame_id)),
+      rotate_180_(rotate_180) {}
 
 RosbagRecordingConsumer::~RosbagRecordingConsumer() {
     try { detach(); } catch (...) {}
@@ -124,15 +127,8 @@ void RosbagRecordingConsumer::run_pull() {
                 const size_t bytes =
                     static_cast<size_t>(task.width) * static_cast<size_t>(task.height);
                 task.pixels = std::make_unique<uint8_t[]>(bytes);
-                if (stride == task.width) {
-                    std::memcpy(task.pixels.get(), base, bytes);
-                } else {
-                    for (uint32_t y = 0; y < task.height; ++y) {
-                        std::memcpy(task.pixels.get() + y * task.width,
-                                    base + y * stride,
-                                    task.width);
-                    }
-                }
+                copy_mono8(task.pixels.get(), base, stride,
+                           task.width, task.height, rotate_180_);
                 copied = true;
             }
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);

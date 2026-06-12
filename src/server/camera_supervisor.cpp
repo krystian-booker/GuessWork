@@ -74,6 +74,9 @@ struct CameraSlot {
     gw::CameraSettingsValues           settings;     // persisted live-tunables
     bool                               hardware_sync_enabled = false;
     std::optional<int64_t>             trigger_output_pin;  // 1..6 when hw-sync is on
+    // Mounting rotation (0/90/180/270). Never restarts the producer; a change
+    // rebuilds the extra consumers so the VIO feeder's 180° flip tracks it.
+    int64_t                            orientation = 0;
     std::unique_ptr<SpinnakerProducer> producer;     // null when offline
     std::shared_ptr<StreamConsumer>    stream;       // null when offline
     std::string                        last_start_error;  // why offline; empty when online
@@ -176,6 +179,7 @@ void CameraSupervisor::Impl::load_db_into_slots_locked() {
         s.settings = settings_from_row(row);
         s.hardware_sync_enabled = row.hardware_sync_enabled;
         s.trigger_output_pin    = row.trigger_output_pin;
+        s.orientation           = row.orientation;
         slots_by_id.emplace(row.id, std::move(s));
         id_by_serial[row.serial] = row.id;
     }
@@ -440,6 +444,7 @@ void CameraSupervisor::on_camera_added(int64_t camera_id) {
     s.settings = settings_from_row(*row);
     s.hardware_sync_enabled = row->hardware_sync_enabled;
     s.trigger_output_pin    = row->trigger_output_pin;
+    s.orientation           = row->orientation;
     auto [it, _] = impl_->slots_by_id.emplace(row->id, std::move(s));
     impl_->id_by_serial[it->second.serial] = it->second.id;
 
@@ -477,16 +482,18 @@ void CameraSupervisor::on_camera_updated(int64_t camera_id) {
     const bool hw_sync_changed  = row->hardware_sync_enabled != slot.hardware_sync_enabled;
     const bool pin_changed      = row->trigger_output_pin    != slot.trigger_output_pin;
 
-    // Role or calibration changes only affect the factory-made extra
-    // consumers — rebuild them in place against the live channel, no
-    // producer restart needed.
+    // Role, calibration, or orientation changes only affect the factory-made
+    // extra consumers (orientation drives the VIO feeder's 180° flip) —
+    // rebuild them in place against the live channel, no producer restart.
     const bool extra_inputs_changed =
         row->role != slot.role || row->calibrated_at != slot.calibrated_at ||
-        row->extrinsics_calibrated_at != slot.extrinsics_calibrated_at;
+        row->extrinsics_calibrated_at != slot.extrinsics_calibrated_at ||
+        row->orientation != slot.orientation;
 
     slot.mode                  = row->mode;
     slot.hardware_sync_enabled = row->hardware_sync_enabled;
     slot.trigger_output_pin    = row->trigger_output_pin;
+    slot.orientation           = row->orientation;
 
     if (!(mode_changed || hw_sync_changed || pin_changed)) {
         if (extra_inputs_changed && slot.producer) {

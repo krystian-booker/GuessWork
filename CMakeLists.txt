@@ -420,6 +420,7 @@ if(GW_BUILD_TESTS)
         tests/test_clock.cpp
         tests/test_frame_pool.cpp
         tests/test_frame_channel.cpp
+        tests/test_mono8_copy.cpp
         tests/test_mono8_to_nv12.cpp
         tests/test_h264_encoder.cpp
         tests/test_database.cpp

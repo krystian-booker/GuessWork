@@ -246,7 +246,9 @@ export default function IntrinsicsWizardPage() {
         </div>
 
         <div className="space-y-4">
-          {cam.online && <WebRtcPlayer cameraId={cam.id} aspectRatio="4 / 3" />}
+          {cam.online && (
+            <WebRtcPlayer cameraId={cam.id} aspectRatio="4 / 3" orientation={cam.orientation} />
+          )}
 
           <Card className="py-4 gap-3">
             <CardHeader className="px-4">

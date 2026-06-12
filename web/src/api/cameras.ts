@@ -4,6 +4,9 @@ export type CameraRole = 'apriltag' | 'vio_left' | 'vio_right'
 
 export const CAMERA_ROLES: CameraRole[] = ['apriltag', 'vio_left', 'vio_right']
 
+export const CAMERA_ORIENTATIONS = [0, 90, 180, 270] as const
+export type CameraOrientation = (typeof CAMERA_ORIENTATIONS)[number]
+
 export interface Camera {
   id: number
   name: string
@@ -33,6 +36,10 @@ export interface Camera {
   // feed stereo VIO (each unique system-wide — server replies 409 on
   // conflict). null = stream-only.
   role: CameraRole | null
+  // Physical mounting rotation in degrees, clockwise (0/90/180/270).
+  // Display-only: rotates the live preview; the vision pipeline always
+  // consumes raw sensor frames (mounting is absorbed by the calibration).
+  orientation: CameraOrientation
   online: boolean
   created_at: number
   // Unix seconds when the calibration was last uploaded; null if uncalibrated.
@@ -161,9 +168,14 @@ export interface CameraHardwareSyncPatch {
 
 export async function updateCamera(
   id: number,
-  patch: { name?: string; mode?: string; focal_length_mm?: number; role?: CameraRole | null }
-       & CameraSettingsPatch
-       & CameraHardwareSyncPatch,
+  patch: {
+    name?: string
+    mode?: string
+    focal_length_mm?: number
+    role?: CameraRole | null
+    orientation?: CameraOrientation
+  } & CameraSettingsPatch
+    & CameraHardwareSyncPatch,
 ): Promise<Camera> {
   const res = await fetch(`/api/cameras/${id}`, {
     method: 'PUT',

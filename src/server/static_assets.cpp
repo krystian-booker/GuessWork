@@ -73,12 +73,15 @@ void register_static_routes(crow::SimpleApp& app) {
     });
 }
 
+bool has_embedded_web() { return true; }
+
 }  // namespace gw::server
 
 #else  // !GW_HAS_EMBEDDED_WEB
 
 namespace gw::server {
 void register_static_routes(crow::SimpleApp&) {}
+bool has_embedded_web() { return false; }
 }  // namespace gw::server
 
 #endif

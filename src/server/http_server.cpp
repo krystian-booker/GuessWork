@@ -1,5 +1,11 @@
 #include "server/http_server.hpp"
 
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+
 #include <crow.h>
 
 #include "server/routes_apriltag.hpp"
@@ -81,7 +87,28 @@ HttpServer::HttpServer(uint16_t                              port,
 HttpServer::~HttpServer() = default;
 
 void HttpServer::run() {
-    impl_->app.port(impl_->port).multithreaded().run();
+    // Crow logs every request/response at INFO — with the UI polling at 1 Hz
+    // that's hundreds of lines a minute, burying anything useful (like the
+    // startup banner). Warnings and errors still come through; set
+    // GW_HTTP_LOG=1 to get the full request log back.
+    const char* verbose = std::getenv("GW_HTTP_LOG");
+    if (!verbose || std::string_view(verbose) == "0") {
+        crow::logger::setLogLevel(crow::LogLevel::Warning);
+    }
+    try {
+        impl_->app.port(impl_->port).multithreaded().run();
+    } catch (const std::system_error& e) {
+        // Most commonly EADDRINUSE — another guesswork (or a dev server) owns
+        // the port. Without this catch the exception escapes via terminate()
+        // and looks like a crash inside asio/detail/throw_exception.hpp under
+        // a debugger. Rethrown as a plain runtime_error so main() can print
+        // it and unwind normally (camera/Teensy teardown must run in order).
+        throw std::runtime_error(
+            "failed to start HTTP server on port " + std::to_string(impl_->port) +
+            ": " + e.what() +
+            " (is another guesswork instance already running? try: lsof -i :" +
+            std::to_string(impl_->port) + ")");
+    }
 }
 
 void HttpServer::stop() {

@@ -20,6 +20,7 @@
 #include "server/http_server.hpp"
 #include "server/imu_allan_service.hpp"
 #include "server/imu_config_repository.hpp"
+#include "server/static_assets.hpp"
 #include "server/routes_apriltag.hpp"
 #include "server/teensy_manager.hpp"
 #include "server/trigger_group_repository.hpp"
@@ -145,14 +146,32 @@ int main(int argc, char** argv) {
               << cli.stream_width << "x" << cli.stream_height
               << " @ " << cli.stream_fps << " fps, "
               << (cli.stream_bitrate / 1000) << " kbps\n";
-    std::cerr << "guesswork: listening on http://localhost:" << cli.port << "\n";
 
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
                                   trigger_groups, teensy, imu_config,
                                   field_layouts, apriltag, vio, vio_config,
                                   can_config, fusion, fusion_config, allan,
                                   started_at);
-    server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
+
+    // Startup banner — printed last so it's the first thing you see in a
+    // debug console. In non-embedded (Debug) builds the web UI is served by
+    // the Vite dev server, not this binary.
+    std::cerr << "\n"
+              << "guesswork ready\n"
+              << "  API:    http://localhost:" << cli.port << "/api/status\n";
+    if (gw::server::has_embedded_web()) {
+        std::cerr << "  Web UI: http://localhost:" << cli.port << "\n\n";
+    } else {
+        std::cerr << "  Web UI: not embedded in this build — run `cd web && npm run dev`\n"
+                  << "          then open http://localhost:5173\n\n";
+    }
+
+    try {
+        server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
+    } catch (const std::exception& e) {
+        std::cerr << "guesswork: " << e.what() << "\n";
+        return 1;  // normal unwinding — supervisors/Teensy/Spinnaker tear down in order
+    }
 
     return 0;
 }
