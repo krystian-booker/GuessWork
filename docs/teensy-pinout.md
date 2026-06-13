@@ -19,7 +19,7 @@ each section cites them; change them together.
    cam 4 ◄──┤ 5                      20 │
    cam 5 ◄──┤ 6                      19 │
    cam 6 ◄──┤ 7                      18 │
-  BMI088 ───┤ 8  (gyro INT3/DRDY)    17 │
+  BMI088 ───┤ 8  (gyro DRDY*)        17 │
   BMI088 ───┤ 9  (gyro CS)           16 │
   BMI088 ───┤ 10 (accel CS)          15 │
   BMI088 ───┤ 11 (SPI0 MOSI)         14 │
@@ -62,23 +62,81 @@ Notes:
 Firmware: `firmware/src/bmi088_imu.h` — `kImuAccelCsPin=10`,
 `kImuGyroCsPin=9`, `kImuGyroDrdyPin=8`; SPI0 default pins.
 
-| Teensy pin | Signal | BMI088 breakout pin |
+Board: **Bosch Sensortec BMI088 Shuttle Board 3.0** (flyer
+`BST-BMI088-SF000-01`, Shuttle ID `0x66` / `BST00767`). The sensor breaks
+out across two pin-strip connectors: **P2** (9-pin) carries the SPI/I2C data
+lines, **P1** (7-pin) carries power and the accelerometer interrupts. Pin
+names below are taken verbatim from the flyer's connector tables.
+
+Firmware wiring (Teensy SPI0 → shuttle-board pins):
+
+| Teensy pin | Signal | Shuttle-board pin (name — function) |
 |---|---|---|
-| **11** | SPI0 MOSI | SDI (accel + gyro shared) |
-| **12** | SPI0 MISO | SDO (accel + gyro shared) |
-| **13** | SPI0 SCK | SCK (accel + gyro shared) |
-| **10** | accel chip select | CSB1 (accel) |
-| **9** | gyro chip select | CSB2 (gyro) |
-| **8** | gyro data-ready interrupt | INT3 (gyro, push-pull active-high) |
-| 3.3V | power | VDD + VDDIO |
-| GND | ground | GND |
+| **11** | SPI0 MOSI | **P2-4** SDI/SDA — SPI master-out / I2C data |
+| **12** | SPI0 MISO | **P2-3** SDO — SPI master-in |
+| **13** | SPI0 SCK | **P2-2** SCK/SCL — shared SPI/I2C clock |
+| **10** | accel chip select | **P2-1** CS — SPI chip select, **accelerometer** |
+| **9** | gyro chip select | **P2-5** GPIO4 — SPI chip select, **gyroscope** |
+| **8** | gyro data-ready interrupt | gyro INT — **not a dedicated connector pin, see ⚠ below** |
+| 3.3V | power | **P1-1** VDD **+ P1-2** VDDIO |
+| GND | ground | **P1-3** GND |
+
+⚠ **No "INT3" pin exists on this board.** The current firmware names the
+gyro data-ready line `INT3`, but the Shuttle Board 3.0 connectors do **not**
+expose a pin labelled INT3. The only interrupt pins on the headers are the
+**accelerometer's** INT1/INT2 (P1-6 `GPIO2/INT1`, P1-7 `GPIO3/INT2`). The
+gyroscope's interrupts are routed on-board: the gyro INT4 net (`INT4_G`)
+lands on jumper **JP3**, which can tie it onto the INT2 connector line
+(`INT2_A` ↔ `INT4_G`). To feed a 400 Hz gyro data-ready into Teensy pin 8 on
+this exact board you must therefore either:
+1. configure the gyro to emit data-ready on **INT4**, fit **JP3**, and wire
+   Teensy 8 → **P1-7** (`GPIO3/INT2`); **or**
+2. use a different BMI088 breakout that brings the gyro **INT3** pad out to
+   its own pin (many third-party breakouts label it `INT3`/`INT4`/`DRDY`).
+
+Verify which board is physically mounted before trusting the `INT3` label in
+`bmi088_imu.h`.
+
+Full connector reference (from the flyer):
+
+**P2 — 9-pin SPI/data connector**
+
+| Pin | Name | Function |
+|---|---|---|
+| 1 | CS | SPI chip select — accelerometer |
+| 2 | SCK/SCL | Clock (SPI + I2C) |
+| 3 | SDO | SPI master-in-slave-out |
+| 4 | SDI/SDA | SPI master-out-slave-in / I2C data |
+| 5 | GPIO4 | SPI chip select — gyroscope |
+| 6 | GPIO5 | Protocol select — gyroscope (strap for SPI per gyro datasheet) |
+| 7 | GPIO6 | NC |
+| 8 | GPIO7 | NC |
+| 9 | PROM_RW | on-board EEPROM (DS28E05) — leave NC for our use |
+
+**P1 — 7-pin power/interrupt connector**
+
+| Pin | Name | Function |
+|---|---|---|
+| 1 | VDD | Power supply (3.3 V) |
+| 2 | VDDIO | I/O supply (3.3 V) |
+| 3 | GND | Ground |
+| 4 | GPIO0 | NC |
+| 5 | GPIO1 | NC |
+| 6 | GPIO2/INT1 | **Accelerometer** interrupt 1 |
+| 7 | GPIO3/INT2 | **Accelerometer** interrupt 2 (also JP3 → gyro INT4) |
 
 Notes:
-- One SPI bus, two chip selects — the BMI088 is two dies in one package.
-- The **gyro's INT3** paces sampling (400 Hz): the ISR stamps `now_us64()`
-  and the main loop reads both dies. Only INT3 is wired; the accel INT pins
-  are left unconnected.
-- The BMI088 is 3.3 V-only — never feed it 5 V.
+- One SPI bus, two chip selects — the BMI088 is two dies (accel + gyro) in
+  one package, so `CS` (P2-1) selects the accel and `GPIO4` (P2-5) selects
+  the gyro.
+- The **gyro data-ready** interrupt paces sampling (400 Hz): the ISR stamps
+  `now_us64()` and the main loop reads both dies. See the ⚠ above for how that
+  line actually reaches the connector on this board.
+- **GPIO5** (P2-6) is the gyroscope protocol-select pin; it must be strapped
+  for SPI mode. The accelerometer auto-selects SPI on its first CS falling
+  edge, so it has no separate protocol pin.
+- The BMI088 is 3.3 V-only — never feed it 5 V. Tie VDD and VDDIO together to
+  the Teensy 3.3 V rail.
 - Mechanically: hard-mounted next to the **left VIO camera** (the camera-IMU
   extrinsics calibration assumes a rigid mount).
 
