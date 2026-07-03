@@ -43,6 +43,7 @@ struct HttpServer::Impl {
          FusionSupervisor&                     fusion,
          FusionConfigRepository&               fusion_config,
          ImuAllanService&                      allan,
+         ImuAttitudeService&                   attitude,
          std::chrono::steady_clock::time_point started_at)
         : port(p) {
         register_status_routes(app, supervisor, started_at);
@@ -50,7 +51,8 @@ struct HttpServer::Impl {
         register_camera_routes(app, cameras, supervisor);
         register_calibration_routes(app, cameras, calibration, supervisor);
         register_hardware_sync_routes(app, trigger_groups, teensy);
-        register_imu_routes(app, imu_config, teensy, apriltag, fusion, allan);
+        register_imu_routes(app, imu_config, teensy, apriltag, fusion, allan,
+                            attitude);
         register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_vio_routes(app, vio, vio_config);
         register_robot_routes(app, net_config, robot, teensy);
@@ -79,12 +81,13 @@ HttpServer::HttpServer(uint16_t                              port,
                        FusionSupervisor&                     fusion,
                        FusionConfigRepository&               fusion_config,
                        ImuAllanService&                      allan,
+                       ImuAttitudeService&                   attitude,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
                                    trigger_groups, teensy, imu_config,
                                    field_layouts, apriltag, vio, vio_config,
                                    net_config, robot, fusion, fusion_config,
-                                   allan, started_at)) {}
+                                   allan, attitude, started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

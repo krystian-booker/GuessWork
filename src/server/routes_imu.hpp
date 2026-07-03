@@ -7,6 +7,7 @@ namespace gw::server {
 class ApriltagSupervisor;
 class FusionSupervisor;
 class ImuAllanService;
+class ImuAttitudeService;
 class ImuConfigRepository;
 class TeensyManager;
 
@@ -24,11 +25,16 @@ class TeensyManager;
 //   GET    /api/imu/allan/status
 //   POST   /api/imu/allan/analyze   {"file"?: basename}
 //   POST   /api/imu/allan/apply                       (409 without analysis)
+//
+// 3D attitude preview (visualization-only complementary filter):
+//   GET  /api/imu/attitude          — quaternion + euler + raw sample
+//   POST /api/imu/attitude/zero-yaw — re-reference the drifting yaw
 void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
                          TeensyManager&       teensy,
                          ApriltagSupervisor&  apriltag,
                          FusionSupervisor&    fusion,
-                         ImuAllanService&     allan);
+                         ImuAllanService&     allan,
+                         ImuAttitudeService&  attitude);
 
 }  // namespace gw::server

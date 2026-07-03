@@ -62,7 +62,9 @@ public:
         uint64_t sync_resets    = 0;
     };
 
-    TeensyManager();
+    // `device_glob` selects the serial devices to probe — overridden by
+    // tests, which point it at PTY symlinks (see tests/test_teensy_manager).
+    explicit TeensyManager(std::string device_glob = "/dev/cu.usbmodem*");
     ~TeensyManager();
 
     TeensyManager(const TeensyManager&)            = delete;

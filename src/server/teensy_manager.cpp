@@ -31,7 +31,6 @@ constexpr int  kReadTimeoutMs     = 200;
 constexpr int  kCommandAckMs      = 1000;
 constexpr int  kPingProbeMs       = 500;
 constexpr int  kPulseRingMax      = 256;
-constexpr char kDeviceGlob[]      = "/dev/cu.usbmodem*";
 
 // Trim ASCII whitespace from both ends.
 std::string_view trim(std::string_view s) {
@@ -64,6 +63,7 @@ struct PinState {
 };
 
 struct TeensyManager::Impl {
+    std::string                device_glob;  // set once at construction
     std::thread                io_thread;
     std::atomic<bool>          stop_flag{false};
 
@@ -157,7 +157,9 @@ struct TeensyManager::Impl {
     void set_group_pins(const std::vector<TeensyManager::GroupConfig>& groups);
 };
 
-TeensyManager::TeensyManager()  : impl_(std::make_unique<Impl>()) {
+TeensyManager::TeensyManager(std::string device_glob)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->device_glob = std::move(device_glob);
     impl_->setup_decoder_callbacks();
 }
 TeensyManager::~TeensyManager() { stop(); }
@@ -454,10 +456,10 @@ int open_serial(const std::string& path) {
     return candidate;
 }
 
-std::vector<std::string> glob_devices() {
+std::vector<std::string> glob_devices(const std::string& pattern) {
     std::vector<std::string> out;
     glob_t gl{};
-    if (::glob(kDeviceGlob, 0, nullptr, &gl) == 0) {
+    if (::glob(pattern.c_str(), 0, nullptr, &gl) == 0) {
         for (size_t i = 0; i < gl.gl_pathc; ++i) out.emplace_back(gl.gl_pathv[i]);
     }
     ::globfree(&gl);
@@ -504,7 +506,7 @@ bool probe_command_port(int fd, std::string& pong_line) {
 }  // namespace
 
 bool TeensyManager::Impl::try_connect() {
-    for (const auto& path : glob_devices()) {
+    for (const auto& path : glob_devices(device_glob)) {
         const int candidate = open_serial(path);
         if (candidate < 0) continue;
         std::string pong;
@@ -535,7 +537,7 @@ void TeensyManager::Impl::try_connect_telemetry() {
 
     // The two CDC interfaces of one Teensy enumerate as sibling device nodes
     // differing only in the trailing interface digit (e.g. …01 / …03).
-    for (const auto& path : glob_devices()) {
+    for (const auto& path : glob_devices(device_glob)) {
         if (path == *open_port) continue;
         if (path.size() != open_port->size()) continue;
         if (path.compare(0, path.size() - 1, *open_port, 0,

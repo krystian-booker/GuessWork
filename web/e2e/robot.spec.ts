@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { defaultRobotConfig, json, mockAllStatus } from './helpers'
+import { defaultImuAttitude, defaultRobotConfig, json, mockAllStatus } from './helpers'
 
 const imuConfig = {
   rate_hz: 400,
@@ -112,6 +112,51 @@ test.describe('Robot page (mocked)', () => {
     await page.getByTestId('config-save').first().click()
 
     await expect(page.getByText(/bind failed: address already in use/)).toBeVisible()
+  })
+
+  test('IMU attitude viewer renders and zero-yaw POSTs', async ({ page }) => {
+    await mockAllStatus(page)
+    await json(page, '**/api/imu/config', imuConfig)
+
+    let posted = false
+    await page.route('**/api/imu/attitude/zero-yaw', (route) => {
+      posted = true
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: true }),
+      })
+    })
+
+    await page.goto('/robot')
+
+    const card = page.getByTestId('imu-attitude-card')
+    await expect(card.getByTestId('imu-attitude-canvas')).toBeVisible()
+    // Euler readout reflects the mocked attitude (1 decimal).
+    await expect(card).toContainText('12.3°')
+    await expect(card).toContainText('-4.5°')
+    await expect(card).toContainText('87.6°')
+    await expect(card).toContainText('9.80 m/s²')
+    await expect(card).toContainText('400 Hz')
+
+    await card.getByRole('button', { name: 'Zero yaw' }).click()
+    await expect.poll(() => posted).toBe(true)
+  })
+
+  test('IMU attitude viewer shows the waiting state until initialized', async ({ page }) => {
+    await mockAllStatus(page)
+    await json(page, '**/api/imu/config', imuConfig)
+    await json(page, '**/api/imu/attitude', {
+      ...defaultImuAttitude,
+      initialized: false,
+      last_age_ms: null,
+    })
+
+    await page.goto('/robot')
+
+    const card = page.getByTestId('imu-attitude-card')
+    await expect(card).toContainText('waiting for IMU (needs ~1 g gravity reference)')
+    await expect(card.getByRole('button', { name: 'Zero yaw' })).toBeDisabled()
   })
 
   test('bench pose sender POSTs /api/robot/pose', async ({ page }) => {

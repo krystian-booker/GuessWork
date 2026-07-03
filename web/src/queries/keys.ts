@@ -28,6 +28,7 @@ export const qk = {
   fusionStatus: ['fusion', 'status'] as const,
   fusionConfig: ['fusion', 'config'] as const,
   imuStatus: ['imu', 'status'] as const,
+  imuAttitude: ['imu', 'attitude'] as const,
   imuConfig: ['imu', 'config'] as const,
   imuAllan: ['imu', 'allan'] as const,
 

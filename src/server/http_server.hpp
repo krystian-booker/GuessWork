@@ -24,6 +24,7 @@ class NetConfigRepository;
 class FusionSupervisor;
 class FusionConfigRepository;
 class ImuAllanService;
+class ImuAttitudeService;
 
 // Thin wrapper around a Crow application. The Crow SDK headers are heavyweight
 // (asio, boost-style metaprogramming) so we hide them behind a Pimpl: consumers
@@ -46,6 +47,7 @@ public:
                FusionSupervisor&                     fusion,
                FusionConfigRepository&               fusion_config,
                ImuAllanService&                      allan,
+               ImuAttitudeService&                   attitude,
                std::chrono::steady_clock::time_point started_at);
     ~HttpServer();
 

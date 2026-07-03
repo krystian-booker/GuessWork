@@ -1,5 +1,7 @@
 #include "server/routes_imu.hpp"
 
+#include "server/imu_attitude_service.hpp"
+
 #include <exception>
 #include <optional>
 #include <string>
@@ -57,7 +59,43 @@ void register_imu_routes(crow::SimpleApp&     app,
                          TeensyManager&       teensy,
                          ApriltagSupervisor&  apriltag,
                          FusionSupervisor&    fusion,
-                         ImuAllanService&     allan) {
+                         ImuAllanService&     allan,
+                         ImuAttitudeService&  attitude) {
+    CROW_ROUTE(app, "/api/imu/attitude").methods("GET"_method)
+    ([&attitude] {
+        const auto st = attitude.status();
+        crow::json::wvalue j;
+        j["initialized"] = st.attitude.initialized;
+        j["rate_hz"]     = st.rate_hz;
+        if (st.last_age_ms >= 0) j["last_age_ms"] = st.last_age_ms;
+        else                     j["last_age_ms"] = nullptr;
+        crow::json::wvalue q;
+        q["w"] = st.attitude.q[0];
+        q["x"] = st.attitude.q[1];
+        q["y"] = st.attitude.q[2];
+        q["z"] = st.attitude.q[3];
+        j["q"] = std::move(q);
+        crow::json::wvalue euler;
+        euler["roll_deg"]  = st.attitude.roll_deg;
+        euler["pitch_deg"] = st.attitude.pitch_deg;
+        euler["yaw_deg"]   = st.attitude.yaw_deg;
+        j["euler"] = std::move(euler);
+        crow::json::wvalue accel, gyro;
+        accel["x"] = st.accel[0]; accel["y"] = st.accel[1]; accel["z"] = st.accel[2];
+        gyro["x"]  = st.gyro[0];  gyro["y"]  = st.gyro[1];  gyro["z"]  = st.gyro[2];
+        j["accel_mps2"]   = std::move(accel);
+        j["gyro_radps"]   = std::move(gyro);
+        return json_response(200, std::move(j));
+    });
+
+    CROW_ROUTE(app, "/api/imu/attitude/zero-yaw").methods("POST"_method)
+    ([&attitude] {
+        attitude.zero_yaw();
+        crow::json::wvalue j;
+        j["ok"] = true;
+        return json_response(200, std::move(j));
+    });
+
     CROW_ROUTE(app, "/api/imu/status").methods("GET"_method)
     ([&teensy] {
         const auto s = teensy.status();

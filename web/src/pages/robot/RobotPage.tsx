@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { ConfigForm } from '@/components/config/ConfigForm'
+import { ImuAttitudeViewer } from '@/components/imu/ImuAttitudeViewer'
 import { Mat4Table } from '@/components/Mat4Table'
 import { PageHeader } from '@/components/PageHeader'
 import { RollingChart } from '@/components/RollingChart'
@@ -406,6 +407,15 @@ export default function RobotPage() {
                 </span>
               </div>
               <RollingChart points={imuSeries} series={[{ key: 'rate', label: 'IMU rate (Hz)' }]} height={100} />
+            </CardContent>
+          </Card>
+
+          <Card className="py-4 gap-3" data-testid="imu-attitude-card">
+            <CardHeader className="px-4">
+              <CardTitle className="text-sm">IMU attitude</CardTitle>
+            </CardHeader>
+            <CardContent className="px-4">
+              <ImuAttitudeViewer />
             </CardContent>
           </Card>
 

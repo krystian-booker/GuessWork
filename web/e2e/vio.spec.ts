@@ -34,7 +34,9 @@ test.describe('VIO page (mocked)', () => {
 
     await page.goto('/vio')
 
-    await expect(page.getByText('tracking')).toBeVisible()
+    // exact+case-sensitive: the phase badge, not the "Tracking" section
+    // header or the downsample help text.
+    await expect(page.getByText('tracking', { exact: true })).toBeVisible()
     await expect(page.getByRole('row', { name: /vio-left/ })).toContainText('running')
     await expect(page.getByText('imu bus drops: 0')).toBeVisible()
 

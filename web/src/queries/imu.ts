@@ -3,8 +3,10 @@ import {
   analyzeAllan,
   applyAllan,
   fetchAllanStatus,
+  fetchImuAttitude,
   fetchImuConfig,
   fetchImuStatus,
+  postZeroYaw,
   startAllanRecording,
   stopAllanRecording,
   updateImuConfig,
@@ -17,6 +19,25 @@ export function useImuStatus() {
     queryKey: qk.imuStatus,
     queryFn: fetchImuStatus,
     refetchInterval: POLL_FAST,
+  })
+}
+
+// Deliberately faster than the global polling tiers: the 3D attitude viewer
+// slerps toward each new sample, and 150 ms targets keep the motion tight.
+// Polls only while the viewer is mounted.
+export function useImuAttitude() {
+  return useQuery({
+    queryKey: qk.imuAttitude,
+    queryFn: fetchImuAttitude,
+    refetchInterval: 150,
+  })
+}
+
+export function useZeroYaw() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: postZeroYaw,
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.imuAttitude }),
   })
 }
 

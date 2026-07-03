@@ -70,8 +70,36 @@ export interface AllanStatus {
   last_analysis: AllanAnalysis | null
 }
 
+export interface Vec3Fields {
+  x: number
+  y: number
+  z: number
+}
+
+// Live attitude from the on-host complementary filter. `q` rotates BODY-frame
+// vectors into the WORLD frame (Hamilton, world Z-up) and arrives
+// hemisphere-canonicalized (w >= 0). Euler is ZYX. Yaw is gyro-only and
+// drifts — zero-yaw re-references it.
+export interface ImuAttitude {
+  initialized: boolean
+  rate_hz: number
+  last_age_ms: number | null
+  q: { w: number; x: number; y: number; z: number }
+  euler: { roll_deg: number; pitch_deg: number; yaw_deg: number }
+  accel_mps2: Vec3Fields
+  gyro_radps: Vec3Fields
+}
+
 export async function fetchImuStatus(): Promise<ImuStatus> {
   return getJson<ImuStatus>('/api/imu/status')
+}
+
+export async function fetchImuAttitude(): Promise<ImuAttitude> {
+  return getJson<ImuAttitude>('/api/imu/attitude')
+}
+
+export async function postZeroYaw(): Promise<{ ok: boolean }> {
+  return sendJson('/api/imu/attitude/zero-yaw', 'POST')
 }
 
 export async function fetchImuConfig(): Promise<ImuConfig> {

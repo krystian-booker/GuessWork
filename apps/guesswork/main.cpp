@@ -20,6 +20,7 @@
 #include "server/fusion_supervisor.hpp"
 #include "server/http_server.hpp"
 #include "server/imu_allan_service.hpp"
+#include "server/imu_attitude_service.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/static_assets.hpp"
 #include "server/routes_apriltag.hpp"
@@ -172,6 +173,9 @@ int main(int argc, char** argv) {
     gw::server::ImuAllanService allan(
         teensy, imu_config, gw::server::Database::data_dir() / "imu_logs");
 
+    // 3D attitude preview for the web UI (visualization-only).
+    gw::server::ImuAttitudeService attitude(teensy);
+
     const auto started_at = std::chrono::steady_clock::now();
     std::cerr << "guesswork: stream defaults "
               << cli.stream_width << "x" << cli.stream_height
@@ -182,7 +186,7 @@ int main(int argc, char** argv) {
                                   trigger_groups, teensy, imu_config,
                                   field_layouts, apriltag, vio, vio_config,
                                   net_config, robot, fusion, fusion_config,
-                                  allan, started_at);
+                                  allan, attitude, started_at);
 
     // Startup banner — printed last so it's the first thing you see in a
     // debug console. In non-embedded (Debug) builds the web UI is served by

@@ -67,6 +67,7 @@ add_library(gw_core
     src/core/frame_pool.cpp
     src/core/frame_channel.cpp
     src/core/clock_sync.cpp
+    src/core/attitude_filter.cpp
     src/core/allan_variance.cpp
 )
 target_include_directories(gw_core PUBLIC src)
@@ -334,6 +335,7 @@ add_library(gw_server
     src/server/routes_fusion.cpp
     src/server/imu_log_recorder.cpp
     src/server/imu_allan_service.cpp
+    src/server/imu_attitude_service.cpp
     src/server/config_snapshot.cpp
     src/server/routes_config.cpp
     src/server/teensy_manager.cpp
@@ -479,6 +481,9 @@ if(GW_BUILD_TESTS)
         tests/test_telemetry_payloads.cpp
         tests/test_calibration_supervisor.cpp
         tests/test_apriltag_supervisor.cpp
+        tests/test_attitude_filter.cpp
+        tests/test_teensy_manager.cpp
+        tests/test_trigger_group_repository.cpp
         tests/test_udp_payloads.cpp
         tests/test_clock_sync.cpp
         tests/test_robot_link.cpp

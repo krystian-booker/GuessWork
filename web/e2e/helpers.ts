@@ -145,6 +145,17 @@ export const defaultImuStatus = {
   fw_version: 3,
 }
 
+// q matches euler (ZYX, roll 12.3° / pitch -4.5° / yaw 87.6°).
+export const defaultImuAttitude = {
+  initialized: true,
+  rate_hz: 400.3,
+  last_age_ms: 3,
+  q: { w: 0.714142, x: 0.104281, y: 0.04592, z: 0.690665 },
+  euler: { roll_deg: 12.3, pitch_deg: -4.5, yaw_deg: 87.6 },
+  accel_mps2: { x: 0.4, y: -0.2, z: 9.79 },
+  gyro_radps: { x: 0.01, y: -0.02, z: 0.03 },
+}
+
 export const defaultHwSyncStatus = {
   connected: true,
   port: '/dev/cu.usbmodem1234',
@@ -204,6 +215,7 @@ export async function mockAllStatus(page: Page) {
   await json(page, '**/api/robot/status', defaultRobotStatus)
   await json(page, '**/api/robot/config', defaultRobotConfig)
   await json(page, '**/api/imu/status', defaultImuStatus)
+  await json(page, '**/api/imu/attitude', defaultImuAttitude)
   await json(page, '**/api/hardware-sync/status', defaultHwSyncStatus)
   await json(page, '**/api/field-layouts', defaultLayouts)
   await json(page, '**/api/field-layouts/1', {
