@@ -53,6 +53,11 @@ public:
     // Stop every IntervalTimer and drive all outputs LOW.
     void stop();
 
+    // Bench diagnostic (TEST_PIN command): drive one output (1..6) to a
+    // steady level so a multimeter / the camera's LineStatus can see it.
+    // Rejected while armed; arm()/stop() reclaim the pins (LOW).
+    bool test_drive(int output_1_based, bool high, const char*& err);
+
     bool is_armed() const { return armed_; }
     int  group_count() const { return n_groups_; }
 

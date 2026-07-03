@@ -97,6 +97,19 @@ void TriggerEngine::stop() {
     armed_ = false;
 }
 
+bool TriggerEngine::test_drive(int output_1_based, bool high, const char*& err) {
+    if (armed_) {
+        err = "disarm first (STOP) before TEST_PIN";
+        return false;
+    }
+    if (output_1_based < 1 || output_1_based > kMaxOutputs) {
+        err = "pin must be 1..6";
+        return false;
+    }
+    digitalWriteFast(kOutputPins[output_1_based - 1], high ? HIGH : LOW);
+    return true;
+}
+
 void TriggerEngine::on_group_fire(int i) {
     Group& g = groups_[i];
 

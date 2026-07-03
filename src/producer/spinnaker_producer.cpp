@@ -75,11 +75,20 @@ void set_bool_node(Spinnaker::GenApi::INodeMap& nm,
 // Configure the camera as a hardware-trigger slave on Line0. The Spinnaker
 // nodemap requires TriggerMode=Off before changing the selector / source, so
 // we toggle Off → write → On regardless of the previous state.
+//
+// FallingEdge is deliberate and matches the low-side trigger wiring
+// (docs/teensy-pinout.md): the Chameleon3 opto input does NOT register a
+// 3.3 V high-side drive (verified on the bench — the LED threshold needs
+// ~5 V through the internal series resistor), so OPTO_IN sits on the
+// Teensy's 5 V rail and the trigger pin switches OPTO_GND. Current flows
+// while the pin is LOW (idle) ⇒ Line0 idles HIGH and the 100 µs pulse
+// appears as a LOW window — exposure starts on the FALLING edge, which is
+// pulse start, exactly when the firmware latches the TRIG timestamp.
 void configure_hardware_trigger(Spinnaker::GenApi::INodeMap& nm) {
     set_enum_node(nm, "TriggerMode",       "Off");
     set_enum_node(nm, "TriggerSelector",   "FrameStart");
     set_enum_node(nm, "TriggerSource",     "Line0");
-    set_enum_node(nm, "TriggerActivation", "RisingEdge");
+    set_enum_node(nm, "TriggerActivation", "FallingEdge");
     // TriggerOverlap=ReadOut lets the camera arm its next trigger during the
     // current frame readout, removing a one-frame deadtime. Some models
     // (e.g. Chameleon3) only expose "Off"; tolerate the absence.

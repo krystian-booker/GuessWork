@@ -80,6 +80,7 @@ BREW_PKGS=(
     ninja          # required by Basalt's CMake presets (opt-in via --with-basalt)
     pkg-config     # used by find_library/find_path lookups
     openssl@3      # libdatachannel WebRTC stack
+    libusb         # Spinnaker SDK runtime dependency
     opencv         # gw_apriltag undistort/PnP
     eigen          # OpenVINS + GTSAM
     boost          # OpenVINS

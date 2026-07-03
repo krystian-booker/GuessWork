@@ -235,4 +235,33 @@ bool TriggerGroupRepository::remove(int64_t id) {
     });
 }
 
+bool TriggerGroupRepository::armed() {
+    return db_.with_handle([](sqlite3* h) {
+        StmtGuard g;
+        if (sqlite3_prepare_v2(h, "SELECT armed FROM sync_config WHERE id = 1;",
+                               -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "sync_config armed: prepare");
+        }
+        if (sqlite3_step(g.stmt) != SQLITE_ROW) {
+            throw std::runtime_error("sync_config row missing (schema seed failed?)");
+        }
+        return sqlite3_column_int64(g.stmt, 0) != 0;
+    });
+}
+
+void TriggerGroupRepository::set_armed(bool armed) {
+    db_.with_handle([armed](sqlite3* h) {
+        StmtGuard g;
+        if (sqlite3_prepare_v2(h, "UPDATE sync_config SET armed = ?1 WHERE id = 1;",
+                               -1, &g.stmt, nullptr) != SQLITE_OK) {
+            throw_sqlite(h, "sync_config set_armed: prepare");
+        }
+        sqlite3_bind_int64(g.stmt, 1, armed ? 1 : 0);
+        if (sqlite3_step(g.stmt) != SQLITE_DONE) {
+            throw_sqlite(h, "sync_config set_armed: step");
+        }
+        return 0;
+    });
+}
+
 }  // namespace gw::server

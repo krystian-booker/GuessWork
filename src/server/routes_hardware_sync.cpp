@@ -175,23 +175,38 @@ void register_hardware_sync_routes(crow::SimpleApp&        app,
     ([&repo, &teensy] {
         try {
             const auto groups = repo.list_all();
+            if (groups.empty()) {
+                return error_response(409, "no trigger groups configured");
+            }
+            // Intent first: even if the push below fails, the desired state
+            // is persisted (survives reboots) and TeensyManager's retry
+            // resync converges the device onto it.
+            repo.set_armed(true);
             std::vector<TeensyManager::GroupConfig> cfg;
             cfg.reserve(groups.size());
             for (const auto& g : groups) {
                 cfg.push_back({g.name, g.fps, g.output_pins});
             }
             std::string err;
-            if (!teensy.push_config(cfg, err)) {
-                return error_response(503, err.empty() ? "arm failed" : err);
-            }
-            return json_response(200, crow::json::wvalue{});
+            const bool pushed = teensy.push_config(cfg, err);
+            crow::json::wvalue j;
+            j["armed_desired"] = true;
+            j["pushed"]        = pushed;
+            if (pushed) j["push_error"] = nullptr;
+            else        j["push_error"] = err.empty() ? "arm push failed (retrying)" : err + " (retrying)";
+            return json_response(200, std::move(j));
         } catch (const std::exception& e) {
             return error_response(500, e.what());
         }
     });
 
     CROW_ROUTE(app, "/api/hardware-sync/stop").methods("POST"_method)
-    ([&teensy] {
+    ([&repo, &teensy] {
+        try {
+            repo.set_armed(false);  // intent first, mirror of arm
+        } catch (const std::exception& e) {
+            return error_response(500, e.what());
+        }
         std::string err;
         if (!teensy.stop_outputs(err)) {
             return error_response(503, err.empty() ? "stop failed" : err);

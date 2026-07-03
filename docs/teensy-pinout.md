@@ -38,18 +38,30 @@ always `output + 1`.
 
 | Output # (host label) | Teensy pin | Goes to |
 |---|---|---|
-| 1 | **2** | camera 1 trigger input (Line0 / OPTO_IN, brown wire on the FLIR GPIO pigtail) |
+| 1 | **2** | camera 1 **OPTO_GND** (pin 7, BROWN wire) — low-side switch, see ⚠ below |
 | 2 | **3** | camera 2 trigger input |
 | 3 | **4** | camera 3 trigger input |
 | 4 | **5** | camera 4 trigger input |
 | 5 | **6** | camera 5 trigger input |
 | 6 | **7** | camera 6 trigger input |
-| — | GND | common ground to every camera's OPTO_GND |
+| — | **VIN (5 V)** | common to every camera's **OPTO_IN** (pin 9, YELLOW wire) |
 
 Notes:
-- 100 µs active-high pulses (`kPulseWidthUs`), driven push-pull at 3.3 V.
-  The Chameleon3 opto input threshold is comfortably below 3.3 V; no level
-  shifting needed, but each camera's opto ground must be tied to Teensy GND.
+- ⚠ **Low-side drive, empirically required (2026-07 bench):** the CM3 opto
+  input does NOT register a 3.3 V high-side drive — the internal opto LED
+  needs ~5 V through its series resistor. Wiring that works: **OPTO_IN
+  (pin 9, yellow) → Teensy VIN (5 V)** shared by all cameras; **OPTO_GND
+  (pin 7, brown) → the camera's trigger pin (2–7)**. Current flows while
+  the pin is LOW, so Line0 idles HIGH and the 100 µs pulse
+  (`kPulseWidthUs`, push-pull) appears as a LOW window — the producer
+  configures **TriggerActivation=FallingEdge** to fire at pulse start
+  (spinnaker_producer.cpp). Idle draw is a few mA per camera from VIN.
+- Wire colors from FLIR's CM3-U3 Getting Started guide: pin 9 **yellow** =
+  OPTO_IN, pin 7 **brown** = OPTO_GND, pin 8 orange = OPTO_OUT. Third-party
+  pigtails may differ; trust the JST pin positions, not the colors.
+- Bench diagnostic: `TEST_PIN pin=<1..6> level=<0|1>` on the command serial
+  interface holds an output steadily high/low (disarmed only) so a
+  multimeter or the camera's LineStatusAll can verify the wiring.
 - `cameras.trigger_output_pin` in the DB stores the **output number (1–6)**,
   not the physical pin.
 

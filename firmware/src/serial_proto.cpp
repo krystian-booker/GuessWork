@@ -49,6 +49,7 @@ void SerialProto::begin() {
     Serial.print(kFirmwareVersion);
     Serial.print(F(" outputs="));
     Serial.println(kMaxOutputs);
+    Serial.send_now();
 }
 
 void SerialProto::poll() {
@@ -58,7 +59,18 @@ void SerialProto::poll() {
         if (c == '\r') continue;
         if (c == '\n') {
             buf_[buf_len_] = '\0';
-            if (buf_len_ > 0) handle_line(buf_);
+            if (buf_len_ > 0) {
+                handle_line(buf_);
+                // Force the (short) response out of the USB CDC partial-
+                // packet buffer NOW. Without this, an "OK\r\n" that lands
+                // in an unfilled 64-byte packet occasionally loses the
+                // core's flush-timer race and sits until the NEXT write —
+                // observed on the bench as ~6% of command acks arriving
+                // only when the following command generated traffic
+                // (host-side symptom: intermittent 1 s command timeouts,
+                // worst right after STOP kills the TRIG stream).
+                Serial.send_now();
+            }
             buf_len_ = 0;
             continue;
         }
@@ -105,8 +117,35 @@ void SerialProto::handle_line(char* line) {
         Serial.println(F("OK"));
         return;
     }
+    if (strcmp(verb, "TEST_PIN") == 0) { handle_test_pin(args);   return; }
     Serial.print(F("ERR unknown command: "));
     Serial.println(verb);
+}
+
+void SerialProto::handle_test_pin(char* args) {
+    long pin = -1, level = -1;
+    if (args) {
+        char* save = nullptr;
+        for (char* tok = strtok_r(args, " ", &save); tok;
+             tok = strtok_r(nullptr, " ", &save)) {
+            const char* key   = nullptr;
+            const char* value = nullptr;
+            if (!split_kv(tok, key, value)) continue;
+            if (strcmp(key, "pin") == 0)        pin   = strtol(value, nullptr, 10);
+            else if (strcmp(key, "level") == 0) level = strtol(value, nullptr, 10);
+        }
+    }
+    if (pin < 0 || (level != 0 && level != 1)) {
+        Serial.println(F("ERR TEST_PIN requires pin=<1..6> level=<0|1>"));
+        return;
+    }
+    const char* err = nullptr;
+    if (engine_.test_drive(static_cast<int>(pin), level == 1, err)) {
+        Serial.println(F("OK"));
+    } else {
+        Serial.print(F("ERR "));
+        Serial.println(err ? err : "test_drive rejected");
+    }
 }
 
 void SerialProto::handle_cfg(char* args) {
@@ -189,6 +228,7 @@ void SerialProto::flush_pulse_events() {
     // engine's ISR ring; if the host is truly gone the ring overwrites
     // oldest, which loses nothing the host would have read anyway.
     constexpr int kTrigLineMaxBytes = 64;
+    bool wrote = false;
     for (int i = 0; i < engine_.group_count(); ++i) {
         PulseEvent e;
         while (Serial.availableForWrite() >= kTrigLineMaxBytes &&
@@ -199,8 +239,12 @@ void SerialProto::flush_pulse_events() {
             Serial.print(e.idx);
             Serial.print(F(" t_us="));
             Serial.println(e.t_us);
+            wrote = true;
         }
     }
+    // Same stuck-partial-packet hazard as command responses — and prompt
+    // delivery also tightens pulse-vs-frame pairing on the host.
+    if (wrote) Serial.send_now();
 }
 
 }  // namespace gw_fw

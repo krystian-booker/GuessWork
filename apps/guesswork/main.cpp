@@ -82,6 +82,23 @@ int main(int argc, char** argv) {
     gw::server::ImuConfigRepository    imu_config(database);
     gw::server::NetConfigRepository    net_config(database);
     gw::server::TeensyManager          teensy;
+    // Auto-arm: seed the desired trigger config from the DB BEFORE the I/O
+    // thread starts, so the first connect's resync pushes and arms with no
+    // API call — a robot power-cycle converges back to armed on its own.
+    if (trigger_groups.armed()) {
+        const auto groups = trigger_groups.list_all();
+        if (!groups.empty()) {
+            std::vector<gw::server::TeensyManager::GroupConfig> cfg;
+            cfg.reserve(groups.size());
+            for (const auto& g : groups) {
+                cfg.push_back({g.name, g.fps, g.output_pins});
+            }
+            std::string ignored;
+            teensy.push_config(cfg, ignored);  // offline now — resync delivers
+            std::cerr << "guesswork: auto-arm pending (" << groups.size()
+                      << " trigger group(s) from DB)\n";
+        }
+    }
     teensy.start();
 
     // UDP robot link (chassis speeds in, fused pose out). The Teensy clock

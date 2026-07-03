@@ -55,9 +55,19 @@ constexpr const char* kSchemaCameras =
     "  created_at            INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");";
 
-// Single-row source of truth for Teensy trigger groups. `outputs_bitmask` is a
-// 6-bit field where bit (n-1) is set iff Teensy output `n` belongs to this
-// group. Uniqueness of pin assignment across groups is enforced in
+// Single-row desired hardware-sync state. `armed` is the OPERATOR INTENT,
+// persisted so a robot power-cycle converges back to armed with no API
+// call (field requirement: nobody may touch the robot after placing it).
+constexpr const char* kSchemaSyncConfig =
+    "CREATE TABLE IF NOT EXISTS sync_config ("
+    "  id    INTEGER PRIMARY KEY CHECK (id = 1),"
+    "  armed INTEGER NOT NULL DEFAULT 0 CHECK (armed IN (0,1))"
+    ");"
+    "INSERT OR IGNORE INTO sync_config (id) VALUES (1);";
+
+// Source of truth for Teensy trigger groups. `outputs_bitmask` is a 6-bit
+// field where bit (n-1) is set iff Teensy output `n` belongs to this group.
+// Uniqueness of pin assignment across groups is enforced in
 // TriggerGroupRepository (no SQL constraint can express it cleanly).
 constexpr const char* kSchemaTriggerGroups =
     "CREATE TABLE IF NOT EXISTS trigger_groups ("
@@ -184,6 +194,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, "PRAGMA foreign_keys = ON;");
     exec_or_throw(db_, "PRAGMA busy_timeout = 2000;");
     exec_or_throw(db_, kSchemaCameras);
+    exec_or_throw(db_, kSchemaSyncConfig);
     exec_or_throw(db_, kSchemaTriggerGroups);
     exec_or_throw(db_, kSchemaFieldLayouts);
     exec_or_throw(db_, kSchemaImuConfig);

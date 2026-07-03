@@ -85,6 +85,7 @@ struct TeensyManager::Impl {
     // status() and the mapping accessors on any thread.
     mutable std::mutex sync_mu;
     gw::ClockSync      teensy_sync;
+    uint64_t           last_imu_feed_host_us_ = 0;
 
     // IMU rate window + heartbeat-derived state. Guarded by status_mu.
     std::chrono::steady_clock::time_point imu_window_start{};
@@ -99,10 +100,14 @@ struct TeensyManager::Impl {
     std::optional<int>                    fw_version;             //  on io_thread)
 
     // Configuration cache (push_config payload). Re-sent after every
-    // (re)connect. Guarded by cfg_mu.
+    // (re)connect, and re-tried by the io_thread while `resync_needed` —
+    // desired state always converges onto the device without operator help.
     std::mutex                                  cfg_mu;
     std::vector<TeensyManager::GroupConfig>     desired_cfg;
     bool                                        want_armed = false;
+    std::atomic<bool> resync_needed{false};   // set on any failed push
+    std::atomic<bool> resync_running{false};  // single-flight guard
+    std::chrono::steady_clock::time_point last_resync_retry{};
 
     // Group → pin-mask lookup so each TRIG event can fan out to its pins.
     std::mutex                                  group_pins_mu;
@@ -135,13 +140,17 @@ struct TeensyManager::Impl {
     void close_fd();
     void close_telemetry_fd();
     bool write_line_locked(std::string_view s, std::string& err);
-    bool send_command(std::string_view cmd, std::string& err);  // takes cmd_mu
+    bool send_command(std::string_view cmd, std::string& err);  // retries once
+    bool send_command_once(std::string_view cmd, std::string& err);  // takes cmd_mu
     void handle_incoming_line(std::string_view line);
     void note_fw_version(std::string_view line);  // parses "fw=<n>" tokens
     bool send_full_config(const std::vector<TeensyManager::GroupConfig>& groups,
                           bool want_armed, std::string& err);
     void resync_config();           // pushes the cfg_mu-stashed snapshot
-    void feed_teensy_sync(uint64_t teensy_us);  // stamps arrival internally
+    void spawn_resync();            // detached, single-flight
+    // Stamps arrival internally. from_imu=false (TRIG events) only feeds
+    // while the IMU stream is stale — see the definition for why.
+    void feed_teensy_sync(uint64_t teensy_us, bool from_imu);
     void note_error(std::string msg);
     void setup_decoder_callbacks();
 
@@ -238,9 +247,15 @@ bool TeensyManager::push_config(const std::vector<GroupConfig>& groups, std::str
 
     if (!impl_->connected) {
         err = "Teensy not connected";
+        impl_->resync_needed.store(true, std::memory_order_relaxed);
         return false;
     }
-    return impl_->send_full_config(groups, !groups.empty(), err);
+    const bool ok = impl_->send_full_config(groups, !groups.empty(), err);
+    // Desired state is stashed above either way — on failure the io_thread
+    // retries until the device converges (and reconnect resync covers
+    // disconnects), so a transient can't leave the robot disarmed.
+    impl_->resync_needed.store(!ok, std::memory_order_relaxed);
+    return ok;
 }
 
 bool TeensyManager::stop_outputs(std::string& err) {
@@ -333,11 +348,20 @@ void TeensyManager::Impl::run() {
             // off the io_thread because send_command takes cmd_mu and blocks
             // waiting for our own reader to signal — which is us. Detach
             // briefly via a worker thread.
-            std::thread([this] {
-                resync_config();
-            }).detach();
+            spawn_resync();
         }
         if (telemetry_fd < 0) try_connect_telemetry();
+
+        // Converge: a push that failed (from a route or a previous resync)
+        // is retried every few seconds for as long as we're connected.
+        if (resync_needed.load(std::memory_order_relaxed) &&
+            !resync_running.load(std::memory_order_relaxed)) {
+            const auto now_tp = std::chrono::steady_clock::now();
+            if (now_tp - last_resync_retry > std::chrono::seconds(3)) {
+                last_resync_retry = now_tp;
+                spawn_resync();
+            }
+        }
 
         struct pollfd pfds[2];
         pfds[0] = { fd, POLLIN, 0 };
@@ -555,7 +579,7 @@ void TeensyManager::Impl::setup_decoder_callbacks() {
         // stamped on the Teensy up to one 4-sample batch (+USB) before this
         // callback — a one-sided transit the bucketed-min estimator is
         // built to reject.
-        feed_teensy_sync(s.t_ns / 1000);
+        feed_teensy_sync(s.t_ns / 1000, /*from_imu=*/true);
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard lk(status_mu);
         imu_last_sample_at = now;
@@ -576,9 +600,21 @@ void TeensyManager::Impl::setup_decoder_callbacks() {
     };
 }
 
-void TeensyManager::Impl::feed_teensy_sync(uint64_t teensy_us) {
+void TeensyManager::Impl::feed_teensy_sync(uint64_t teensy_us, bool from_imu) {
     const uint64_t host_us = gw::Clock::now_ns() / 1000;
     std::lock_guard lk(sync_mu);
+    if (from_imu) {
+        last_imu_feed_host_us_ = host_us;
+    } else if (host_us < last_imu_feed_host_us_ + 500'000) {
+        // TRIG events ride the command CDC and arrive within ~1 ms of their
+        // stamp; IMU batches ride the telemetry CDC up to ~15 ms after
+        // theirs. Interleaving the two hands ClockSync non-monotonic remote
+        // stamps, which reset-thrashes its backward-jump (reboot) detector
+        // — found live on the Stage 1 bench. TRIG is therefore only a
+        // fallback feed while the IMU stream is stale (>500 ms), keeping
+        // the mapping alive when telemetry is down but triggers run.
+        return;
+    }
     teensy_sync.feed(teensy_us, host_us);
 }
 
@@ -609,6 +645,19 @@ bool TeensyManager::Impl::write_line_locked(std::string_view s, std::string& err
 }
 
 bool TeensyManager::Impl::send_command(std::string_view cmd, std::string& err) {
+    // Two attempts. Every protocol command is idempotent (CFG_CLEAR, CFG,
+    // ARM, STOP, TEST_PIN, PING), so a retry after a lost/late ack is safe:
+    // if the first attempt actually applied and only its ack went missing,
+    // the retry re-applies the same state and its ack (or the late one)
+    // completes the wait. The firmware-side Serial.send_now() fix makes
+    // lost acks rare; this covers the residue (USB replug mid-command etc).
+    if (send_command_once(cmd, err)) return true;
+    std::cerr << "TeensyManager: retrying command after '" << err << "': "
+              << cmd << "\n";
+    return send_command_once(cmd, err);
+}
+
+bool TeensyManager::Impl::send_command_once(std::string_view cmd, std::string& err) {
     std::unique_lock lk(cmd_mu);
     cmd_pending = true;
     cmd_result.reset();
@@ -655,7 +704,7 @@ void TeensyManager::Impl::handle_incoming_line(std::string_view line) {
         const uint64_t t_us = std::strtoull(t_it->second.c_str(), nullptr, 10);
         // TRIG stamps also feed the host↔Teensy clock fit — keeps the
         // mapping alive while telemetry (IMU) is down but triggers run.
-        feed_teensy_sync(t_us);
+        feed_teensy_sync(t_us, /*from_imu=*/false);
         {
             std::lock_guard lk(pulses_mu);
             for (auto p : pins) {
@@ -712,6 +761,14 @@ bool TeensyManager::Impl::send_full_config(
     return true;
 }
 
+void TeensyManager::Impl::spawn_resync() {
+    if (resync_running.exchange(true, std::memory_order_acq_rel)) return;
+    std::thread([this] {
+        resync_config();
+        resync_running.store(false, std::memory_order_release);
+    }).detach();
+}
+
 void TeensyManager::Impl::resync_config() {
     std::vector<TeensyManager::GroupConfig> snapshot;
     bool want_armed_snap = false;
@@ -720,10 +777,16 @@ void TeensyManager::Impl::resync_config() {
         snapshot        = desired_cfg;
         want_armed_snap = want_armed;
     }
-    if (snapshot.empty()) return;
+    if (snapshot.empty()) {
+        resync_needed.store(false, std::memory_order_relaxed);
+        return;
+    }
     std::string err;
-    if (!send_full_config(snapshot, want_armed_snap, err)) {
-        note_error("resync: " + err);
+    if (send_full_config(snapshot, want_armed_snap, err)) {
+        resync_needed.store(false, std::memory_order_relaxed);
+    } else {
+        note_error("resync: " + err + " (will retry)");
+        resync_needed.store(true, std::memory_order_relaxed);
     }
 }
 

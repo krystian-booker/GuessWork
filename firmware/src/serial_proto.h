@@ -50,6 +50,7 @@ private:
     void handle_line(char* line);  // mutates `line` (in-place tokenisation)
     void handle_cfg(char* args);
     void handle_status();
+    void handle_test_pin(char* args);  // bench diagnostic: steady pin drive
 
     TriggerEngine& engine_;
     char           buf_[kSerialLineBufLen];

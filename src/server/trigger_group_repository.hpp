@@ -77,6 +77,14 @@ public:
 
     bool                        remove(int64_t id);
 
+    // Desired armed state (single-row sync_config table). This is operator
+    // intent, not device state: the arm/stop routes set it BEFORE pushing so
+    // a failed push (or a robot power-cycle) still converges — main.cpp
+    // seeds TeensyManager's desired config from it at boot and the
+    // reconnect/retry resync delivers it.
+    bool armed();
+    void set_armed(bool armed);
+
 private:
     Database& db_;
 };

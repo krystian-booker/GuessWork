@@ -406,3 +406,51 @@ The software roadmap (Phases 1–7) is complete. What remains is data-driven:
   full identity (calibrations included) onto a fresh install or spare Mac.
 - **Future season:** the IMU-preintegration fallback for VIO-unhealthy via
   the reserved `feed_imu` seam (`src/fusion/fusion_engine.hpp`).
+
+---
+
+## 5. Bench results log
+
+### 2026-07-03 — Stage 0 + Stage 1 (first hardware contact)
+
+Setup: 1× CM3-U3-31S4M (serial 17301963, 6 mm lens), Teensy 4.1 + BMI088,
+fw=4, M4 Mac. Trigger wire: output 1 (pin 2), low-side (see below).
+
+- **Stage 0 PASS** — fw=4 flashed via PlatformIO (`teensy.app` loader; the
+  CLI loader can't open the HID device on macOS). Dual CDC enumerates.
+  `imu_ok: true`, **399.7 Hz sustained, 0 CRC errors** — first real BMI088
+  samples. Host↔Teensy clock sync healthy, drift fit **≈1–2 ppm**.
+  Spinnaker runtime needs Homebrew `libusb` (added to install.sh).
+- **Stage 1 PASS (fps-lock)** — camera slaved to the 30 fps trigger group:
+  **30.02–30.04 fps** (freerun is ~55), 0 dropped / 0 incomplete. The
+  75-minute stamp soak is still to run.
+- **Finding 1 (wiring, fixed):** the CM3 opto input does NOT register a
+  3.3 V high-side drive. Working scheme: OPTO_IN (pin 9, yellow) → Teensy
+  VIN 5 V; OPTO_GND (pin 7, brown) → trigger pin (low-side switch);
+  producer uses TriggerActivation=FallingEdge. docs/teensy-pinout.md
+  §1 rewritten; earlier revisions also had OPTO_IN/OPTO_GND wire colors
+  swapped. New firmware `TEST_PIN pin=<1..6> level=<0|1>` command holds an
+  output steady for multimeter / LineStatusAll verification.
+- **Finding 2 (clock sync, fixed):** feeding the host↔Teensy ClockSync from
+  both IMU (telemetry CDC, up to ~15 ms batch lag) and TRIG (command CDC,
+  ~1 ms) interleaved non-monotonic stamps and reset-thrashed the
+  backward-jump detector (~90 resets/s). TRIG is now a fallback feed only
+  while the IMU stream is stale >500 ms (teensy_manager.cpp).
+- **Finding 3 (RESOLVED — root-caused + 3 fix layers):** intermittent
+  "Teensy command timeout" (~7% of commands on a raw-port harness, worst
+  right after STOP). Root cause: short responses ("OK\r\n") stuck in the
+  Teensy USB-CDC partial-packet buffer when the core's flush timer loses
+  its race — the ack only ships when the NEXT write generates traffic.
+  Fixes: (1) firmware calls `Serial.send_now()` after every command
+  response and TRIG flush batch (harness: 0/160 timeouts after, worst ack
+  2.6 ms); (2) host `send_command` retries once (all protocol commands are
+  idempotent); (3) **armed state is now persisted operator intent**
+  (`sync_config` table, additive) — the arm/stop routes store it before
+  pushing, main.cpp seeds the desired config at boot, and TeensyManager
+  retries failed pushes every 3 s until the device converges. Verified: 5×
+  server cold-starts with ZERO API calls each converged to armed + 30 fps.
+  Field behavior: power the robot on and walk away.
+- **Operational note:** auto-exposure in a dim room drives exposure toward
+  ~90 ms and the camera silently retires only ~6 of the 30 triggers/s. Set
+  manual exposure (bench: 8 ms → instant 30 fps lock); calibration wants
+  ≤2 ms anyway.
