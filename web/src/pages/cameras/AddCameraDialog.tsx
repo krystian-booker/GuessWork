@@ -20,8 +20,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { CAMERA_ORIENTATIONS, type CameraOrientation, type CameraRole } from '@/api/cameras'
 import { useAvailableCameraModes, useAvailableCameras, useCreateCamera } from '@/queries/cameras'
 import { ModeSelect } from './ModeSelect'
+import { RoleSelect } from './RoleSelect'
 
 export function AddCameraDialog() {
   const [open, setOpen] = useState(false)
@@ -29,6 +31,8 @@ export function AddCameraDialog() {
   const [name, setName] = useState('')
   const [focal, setFocal] = useState('')
   const [mode, setMode] = useState<string | null>(null)
+  const [role, setRole] = useState<CameraRole | null>(null)
+  const [orientation, setOrientation] = useState<CameraOrientation | null>(null)
 
   // Poll while open so plugging a camera in shows up live.
   const available = useAvailableCameras(open)
@@ -40,6 +44,8 @@ export function AddCameraDialog() {
     setName('')
     setFocal('')
     setMode(null)
+    setRole(null)
+    setOrientation(null)
   }
 
   const focalNum = Number(focal)
@@ -58,6 +64,10 @@ export function AddCameraDialog() {
         serial,
         focal_length_mm: focalNum,
         mode: mode ?? undefined,
+        // Only sent when the user picked a value — omitted fields keep the
+        // server defaults (no role, orientation 0).
+        role: role ?? undefined,
+        orientation: orientation ?? undefined,
       },
       {
         onSuccess: (cam) => {
@@ -157,6 +167,36 @@ export function AddCameraDialog() {
               />
             </div>
           )}
+
+          <div className="space-y-1.5">
+            <Label>Role</Label>
+            <RoleSelect value={role} onChange={setRole} />
+            <p className="text-xs text-muted-foreground">
+              Optional — can also be changed later on the camera page.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Orientation</Label>
+            <Select
+              value={orientation != null ? String(orientation) : ''}
+              onValueChange={(v) => setOrientation(Number(v) as CameraOrientation)}
+            >
+              <SelectTrigger className="w-full" aria-label="Orientation">
+                <SelectValue placeholder="0° — upright (default)" />
+              </SelectTrigger>
+              <SelectContent>
+                {CAMERA_ORIENTATIONS.map((deg) => (
+                  <SelectItem key={deg} value={String(deg)}>
+                    {deg === 0 ? '0° — upright' : `${deg}° clockwise`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Physical mounting rotation. Set it before calibrating a VIO camera.
+            </p>
+          </div>
 
         </div>
 

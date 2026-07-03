@@ -227,7 +227,7 @@ export default function AllanPage() {
                 <ConfirmButton
                   variant="default"
                   title="Apply Allan results to the IMU config?"
-                  description="Overwrites the four noise parameters and reloads VIO/fusion. The previous values are visible on the CAN / IMU page until then."
+                  description="Overwrites the four noise parameters and reloads VIO/fusion. The previous values are visible on the Robot page until then."
                   confirmLabel="Apply"
                   onConfirm={() =>
                     apply.mutate(undefined, {
@@ -239,8 +239,8 @@ export default function AllanPage() {
                 </ConfirmButton>
                 <p className="text-xs text-muted-foreground">
                   Current values are on the{' '}
-                  <Link to="/can" className="text-primary hover:underline">
-                    CAN / IMU
+                  <Link to="/robot" className="text-primary hover:underline">
+                    Robot
                   </Link>{' '}
                   page.
                 </p>

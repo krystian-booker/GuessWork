@@ -66,7 +66,7 @@ add_library(gw_core
     src/core/frame.cpp
     src/core/frame_pool.cpp
     src/core/frame_channel.cpp
-    src/core/rio_clock_sync.cpp
+    src/core/clock_sync.cpp
     src/core/allan_variance.cpp
 )
 target_include_directories(gw_core PUBLIC src)
@@ -78,24 +78,48 @@ target_link_libraries(gw_core PUBLIC
 
 # ----------------------------------------------------------------------------
 # Spinnaker SDK (system-installed under /usr/local)
+#
+# GW_STUB_SPINNAKER=ON builds without the SDK: SpinnakerProducer and
+# CameraSupervisor are replaced by stubs that report every camera offline.
+# For dev machines / CI that can't install the license-gated FLIR SDK —
+# never for the robot.
 # ----------------------------------------------------------------------------
-add_library(gw_spinnaker INTERFACE)
-target_include_directories(gw_spinnaker INTERFACE /usr/local/include/spinnaker)
-target_link_libraries(gw_spinnaker INTERFACE
-    /usr/local/lib/libSpinnaker.dylib
-    # libSpinnaker.dylib resolves libGenApi*, libGCBase*, etc. via @rpath.
-    # Add /usr/local/lib to the executable's runtime search path.
-    "-Wl,-rpath,/usr/local/lib"
-)
+option(GW_STUB_SPINNAKER
+    "Build without the FLIR Spinnaker SDK (all cameras permanently offline)" OFF)
+
+if(NOT GW_STUB_SPINNAKER AND NOT EXISTS /usr/local/include/spinnaker)
+    message(FATAL_ERROR
+        "Spinnaker SDK not found at /usr/local/include/spinnaker. Install it "
+        "(see install.sh) or configure with -DGW_STUB_SPINNAKER=ON for a "
+        "camera-less dev/CI build.")
+endif()
+
+if(GW_STUB_SPINNAKER)
+    add_library(gw_spinnaker INTERFACE)  # empty: nothing links the SDK
+else()
+    add_library(gw_spinnaker INTERFACE)
+    target_include_directories(gw_spinnaker INTERFACE /usr/local/include/spinnaker)
+    target_link_libraries(gw_spinnaker INTERFACE
+        /usr/local/lib/libSpinnaker.dylib
+        # libSpinnaker.dylib resolves libGenApi*, libGCBase*, etc. via @rpath.
+        # Add /usr/local/lib to the executable's runtime search path.
+        "-Wl,-rpath,/usr/local/lib"
+    )
+endif()
 
 # ----------------------------------------------------------------------------
 # Producer / Consumer / App libraries
 # ----------------------------------------------------------------------------
-add_library(gw_producer
-    src/producer/spinnaker_producer.cpp
-    src/producer/spinnaker_user_buffer_pool.cpp
-    src/producer/spinnaker_video_modes.cpp
-)
+if(GW_STUB_SPINNAKER)
+    add_library(gw_producer src/producer/spinnaker_stub.cpp)
+    target_compile_definitions(gw_producer PUBLIC GW_STUB_SPINNAKER=1)
+else()
+    add_library(gw_producer
+        src/producer/spinnaker_producer.cpp
+        src/producer/spinnaker_user_buffer_pool.cpp
+        src/producer/spinnaker_video_modes.cpp
+    )
+endif()
 target_link_libraries(gw_producer PUBLIC gw_core gw_spinnaker)
 
 add_library(gw_consumer
@@ -268,8 +292,16 @@ target_link_libraries(gw_fusion
 # ----------------------------------------------------------------------------
 # HTTP server library
 # ----------------------------------------------------------------------------
+# CameraSupervisor is the one server TU that talks to the Spinnaker SDK;
+# stub builds swap in the offline-only implementation.
+if(GW_STUB_SPINNAKER)
+    set(GW_CAMERA_SUPERVISOR_SRC src/server/camera_supervisor_stub.cpp)
+else()
+    set(GW_CAMERA_SUPERVISOR_SRC src/server/camera_supervisor.cpp)
+endif()
+
 add_library(gw_server
-    src/server/camera_supervisor.cpp
+    ${GW_CAMERA_SUPERVISOR_SRC}
     src/server/calibration_supervisor.cpp
     src/server/subprocess_job.cpp
     src/server/kalibr_job.cpp
@@ -294,8 +326,9 @@ add_library(gw_server
     src/server/vio_config_repository.cpp
     src/server/vio_supervisor.cpp
     src/server/routes_vio.cpp
-    src/server/can_config_repository.cpp
-    src/server/routes_can.cpp
+    src/server/net_config_repository.cpp
+    src/server/routes_robot.cpp
+    src/net/robot_link.cpp
     src/server/fusion_config_repository.cpp
     src/server/fusion_supervisor.cpp
     src/server/routes_fusion.cpp
@@ -443,9 +476,13 @@ if(GW_BUILD_TESTS)
         tests/test_stereo_sync_pairer.cpp
         tests/test_vio_config_builder.cpp
         tests/test_vio_config_repository.cpp
-        tests/test_can_payloads.cpp
-        tests/test_rio_clock_sync.cpp
-        tests/test_can_config_repository.cpp
+        tests/test_telemetry_payloads.cpp
+        tests/test_calibration_supervisor.cpp
+        tests/test_apriltag_supervisor.cpp
+        tests/test_udp_payloads.cpp
+        tests/test_clock_sync.cpp
+        tests/test_robot_link.cpp
+        tests/test_net_config_repository.cpp
         tests/test_teensy_now.cpp
         tests/test_fusion_engine.cpp
         tests/test_fusion_config_repository.cpp
@@ -460,7 +497,7 @@ if(GW_BUILD_TESTS)
     # The estimator tests build synthetic projections with OpenCV directly,
     # the consumer test renders a real tag bitmap via the apriltag library,
     # and the field-layout test parses the shipped season fixture.
-    # test_can_payloads includes the freestanding firmware wire-contract
+    # test_telemetry_payloads includes the freestanding firmware wire-contract
     # header ("firmware/src/can_payloads.h") directly.
     target_include_directories(gw_tests PRIVATE ${OpenCV_INCLUDE_DIRS}
                                                 ${PROJECT_SOURCE_DIR})
@@ -468,5 +505,7 @@ if(GW_BUILD_TESTS)
     target_compile_definitions(gw_tests PRIVATE
         GW_FIELD_LAYOUT_DEFAULT="${GW_FIELD_LAYOUT_DEFAULT}")
     include(GoogleTest)
-    gtest_discover_tests(gw_tests)
+    # A cold-cache Debug gw_tests can take >5 s (the default) just to load
+    # its dylibs for --gtest_list_tests on first run.
+    gtest_discover_tests(gw_tests DISCOVERY_TIMEOUT 60)
 endif()

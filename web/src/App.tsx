@@ -9,9 +9,10 @@ import IntrinsicsWizardPage from './pages/calibration/IntrinsicsWizardPage'
 import ExtrinsicsPage from './pages/calibration/ExtrinsicsPage'
 import AllanPage from './pages/calibration/AllanPage'
 import FieldPage from './pages/field/FieldPage'
+import ApriltagPage from './pages/apriltag/ApriltagPage'
 import VioPage from './pages/vio/VioPage'
 import FusionPage from './pages/fusion/FusionPage'
-import CanPage from './pages/can/CanPage'
+import RobotPage from './pages/robot/RobotPage'
 import SettingsPage from './pages/settings/SettingsPage'
 import HardwareSyncPage from './pages/hardware-sync/HardwareSyncPage'
 
@@ -27,9 +28,10 @@ export default function App() {
         <Route path="/calibration/extrinsics" element={<ExtrinsicsPage />} />
         <Route path="/calibration/allan" element={<AllanPage />} />
         <Route path="/field" element={<FieldPage />} />
+        <Route path="/apriltag" element={<ApriltagPage />} />
         <Route path="/vio" element={<VioPage />} />
         <Route path="/fusion" element={<FusionPage />} />
-        <Route path="/can" element={<CanPage />} />
+        <Route path="/robot" element={<RobotPage />} />
         <Route path="/hardware-sync" element={<HardwareSyncPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<EmptyState title="Not found" description="No such page." />} />

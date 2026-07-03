@@ -44,6 +44,17 @@ export function formatUnixSeconds(t: number | null | undefined): string {
   return new Date(t * 1000).toLocaleString()
 }
 
+// Coarse "updated X ago" for values whose age is tracked client-side
+// (use-change-age). Sub-1.5 s reads as live.
+export function formatAgeMs(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return '—'
+  if (ms < 1500) return 'just now'
+  const s = Math.round(ms / 1000)
+  if (s < 90) return `${s} s ago`
+  const m = Math.round(s / 60)
+  return `${m} min ago`
+}
+
 export function formatCount(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '—'
   return n.toLocaleString()

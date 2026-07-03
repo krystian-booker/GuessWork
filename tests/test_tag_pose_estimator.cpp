@@ -211,6 +211,29 @@ TEST(TagPoseEstimatorTest, SingleTagObliqueAccuracy) {
               2.0 * M_PI / 180.0);
 }
 
+TEST(TagPoseEstimatorTest, SingleTagUsesLayoutTagSize) {
+    // Regression: the single-tag IPPE object square must be built from the
+    // layout's tag size, not a config default. A 20 cm bench layout solved
+    // against the hardcoded 6.5 in square gives a pose scaled by the size
+    // ratio (~17% range error here).
+    Scene s  = make_scene({7.0, 1.8, 0.9});
+    s.layout = prepare_layout(fixture_layout(), /*tag_size_m=*/0.20);
+    std::mt19937 rng{11};
+
+    std::vector<TagObservation> obs{project_tag(s, 1, rng, 0.3)};
+    EstimatorConfig cfg;
+    cfg.sigma_px = 0.3;
+    const auto r = estimate_robot_pose(obs, s.cam, s.layout, s.T_cam_robot, cfg);
+    ASSERT_TRUE(r.pose.has_value()) << "skip=" << to_string(r.skip);
+    EXPECT_EQ(r.pose->n_tags, 1u);
+    // Bound chosen to separate ordinary single-tag noise (~9 cm at this
+    // viewpoint) from the size-mismatch failure (0.1651/0.20 range scaling
+    // ≈ 0.5 m at ~3.3 m).
+    EXPECT_LT(translation_err_m(r.pose->T_field_robot, s.T_field_robot), 0.15);
+    EXPECT_LT(rotation_err_rad(r.pose->T_field_robot, s.T_field_robot),
+              2.0 * M_PI / 180.0);
+}
+
 TEST(TagPoseEstimatorTest, NearFrontoParallelSingleTagIsAmbiguous) {
     // Camera nearly dead-on in front of tag 1 at 4 m (a couple of degrees
     // off-axis — exactly fronto-parallel degenerates to a single IPPE

@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { Map } from 'lucide-react'
 import type { AprilTagCameraStatus } from '@/api/apriltag'
 import { Badge } from '@/components/ui/badge'
@@ -136,12 +137,17 @@ export default function FieldPage() {
           <LayoutManager />
           <Card className="py-4 gap-3">
             <CardHeader className="px-4">
-              <CardTitle className="text-sm">AprilTag detection</CardTitle>
+              <CardTitle className="flex items-center justify-between text-sm">
+                AprilTag detection
+                <Link to="/apriltag" className="text-xs font-normal text-primary hover:underline">
+                  details →
+                </Link>
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 px-4">
               {apriltag.data && !apriltag.data.t_robot_imu_set && (
                 <p className="text-xs text-warning">
-                  T_robot_imu is not set (CAN / IMU page) — detections run but field poses can't be
+                  T_robot_imu is not set (Robot page) — detections run but field poses can't be
                   published.
                 </p>
               )}

@@ -1,11 +1,12 @@
 import { NavLink } from 'react-router-dom'
 import {
   Camera,
-  Cpu,
   Crosshair,
   GitMerge,
   LayoutDashboard,
   Map,
+  Network,
+  QrCode,
   Route,
   Settings,
   Zap,
@@ -42,6 +43,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Localization',
     items: [
+      { to: '/apriltag', label: 'AprilTag', icon: QrCode },
       { to: '/vio', label: 'VIO', icon: Route },
       { to: '/fusion', label: 'Fusion', icon: GitMerge },
     ],
@@ -49,7 +51,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Hardware',
     items: [
-      { to: '/can', label: 'CAN / IMU', icon: Cpu },
+      { to: '/robot', label: 'Robot', icon: Network },
       { to: '/hardware-sync', label: 'Hardware Sync', icon: Zap },
     ],
   },

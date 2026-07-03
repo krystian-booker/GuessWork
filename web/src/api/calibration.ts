@@ -1,4 +1,4 @@
-import { asJson, readError } from './http'
+import { asJson, asJsonSoft, readError } from './http'
 
 export interface RecordingStatus {
   session_id: string
@@ -89,7 +89,9 @@ export async function stopRecording(
   const res = await fetch(`/api/cameras/${cameraId}/calibration/recording`, {
     method: 'DELETE',
   })
-  return asJson<StopRecordingResponse>(res)
+  // 409 still carries the stopped recording (dataset kept) with job=null +
+  // job_error when the Kalibr launch was rejected — a value, not a failure.
+  return asJsonSoft<StopRecordingResponse>(res, [409])
 }
 
 // Polled status snapshot for an in-progress Kalibr job. Returns null if no

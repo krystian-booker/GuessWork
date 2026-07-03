@@ -54,11 +54,13 @@ public:
     // Blocking; returns false after shutdown() (graceful consumer exit).
     bool wait_pop(StereoPair& out);
 
-    // Wakes wait_pop with false. Idempotent; push() becomes a no-op after.
+    // Wakes wait_pop with false. Idempotent; push() becomes a no-op after,
+    // until reset() revives the pairer.
     void shutdown();
 
-    // Clears buffered frames/pairs (counters survive). Used on runner
-    // rebuild so a new VIO session doesn't start on stale frames.
+    // Clears buffered frames/pairs (counters survive) and clears any prior
+    // shutdown() so the pairer is usable again. Used on runner rebuild so a
+    // new VIO session doesn't start on stale frames.
     void reset();
 
     struct Counters {

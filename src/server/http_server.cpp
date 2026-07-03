@@ -11,7 +11,7 @@
 #include "server/routes_apriltag.hpp"
 #include "server/routes_calibration.hpp"
 #include "server/routes_camera.hpp"
-#include "server/routes_can.hpp"
+#include "server/routes_robot.hpp"
 #include "server/routes_config.hpp"
 #include "server/routes_fusion.hpp"
 #include "server/routes_hardware_sync.hpp"
@@ -38,7 +38,8 @@ struct HttpServer::Impl {
          ApriltagSupervisor&                   apriltag,
          VioSupervisor&                        vio,
          VioConfigRepository&                  vio_config,
-         CanConfigRepository&                  can_config,
+         NetConfigRepository&                  net_config,
+         gw::net::RobotLink&                   robot,
          FusionSupervisor&                     fusion,
          FusionConfigRepository&               fusion_config,
          ImuAllanService&                      allan,
@@ -52,12 +53,12 @@ struct HttpServer::Impl {
         register_imu_routes(app, imu_config, teensy, apriltag, fusion, allan);
         register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_vio_routes(app, vio, vio_config);
-        register_can_routes(app, can_config, teensy);
+        register_robot_routes(app, net_config, robot, teensy);
         register_fusion_routes(app, fusion, fusion_config);
         register_config_routes(app, cameras, trigger_groups, field_layouts,
-                               imu_config, vio_config, can_config,
+                               imu_config, vio_config, net_config,
                                fusion_config, supervisor, apriltag, vio,
-                               fusion, teensy);
+                               fusion, robot);
         register_static_routes(app);
     }
 };
@@ -73,7 +74,8 @@ HttpServer::HttpServer(uint16_t                              port,
                        ApriltagSupervisor&                   apriltag,
                        VioSupervisor&                        vio,
                        VioConfigRepository&                  vio_config,
-                       CanConfigRepository&                  can_config,
+                       NetConfigRepository&                  net_config,
+                       gw::net::RobotLink&                   robot,
                        FusionSupervisor&                     fusion,
                        FusionConfigRepository&               fusion_config,
                        ImuAllanService&                      allan,
@@ -81,8 +83,8 @@ HttpServer::HttpServer(uint16_t                              port,
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
                                    trigger_groups, teensy, imu_config,
                                    field_layouts, apriltag, vio, vio_config,
-                                   can_config, fusion, fusion_config, allan,
-                                   started_at)) {}
+                                   net_config, robot, fusion, fusion_config,
+                                   allan, started_at)) {}
 
 HttpServer::~HttpServer() = default;
 

@@ -1,4 +1,4 @@
-import { getJsonOrNull, readError, send, sendJson, ApiError } from './http'
+import { asJsonSoft, getJsonOrNull, readError, send, sendJson, ApiError } from './http'
 import type { CalibrationJob } from './calibration'
 
 export interface ExtrinsicsCameraStat {
@@ -40,7 +40,9 @@ export async function getExtrinsicsRecording(): Promise<ExtrinsicsRecordingStatu
 }
 
 export async function stopExtrinsicsRecording(): Promise<StopExtrinsicsResponse> {
-  return sendJson('/api/calibration/extrinsics/recording', 'DELETE')
+  const res = await fetch('/api/calibration/extrinsics/recording', { method: 'DELETE' })
+  // Mirrors stopRecording: 409 = recording kept, Kalibr launch rejected.
+  return asJsonSoft<StopExtrinsicsResponse>(res, [409])
 }
 
 export async function getExtrinsicsJob(): Promise<CalibrationJob | null> {

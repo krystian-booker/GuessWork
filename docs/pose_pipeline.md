@@ -12,17 +12,20 @@ at the bottom) win — then fix this file.
 | Clock | Source | Who maps it |
 |---|---|---|
 | **Teensy clock** (the system time base) | wrap-extended 64-bit `micros()` on the Teensy (`firmware/src/time64.h`), carried as nanoseconds (`µs × 1000`) | Nobody — everything else maps INTO it |
-| RIO FPGA clock | controller `RobotController.getFPGATime()` µs, carried in CAN chassis-speeds frames | `gw::RioClockSync` inside TeensyManager (windowed-min + drift fit; resets on controller reboot) — `src/core/rio_clock_sync.hpp` |
-| Host steady clock | `std::chrono::steady_clock`, used only for arrival stamps and rate windows | `gw::fusion::TeensyNowEstimator` (EMA of measurement-stamp − host-arrival) supplies "Teensy-now" for output extrapolation |
+| RIO FPGA clock | controller `RobotController.getFPGATime()` µs (full 64-bit — no wrap anywhere), carried in UDP chassis-speeds packets | hop A: `gw::ClockSync` inside `RobotLink`, fed by `recvfrom` host stamps (bucketed-min + drift fit; resets on controller reboot) |
+| Host monotonic clock (`gw::Clock`) | `mach_absolute_time`, arrival stamps + rate windows only | hop B: `gw::ClockSync` inside `TeensyManager`, fed by IMU/TRIG telemetry arrival stamps — maps host↔Teensy |
 
 Rules:
-- **Estimation math never uses host clocks.** Frames are re-stamped from
+- **Estimation math never uses raw host clocks.** Frames are re-stamped from
   trigger pulses (`Frame::camera_ts_ns`), IMU samples are stamped on the
-  Teensy before transit, chassis speeds carry the mapped RIO sample time
-  (arrival-stamp fallback when `RioClockSync` is unhealthy).
+  Teensy before transit, and chassis speeds are mapped
+  RIO → host → Teensy through the two health-gated `ClockSync` hops
+  (`src/core/clock_sync.hpp`, `docs/ethernet-protocol.md` §4). Hop A
+  unhealthy → arrival-stamp fallback (mapped through hop B); hop B
+  unhealthy → `t_ns = 0` and fusion drops the sample.
 - `TeensyNowEstimator` is fed by the fusion supervisor's **odom drainer**
   (lowest latency) and, since Phase 7, also by the **tag drainer** so it
-  survives CAN-odom death. The tag feed's ~15–40 ms detect latency biases the
+  survives odom death. The tag feed's ~15–40 ms detect latency biases the
   estimate *early*, which only shortens output extrapolation.
 - Tag measurements with `clock_source == kHost` (no pulse matched) are
   rejected by fusion (`tag_rejected_clock`).
@@ -68,14 +71,14 @@ One convention everywhere (TagPoseBus, VioBus, fusion, GTSAM):
 
 ## 5. Latency stages (`/api/fusion/status` → `latency`)
 
-Target: **trigger pulse → pose on CAN p95 < 50 ms** (`pose_staleness`).
+Target: **trigger pulse → pose on the wire p95 < 50 ms** (`pose_staleness`).
 
 | Stage | Measures | Path covered |
 |---|---|---|
 | `tag_pulse_to_fusion` | `teensy_now(arrival) − tag.t_ns` at the tag drainer | exposure + USB + detect + estimate + bus |
 | `queue_wait` | drainer push → engine pop (host steady) | internal queue dwell |
 | `solve` | one `IncrementalFixedLagSmoother::update()` wall time (last/p95 over 256) | iSAM2 solve |
-| `pose_staleness` | `teensy_now − newest state t_ns` at each CAN send, pre-clamp (signed; slightly negative possible with the tag-biased estimator) | **the headline end-to-end number** — extrapolation covers exactly this gap |
+| `pose_staleness` | `teensy_now − newest state t_ns` at each UDP pose send, pre-clamp (signed; slightly negative possible with the tag-biased estimator) | **the headline end-to-end number** — extrapolation covers exactly this gap |
 
 Per-camera capture→publish latency (last + EWMA) also lives in
 `/api/apriltag/status`.
@@ -90,13 +93,13 @@ tests in `tests/test_fusion_mode.cpp` mirror these rows 1:1).
 |---|---|---|---|---|
 | Nothing (all sources fresh) | `nominal` | everything | high (≈255·(1−σ/1 m)) | n/a |
 | VIO dead/diverged/disabled (T_robot_imu unset) | `no_vio` | tags + chassis speeds | barely changes (tags dominate) | none needed — pose stays valid |
-| CAN odom dead | `no_odom` | tags + VIO; states bridge on constant-velocity factors; teensy_now stays alive via the tag feed | barely changes | chassis-speeds path is the RIO's own — it already knows |
+| UDP odom dead | `no_odom` | tags + VIO; states bridge on constant-velocity factors; teensy_now stays alive via the tag feed | barely changes | chassis-speeds path is the RIO's own — it already knows |
 | VIO **and** odom dead | `tags_only` | tag priors + bridge factors | mild degradation | pose valid; counter advances |
 | All tags stale (occlusion/blackout) | `dead_reckoning` | VIO+odom betweens; covariance grows until tags return or the reinit threshold trips | decays toward 1 | quality byte decays |
 | Sustained tag-vs-dead-reckoning disagreement (collision/teleport) | `collision` | gate opens — tags are the truth source; VIO/odom inflated ×10 | halved | quality byte halves; pose snaps to tags within ~2 s |
 | Not yet initialized (no 5-tag burst since boot/reinit) | `uninitialized` | nothing published — **deliberate**: with no field reference a pose would be fiction | 0 (not sent) | **pose counter freezes** (staleness rule: counter unchanged > 200 ms) |
 | teensy_now not warmed (no odom AND no tags yet) | (any) | publishing skipped — **deliberate**: extrapolating against an unknown clock offset would mis-stamp poses | — | counter freezes |
-| Teensy unplugged | (any) | no CAN path at all; `send_pose` errors counted | — | counter freezes |
+| Teensy unplugged | (any) | no frames/IMU and no host↔Teensy clock hop; odom arrives but is dropped (t_ns=0); poses stop | — | counter freezes |
 | Camera death (USB yank) | per-source rates drop; consumers detach with the slot and reattach on replug | remaining cameras | depends on remaining tag coverage | n/a |
 
 ## 7. Normative code comments (the source of truth)
@@ -108,8 +111,8 @@ tests in `tests/test_fusion_mode.cpp` mirror these rows 1:1).
 - `src/vio/vio_config_builder.{hpp,cpp}` — Kalibr→OpenVINS mapping +
   `cov_ov_to_body_tangent`.
 - `src/core/odom_types.hpp` — chassis-speeds time domain semantics.
-- `src/core/rio_clock_sync.hpp` — RIO↔Teensy mapping + reset rules.
+- `src/core/clock_sync.hpp` — the two-hop clock mapping + reset rules.
 - `src/fusion/fusion_engine.cpp` — fusion design notes (lazy VIO betweens,
   why VIO delta noise comes from config sigmas, the in-lag trim margin).
-- `docs/can-protocol.md` ↔ `firmware/src/can_payloads.h` — the CAN wire
+- `docs/ethernet-protocol.md` ↔ `src/net/udp_payloads.h` — the robot wire
   contract.

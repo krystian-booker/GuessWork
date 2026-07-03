@@ -40,6 +40,12 @@ function stalenessTone(p95: number | undefined): StatTone {
   return p95 < 50 ? 'good' : p95 < 100 ? 'warn' : 'bad'
 }
 
+// state.quality is the headline confidence byte (255 = fully converged).
+function qualityTone(q: number | undefined): StatTone {
+  if (q == null) return 'default'
+  return q >= 200 ? 'good' : q >= 100 ? 'warn' : 'bad'
+}
+
 // p50-ish (last) + p95 horizontal bars per pipeline stage; pose_staleness is
 // the trigger-pulse → pose-on-CAN headline (<50 ms target).
 function LatencyStages({ latency }: { latency: FusionStatus['latency'] }) {
@@ -77,11 +83,13 @@ function SourceRow({
   name,
   rate,
   ageMs,
+  busDropped,
   detail,
 }: {
   name: string
   rate: number | undefined
   ageMs: number | null | undefined
+  busDropped: number
   detail: string
 }) {
   return (
@@ -90,6 +98,11 @@ function SourceRow({
       <TableCell className="font-mono text-xs tabular-nums">{formatHz(rate)}</TableCell>
       <TableCell className="font-mono text-xs tabular-nums">
         {ageMs != null ? formatMs(ageMs, 0) : '—'}
+      </TableCell>
+      <TableCell
+        className={`font-mono text-xs tabular-nums ${busDropped > 0 ? 'text-warning' : 'text-muted-foreground'}`}
+      >
+        {formatCount(busDropped)}
       </TableCell>
       <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{detail}</TableCell>
     </TableRow>
@@ -143,7 +156,7 @@ export default function FusionPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <StatCard
           label="Mode"
           value={
@@ -152,6 +165,13 @@ export default function FusionPage() {
             </Badge>
           }
           sub={s?.initialized ? 'initialized' : 'waiting for tags'}
+        />
+        <StatCard
+          label="Quality"
+          value={s?.quality ?? '—'}
+          sub="confidence 0–255"
+          tone={qualityTone(s?.quality)}
+          testId="stat-quality"
         />
         <StatCard
           label="Pose"
@@ -219,6 +239,7 @@ export default function FusionPage() {
                     <TableHead>Source</TableHead>
                     <TableHead>Rate</TableHead>
                     <TableHead>Age</TableHead>
+                    <TableHead>Bus drops</TableHead>
                     <TableHead>Counters</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -229,6 +250,7 @@ export default function FusionPage() {
                         name="Tags"
                         rate={s.sources.tag.rate_hz}
                         ageMs={s.sources.tag.last_age_ms}
+                        busDropped={s.sources.tag.bus_dropped}
                         detail={`${formatCount(s.sources.tag.accepted)} ok · ${formatCount(
                           s.sources.tag.rejected_gate,
                         )} gated · ${formatCount(s.sources.tag.rejected_stale + s.sources.tag.rejected_clock)} dropped`}
@@ -237,6 +259,7 @@ export default function FusionPage() {
                         name="VIO"
                         rate={s.sources.vio.rate_hz}
                         ageMs={s.sources.vio.last_age_ms}
+                        busDropped={s.sources.vio.bus_dropped}
                         detail={
                           s.sources.vio.enabled
                             ? `${formatCount(s.sources.vio.fused_intervals)} fused · ${formatCount(
@@ -249,6 +272,7 @@ export default function FusionPage() {
                         name="Odom"
                         rate={s.sources.odom.rate_hz}
                         ageMs={s.sources.odom.last_age_ms}
+                        busDropped={s.sources.odom.bus_dropped}
                         detail={`${formatCount(s.sources.odom.fused_intervals)} fused · ${formatCount(
                           s.sources.odom.slip,
                         )} slip · ${formatCount(s.sources.odom.stale)} stale`}
@@ -261,6 +285,7 @@ export default function FusionPage() {
                 <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs tabular-nums text-muted-foreground">
                   <span>poses sent: {formatCount(s.output.sent)}</span>
                   <span>send errors: {formatCount(s.output.send_errors)}</span>
+                  <span>queue dropped: {formatCount(s.output.queue_dropped)}</span>
                   <span>bridge factors: {formatCount(s.output.bridge_factors)}</span>
                   <span>gate reopens: {formatCount(s.output.gate_reopens)}</span>
                   <span>solver throws: {formatCount(s.output.update_exceptions)}</span>

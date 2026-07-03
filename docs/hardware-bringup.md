@@ -5,29 +5,30 @@
 GuessWork is the onboard pose-estimation system for an FRC robot: a Mac Mini M4
 runs 6 hardware-synced FLIR Chameleon3 cameras (4 AprilTag + 2 stereo VIO), a
 BMI088 IMU, and a Teensy 4.1 that drives the camera triggers (the timestamp
-ground truth) and bridges CAN to the robot controller (RoboRIO today,
-SystemCore next season). AprilTag poses, OpenVINS visual-inertial odometry,
-and controller chassis speeds fuse in a GTSAM factor graph (Phase 6); a single
-fused field pose streams back to the controller over CAN.
+ground truth). The robot controller (RoboRIO today, SystemCore next season)
+talks to the Mac **directly over UDP on the robot LAN** — chassis speeds in,
+fused pose out (`docs/ethernet-protocol.md`). AprilTag poses, OpenVINS
+visual-inertial odometry, and controller chassis speeds fuse in a GTSAM
+factor graph (Phase 6).
 
 ```
-                  Teensy 4.1 (clock master, fw=3)
+                  Teensy 4.1 (clock master, fw=4)
 trigger pulses ──► 6× Chameleon3 ──► FrameChannel per camera
-BMI088 @400 Hz ──► binary USB telemetry ──► ImuBus
-controller chassis speeds ──► CAN ──► Teensy stamp ──► OdomBus (+RioClockSync)
+BMI088 @400 Hz ──► binary USB telemetry ──► ImuBus (+host↔Teensy ClockSync)
+controller chassis speeds ──UDP :5809──► RobotLink ──► OdomBus (+RIO↔host ClockSync)
                                                   │
 4× apriltag cams ──► AprilTagConsumer ──► TagPoseBus ──┤
 2× VIO cams ──► StereoSyncPairer ──► OpenVINS ──► VioBus ──► (Phase 6) GTSAM
                                                   │             │
-                                     fused pose ◄─┘   Teensy ──CAN──► controller
+                             controller ◄──UDP :5810── fused pose┘
 ```
 
 **Single time domain:** every measurement (frames, IMU samples, chassis
 speeds) carries a Teensy-clock nanosecond timestamp. Frames are re-stamped
 from trigger pulses; the IMU is stamped on the Teensy before transit; chassis
-speeds carry the controller's FPGA sample time, mapped onto the Teensy clock
-by the host's `RioClockSync` (CAN-arrival fallback). No host clocks are ever
-used for estimation math.
+speeds carry the controller's FPGA sample time, mapped RIO→host→Teensy by
+the two-hop `ClockSync` chain (arrival fallback while the RIO hop warms up).
+No raw host clocks are ever used for estimation math.
 
 ---
 
@@ -66,16 +67,22 @@ used for estimation math.
 | `StereoSyncPairer` (exact pulse-stamp equality), `VioFeederConsumer`s, single-threaded `OpenVinsRunner`, `epoch` reinit contract, calibration-quality gating, `/api/vio/*` | ✅ unit-tested (pairer rules, config builder goldens, covariance conversion vs hand-computed J·P·Jᵀ); gating progression live-verified |
 | Actual VIO tracking on real imagery | ⬜ **hardware-pending** (needs the stereo rig + IMU) |
 
-### Phase 5 — Teensy CAN bridge (controller ↔ Teensy ↔ Mac)
+### Phase 5 — Robot link (controller ↔ Mac over UDP)
+
+*(Reworked 2026-07: the Teensy CAN bridge was retired in favor of direct
+UDP — lower complexity, richer payloads, no transceiver hardware. fw=4
+drops CAN entirely; the Teensy keeps triggers + IMU.)*
+
 | Piece | Status |
 |---|---|
-| fw=3: `CanBridge` on CAN3 (FlexCAN_T4, ISR arrival-stamping into an SPSC ring), dual mode — classic CAN 2.0 @ 1 Mbps (RoboRIO) / CAN FD 1M/4M (SystemCore) — runtime-switched via `CAN_MODE`; classic STAMP/SPEEDS counter pairing + RIO-time wrap extension | ✅ firmware builds; **never run on a real bus** |
-| Wire contract `firmware/src/can_payloads.h` (FRC 29-bit IDs, all 5 CAN frames, ODOM/POSE telemetry payloads) — one freestanding header compiled by both firmware and host | ✅ golden-byte unit-tested on the host (`test_can_payloads`) |
-| Host: `TelemetryDecoder` ODOM + fw=3 heartbeat (fw=2 compat), `OdomBus`/`ChassisSpeeds`, `RioClockSync` (bucketed-min + drift fit, reboot resets), `TeensyManager` odom/sync/pose integration, `can_config` table, `/api/can/*` routes, POSE downlink on the telemetry CDC | ✅ unit-tested (decoder, clock sync, repo) + live-server verified (no Teensy attached) |
-| ODOM at 100 Hz from a real controller, clock-sync quality, pose downlink visible on the controller, classic↔fd runtime mode switch | ⬜ **hardware-pending** (needs the TJA1051 transceiver + a RoboRIO bench — Stage 6) |
+| `RobotLink` (src/net): UDP RX thread, address learning, chassis-speeds decode → OdomBus; POSE downlink (x/y/θ + quality + mode + planar covariance + rolling counter) at `output_hz` | ✅ unit-tested end-to-end over localhost UDP (`test_robot_link`) |
+| Wire contract `src/net/udp_payloads.h` (32-byte CHASSIS_SPEEDS, 64-byte POSE, full 64-bit FPGA timestamps — no wrap handling anywhere) | ✅ golden-byte unit-tested (`test_udp_payloads`) |
+| Two-hop clock sync `gw::ClockSync` — RIO↔host (fed by UDP arrivals, in RobotLink) and host↔Teensy (fed by IMU/TRIG arrivals, in TeensyManager); chassis speeds mapped RIO→host→Teensy | ✅ unit-tested (fit/drift/reset suite + loopback chain test) |
+| `net_config` table, `/api/robot/*` routes (status incl. both sync hops, config incl. rebind, bench pose) | ✅ unit-tested (repo) + route layer |
+| Chassis speeds at 100 Hz from a real controller, two-hop sync quality on real crystals, pose downlink visible in robot code, field-network behavior | ⬜ **hardware-pending** (needs a RoboRIO + robot LAN — Stage 6) |
 
-Protocol reference: **`docs/can-protocol.md`** (frame layouts, ID map,
-time-sync scheme, controller-side WPILib sketch).
+Protocol reference: **`docs/ethernet-protocol.md`** (packet layouts,
+time-sync scheme, controller-side WPILib reference class).
 
 ### Phase 6 — GTSAM fusion engine
 | Piece | Status |
@@ -88,14 +95,17 @@ time-sync scheme, controller-side WPILib sketch).
 ### Phase 7 — Hardening & ops
 | Piece | Status |
 |---|---|
-| Per-stage latency instrumentation in `/api/fusion/status` (`tag_pulse_to_fusion`, `queue_wait`, `solve`, **`pose_staleness`** — the trigger-pulse→pose-on-CAN headline, target p95 < 50 ms) + degraded-mode `mode` string; teensy_now now also tag-fed (survives CAN-odom death) | ✅ unit-tested (`LatencyStats`, `derive_fusion_mode`) + threaded supervisor integration test + live-server verified |
+| Per-stage latency instrumentation in `/api/fusion/status` (`tag_pulse_to_fusion`, `queue_wait`, `solve`, **`pose_staleness`** — the trigger-pulse→pose-on-the-wire headline, target p95 < 50 ms) + degraded-mode `mode` string; teensy_now now also tag-fed (survives odom death) | ✅ unit-tested (`LatencyStats`, `derive_fusion_mode`) + threaded supervisor integration test + live-server verified |
 | Degraded-modes matrix (docs/pose_pipeline.md §6) + new engine sim cases (odom death, tags-only) | ✅ simulation-tested; matrix rows mirror the mode unit tests 1:1 |
 | Allan-variance IMU refinement, fully API-integrated: `POST /api/imu/allan/recording` → binary log in `~/.guesswork/imu_logs/` → `analyze` (overlapping ADEV, N/K fits, static-ness warnings) → `apply` into imu_config | ✅ math unit-tested (synthetic white noise + random walk recovered ±10–25%); recorder bit-exact-tested; **real overnight BMI088 recording pending (Stage 8 prep)** |
 | Config snapshot export/import (`/api/config/export\|import`): cameras incl. calibration blobs, trigger groups, field layouts, all tunables; non-destructive merge with per-section error reporting | ✅ round-trip + conflict-case unit tests + live verified |
 | `scripts/soak_check.sh` + threaded `test_fusion_supervisor` (the TSAN target) + `docs/pose_pipeline.md` | ✅ in repo; sanitizer soak itself is Stage 8 |
 
-**Test totals:** 259/259 passing. The software roadmap is complete — what
-remains is hardware execution (Stages 0–8) and data-driven tuning.
+**Test totals:** 288/288 passing. The software roadmap is complete — what
+remains is hardware execution (Stages 0–8) and data-driven tuning. (2026-07
+addendum: the CAN bridge was replaced by the UDP robot link — Phase 5 above —
+and the audit-driven fixes/test backfill landed; Stage 6 is now an Ethernet
+bench.)
 
 ---
 
@@ -104,7 +114,7 @@ remains is hardware execution (Stages 0–8) and data-driven tuning.
 Nothing below can be validated in software — each item exercises a physical
 interface or a real-world signal path:
 
-1. **BMI088 wiring + firmware flash** — the fw=2 firmware has never run on
+1. **BMI088 wiring + firmware flash** — the fw=4 firmware has never run on
    the Teensy; the IMU has never produced a real sample.
 2. **IMU rate/health + timestamp soak** — 400 Hz delivery, DRDY jitter, and
    the >75-minute wrap-fix soak.
@@ -121,10 +131,9 @@ interface or a real-world signal path:
    bump/shake auto-reinit, and the CPU budget.
 8. **Multi-camera scaling** — all 6 cameras + IMU at once on one USB
    topology (bandwidth + CPU).
-9. **CAN bridge bench** — chassis speeds from a real controller at 100 Hz,
-   `RioClockSync` health/drift on real crystals, the FPGA u32 time wrap,
-   pose downlink on the controller, and the (unofficial) classic↔fd runtime
-   mode switch.
+9. **Robot-link bench** — chassis speeds from a real controller at 100 Hz
+   over UDP, two-hop clock-sync health/drift on real crystals, pose
+   downlink visible in robot code, cable-pull recovery.
 10. **Fused pose on a real course** — waypoint accuracy against a tape
     measure, solve-time budget at real measurement rates, VIO-kill
     degradation and physical collision/jostle behavior.
@@ -140,11 +149,12 @@ Full wiring reference (every pin, with electrical notes): **`docs/teensy-pinout.
 - [ ] The Kalibr AprilGrid target (printed from `data/kalibr/aprilgrid_6x6.yaml` geometry, tags 88 mm), rigid backing
 - [ ] Tape measure, masking tape, good even lighting
 - [ ] Docker/Colima working (`docker/kalibr/build.sh` image already built)
-- [ ] **CAN bench (Stage 6):** TJA1051T/3 transceiver breakout wired to Teensy
-      **pin 30 = CRX3, pin 31 = CTX3**, 3V3 + GND (tie the S/standby pin low);
-      twisted-pair CANH/CANL to the controller's CAN port; **120 Ω termination
-      at both physical ends**; a RoboRIO + power + driver-station laptop
-      running the test program from `docs/can-protocol.md`
+- [ ] **Robot-link bench (Stage 6):** the Mac and a RoboRIO on one Ethernet
+      switch (or the robot radio's wired ports), Mac on a static IP
+      (10.TE.AM.x convention); a RoboRIO + power + driver-station laptop
+      running the `GuessWorkLink` reference class from
+      `docs/ethernet-protocol.md` §5 — no transceiver hardware, no
+      termination, no extra wiring
 
 ---
 
@@ -160,7 +170,7 @@ with `./build/guesswork` (default port 8080; substitute below).
 2. Plug the Teensy in. The Mac should enumerate **two** `cu.usbmodem*`
    interfaces (dual-CDC).
 3. `GET /api/imu/status` → expect `teensy_connected: true`,
-   `telemetry_connected: true`, `fw_version: 3`, `imu_ok: true`,
+   `telemetry_connected: true`, `fw_version: 4`, `imu_ok: true`,
    `rate_hz ≈ 400`, `crc_errors: 0`.
    - `imu_ok: false` ⇒ wiring/CS-pin problem (heartbeat distinguishes "no
      IMU" from "no Teensy").
@@ -261,47 +271,46 @@ camera, both calibrated through Stage 2 (the **pair** flow:
 3. 3-hour soak; ideally repeat once under the TSAN preset
    (`build-tsan/`, reduced rates) before competition use.
 
-### Stage 6 — CAN bench with a RoboRIO (≈ half a day; independent of Stages 2–5)
+### Stage 6 — Robot-link bench with a RoboRIO (≈ 2 h; independent of Stages 2–5)
 
-Wire the TJA1051 per the checklist (classic mode works on the same CAN3 pins
-as FD — one transceiver, one connector for both modes). Controller-side test
-program: the WPILib sketch in `docs/can-protocol.md`, sending STAMP + SPEEDS
-at 100 Hz with `RobotController.getFPGATime()` and a pose listener on
-0x121/0x122.
+No wiring beyond Ethernet: Mac (static IP) and RoboRIO on one switch.
+Controller-side test program: the `GuessWorkLink` reference class in
+`docs/ethernet-protocol.md` §5, sending ChassisSpeeds at 100 Hz with
+`RobotController.getFPGATime()` and logging received poses.
 
-1. Flash fw=3, `PUT /api/can/config {"mode":"roborio"}` → response
-   `pushed: true`; `GET /api/can/status` → `fw_mode: "classic"`,
-   `can_ok: true`.
+1. `GET /api/robot/status` → `running: true`, `bind_port: 5809`.
 2. Start the RIO program. **Pass:** `odom.rate_hz ≈ 100`,
-   `counters.can_rx_drops ≈ 0`, `odom_crc_errors: 0`, `odom.last` carries the
-   commanded speeds.
-3. **Clock sync:** `clock_sync.healthy: true` within ~2 s;
-   `|drift_ppm| < 100`; `offset_us` stable to ±0.5 ms over 10 min.
-4. **Controller reboot:** restart the RIO code mid-run → `clock_sync.resets`
-   increments once, healthy again < 2 s, no stale mappings (odometry t_ns
-   stays monotonic).
-5. **FPGA wrap soak:** leave running > 75 min (the RIO's 32-bit µs low word
-   wraps at ~71.6 min) → `odom.last.rio_time_us` stays monotonic across the
-   wrap; sync stays healthy.
-6. **Pose downlink:** `POST /api/can/pose {"x":1.0,"y":2.0,"theta":0.5}` in a
-   loop → RIO program sees x/y/theta with an advancing counter;
-   `counters.pose_tx_fw` tracks `pose_sent`.
-7. **Mode switch (best-effort acceptance):** with the bus idle, PUT
-   `systemcore` then `roborio` again → `can_ok` recovers each time and step 2
-   still passes. FD itself can only be validated against a SystemCore (or an
-   FD-capable second node). **If the runtime switch misbehaves, power-cycle
-   the Teensy (the host re-pushes the mode on reconnect) and record "mode
-   change requires power cycle" here and in docs/can-protocol.md.**
-8. With the IMU also wired: confirm `imu.rate_hz ≈ 400` is unaffected at
-   100 Hz odom (shared USB telemetry CDC).
+   `odom.counter_gaps ≈ 0`, `odom.rejected: 0`, `robot_addr` shows the RIO,
+   `odom.last` carries the commanded speeds.
+3. **Clock sync (both hops):**
+   `clock_sync.rio_host.healthy: true` within ~2 s of RIO packets;
+   `clock_sync.host_teensy.healthy: true` within ~2 s of the Teensy
+   telemetry (IMU or armed triggers); `|drift_ppm| < 100` on both;
+   `offset_us` stable to ±0.5 ms over 10 min. Record both hops' numbers —
+   they are the headline metrics for this stage.
+4. **Controller reboot:** restart the RIO code mid-run →
+   `rio_host.resets` increments once, healthy again < 2 s, no stale
+   mappings (odometry `t_ns` stays monotonic).
+5. **Pose downlink:** `POST /api/robot/pose {"x":1.0,"y":2.0,"theta":0.5}`
+   in a loop → RIO program sees x/y/theta with an advancing counter and the
+   degraded-mode byte; `pose.sent` tracks it. With `rio_host` healthy the
+   packets carry a mapped `rio_time_us` (flags bit0 set) — log
+   `getFPGATime() − rio_time_us` on the RIO: it should sit at a stable few
+   ms (transport + output quantization), not jump around.
+6. **Cable pull:** yank the Ethernet cable 5 s, replug → rates recover on
+   their own, `rio_host.resets` unchanged or +1, no restarts needed.
+7. With the IMU also wired: confirm `imu.rate_hz ≈ 400` is unaffected at
+   100 Hz odom (separate paths now — USB vs UDP — so this should be trivially
+   true; it pins the regression anyway).
 
-**Pass:** steps 2–6 green; the headline numbers to record are the sync
-`drift_ppm` and the offset stability band.
+**Pass:** steps 2–6 green; the headline numbers to record are both hops'
+`drift_ppm` and offset stability bands, and the RIO-side
+`getFPGATime() − rio_time_us` latency figure.
 
 ### Stage 7 — Fusion field course (after Stages 3, 4, and 6 pass)
 
 Requires: ≥2 calibrated AprilTag cameras + the stereo VIO rig + IMU + the
-CAN bench (chassis speeds flowing). Tape a small course (3×3 m is enough)
+robot-link bench (chassis speeds flowing). Tape a small course (3×3 m is enough)
 with 4–6 printed tags at surveyed positions entered as a custom field layout;
 mark 5+ waypoints with tape-measured field coordinates.
 
@@ -324,11 +333,11 @@ mark 5+ waypoints with tape-measured field coordinates.
 6. **Tag blackout:** cover all tags > 5 s → `quality` decays, no exception;
    uncover → recovery within a second.
 7. **Downlink:** confirm the RIO test program sees the fused pose at
-   `output_hz` with an advancing counter (`output.sent` tracking
-   `pose_tx_fw`).
+   `output_hz` with an advancing counter and a sensible mode byte
+   (`output.sent` tracking `pose.sent` in /api/robot/status).
 
 **Pass:** waypoints ±3 cm/±2°, `solve_ms.p95` < 25 ms,
-`latency.pose_staleness.p95_ms` < 50 (the trigger-pulse→pose-on-CAN
+`latency.pose_staleness.p95_ms` < 50 (the trigger-pulse→pose-on-the-wire
 headline), all degradation scenarios recover without manual intervention.
 The covariance/sigma tuning loop starts from whatever this stage measures.
 
@@ -357,8 +366,8 @@ single-threaded; our own threading is fully instrumented. The headline
 software check runs without hardware:
 `TSAN_OPTIONS=halt_on_error=1 build-tsan/gw_tests --gtest_filter='FusionSupervisor*'`.
 
-**Soak runs** (all cameras + IMU + CAN attached, triggers armed, RIO test
-program streaming):
+**Soak runs** (all cameras + IMU attached, triggers armed, RIO test
+program streaming over UDP):
 
 ```bash
 TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 ./build-tsan/guesswork &
@@ -380,7 +389,7 @@ prints PASS (flat crc/exception/queue-drop counters, reinits ≤ 3,
 
 Append results (dates, measured numbers, any tuning changes like
 `init_imu_thresh`) to this file — Stage 2's `timeshift_cam_imu`, Stage 4's
-drift number, Stage 6's clock-sync stability, and Stage 7's waypoint error
+drift number, Stage 6's two-hop clock-sync stability, and Stage 7's waypoint error
 are the headline metrics worth tracking over time.
 
 ---

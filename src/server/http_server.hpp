@@ -4,6 +4,10 @@
 #include <cstdint>
 #include <memory>
 
+namespace gw::net {
+class RobotLink;
+}
+
 namespace gw::server {
 
 class CameraRepository;
@@ -16,7 +20,7 @@ class FieldLayoutRepository;
 class ApriltagSupervisor;
 class VioSupervisor;
 class VioConfigRepository;
-class CanConfigRepository;
+class NetConfigRepository;
 class FusionSupervisor;
 class FusionConfigRepository;
 class ImuAllanService;
@@ -37,7 +41,8 @@ public:
                ApriltagSupervisor&                   apriltag,
                VioSupervisor&                        vio,
                VioConfigRepository&                  vio_config,
-               CanConfigRepository&                  can_config,
+               NetConfigRepository&                  net_config,
+               gw::net::RobotLink&                   robot,
                FusionSupervisor&                     fusion,
                FusionConfigRepository&               fusion_config,
                ImuAllanService&                      allan,

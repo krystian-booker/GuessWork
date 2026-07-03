@@ -208,7 +208,9 @@ EstimateResult estimate_robot_pose(const std::vector<TagObservation>& observatio
             // Object points in the solver's image-aligned frame are
             // BL, BR, TR, TL — exactly det->p order, no reorder.
             const auto* obs = known.front();
-            const double h  = cfg.tag_size_m / 2.0;
+            // The object square must match the size the layout's field-frame
+            // corner table was built with, or the two frames disagree.
+            const double h  = layout.tag_size_m / 2.0;
             const std::vector<cv::Point3d> obj_tagcv = {
                 {-h, +h, 0}, {+h, +h, 0}, {+h, -h, 0}, {-h, -h, 0}};  // BL BR TR TL
             const std::vector<cv::Point2d> img_sq = {img[0], img[1], img[2], img[3]};

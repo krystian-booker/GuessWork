@@ -1,21 +1,21 @@
 import { Badge } from '@/components/ui/badge'
 import { StatusDot } from '@/components/StatusDot'
-import { useCanStatus } from '@/queries/can'
 import { useFusionStatus } from '@/queries/fusion'
+import { useImuStatus } from '@/queries/imu'
 import { useStatus } from '@/queries/status'
 
 // Global health cluster in the header. Shares query keys with the Dashboard,
 // so showing it everywhere costs no extra requests when the Dashboard is up.
 export function HeaderHealth() {
   const status = useStatus()
-  const can = useCanStatus()
+  const imu = useImuStatus()
   const fusion = useFusionStatus()
 
   const cams = status.data?.cameras ?? []
   const online = cams.filter((c) => c.online).length
   const camTone = cams.length === 0 ? 'idle' : online === cams.length ? 'good' : online > 0 ? 'warn' : 'bad'
 
-  const teensyOk = can.data?.teensy_connected ?? false
+  const teensyOk = imu.data?.teensy_connected ?? false
 
   return (
     <div className="flex items-center gap-4 text-xs text-muted-foreground" data-testid="header-health">

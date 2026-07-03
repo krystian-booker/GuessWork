@@ -406,6 +406,30 @@ TEST(FusionEngineTest, TagsOnlyStaysBounded) {
     EXPECT_TRUE(engine.state().initialized);
 }
 
+TEST(FusionEngineTest, OdomAndTagBlackoutVioKeepsStatesAdvancing) {
+    // Regression: states used to be created only by odom samples and newer
+    // tags. With both dead simultaneously the chain froze — buffered VIO
+    // deltas never attached and the published pose stopped advancing even
+    // though VIO was healthy. feed_vio now drives key creation in that
+    // regime (the true `dead_reckoning` matrix row).
+    FusionEngine engine(test_params());
+    Sim sim;
+    Lcg rng;
+    Scenario sc;
+    sc.duration_s    = 12.0;
+    sc.odom_stop_at  = 6.0;
+    sc.tags_off_from = 6.0;
+    sc.tags_off_to   = 12.0;
+    const auto res = run_scenario(engine, sim, sc, rng);
+
+    EXPECT_EQ(engine.counters().reinits, 0u);
+    EXPECT_TRUE(engine.state().initialized);
+    // VIO dead reckoning drifts, but a frozen pose against the moving
+    // figure-8 truth lands over a metre — this bound separates the two.
+    EXPECT_LT(res.max_pos_after_s, 0.35);
+    EXPECT_GT(engine.counters().bridge_factors, 0u);
+}
+
 TEST(FusionEngineTest, EpochResetNeverDifferencesAcross) {
     FusionEngine engine(test_params());
     Sim sim;

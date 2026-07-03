@@ -11,14 +11,11 @@ constexpr uint8_t kMagic1 = 0x5A;
 
 constexpr uint8_t kTypeImuBatch  = 0x01;
 constexpr uint8_t kTypeHeartbeat = 0x02;
-constexpr uint8_t kTypeOdom      = 0x03;
 
-constexpr size_t kHeaderLen   = 4;            // magic0 magic1 type len
-constexpr size_t kCrcLen      = 2;
-constexpr size_t kImuRecLen   = 8 + 6 * 4;    // t_us u64 + 6 × f32
-constexpr size_t kHeartbeatV2Len = 17;        // fw=2: t_us, flags, 2 × u32
-constexpr size_t kHeartbeatV3Len = 34;        // fw=3: + 4 × u32 + can_mode u8
-constexpr size_t kOdomLen        = 32;
+constexpr size_t kHeaderLen    = 4;           // magic0 magic1 type len
+constexpr size_t kCrcLen       = 2;
+constexpr size_t kImuRecLen    = 8 + 6 * 4;   // t_us u64 + 6 × f32
+constexpr size_t kHeartbeatLen = 17;          // t_us u64, flags u8, 2 × u32
 
 uint16_t crc16_ccitt(const uint8_t* data, size_t n) {
     uint16_t crc = 0xFFFF;
@@ -109,45 +106,21 @@ void TelemetryDecoder::dispatch(uint8_t type, const uint8_t* payload, size_t len
             return;
         }
         case kTypeHeartbeat: {
-            // fw=2 sends the 17-byte prefix only; fw=3 appends CAN counters.
-            if (len != kHeartbeatV2Len && len != kHeartbeatV3Len) return;
+            // fw=2/fw=4 send exactly 17 bytes; an un-reflashed fw=3 board
+            // appends CAN counters (34 bytes total). Parse the 17-byte
+            // prefix and tolerate any trailing extension.
+            if (len < kHeartbeatLen) return;  // malformed; drop
             Heartbeat hb;
             hb.t_us        = get_u64(payload);
             hb.imu_ok      = (payload[8] & 0x01) != 0;
             hb.imu_samples = get_u32(payload + 9);
             hb.imu_drops   = get_u32(payload + 13);
-            if (len >= kHeartbeatV3Len) {
-                hb.can_present   = true;
-                hb.can_ok        = (payload[8] & 0x02) != 0;
-                hb.can_rx        = get_u32(payload + 17);
-                hb.can_rx_drops  = get_u32(payload + 21);
-                hb.odom_tx_drops = get_u32(payload + 25);
-                hb.pose_tx       = get_u32(payload + 29);
-                hb.can_mode      = payload[33];
-            }
             if (on_heartbeat) on_heartbeat(hb);
             return;
         }
-        case kTypeOdom: {
-            if (len != kOdomLen) return;  // malformed; drop
-            Odom o;
-            o.t_arrival_us = get_u64(payload);
-            o.rio_time_us  = get_u64(payload + 8);
-            o.vx           = get_f32(payload + 16);
-            o.vy           = get_f32(payload + 20);
-            o.omega        = get_f32(payload + 24);
-            o.status_flags = static_cast<uint16_t>(payload[28] |
-                                                   (payload[29] << 8));
-            o.counter      = payload[30];
-            o.mode         = payload[31];
-            ++stats_.odom_packets;
-            if (on_odom) on_odom(o);
-            return;
-        }
         default:
-            // Unknown packet type (e.g. a newer firmware's ODOM before the
-            // host learns it). The frame already passed CRC; skip silently
-            // but count it.
+            // Unknown packet type (e.g. a stale fw=3 board's ODOM 0x03).
+            // The frame already passed CRC; skip silently but count it.
             ++stats_.unknown_types;
             return;
     }

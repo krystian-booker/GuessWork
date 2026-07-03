@@ -19,7 +19,8 @@
 #include "server/fusion_config_repository.hpp"
 #include "server/fusion_mode.hpp"
 #include "server/imu_config_repository.hpp"
-#include "server/teensy_manager.hpp"
+#include "net/robot_link.hpp"
+#include "net/udp_payloads.h"
 #include "server/vio_supervisor.hpp"
 
 namespace gw::server {
@@ -128,7 +129,7 @@ struct FusionSupervisor::Impl {
     ImuConfigRepository&    imu_config;
     ApriltagSupervisor&     apriltag;
     VioSupervisor&          vio;
-    TeensyManager&          teensy;
+    gw::net::RobotLink&     robot;
 
     // --- internal event queue (drainers → engine thread) ---------------------
     std::mutex              q_mu;
@@ -178,8 +179,8 @@ struct FusionSupervisor::Impl {
     std::thread       engine_thread, output_thread;
 
     Impl(FusionConfigRepository& fc, ImuConfigRepository& ic,
-         ApriltagSupervisor& at, VioSupervisor& v, TeensyManager& t)
-        : fusion_config(fc), imu_config(ic), apriltag(at), vio(v), teensy(t) {}
+         ApriltagSupervisor& at, VioSupervisor& v, gw::net::RobotLink& r)
+        : fusion_config(fc), imu_config(ic), apriltag(at), vio(v), robot(r) {}
 
     void push(EventPayload payload) {
         {
@@ -333,20 +334,55 @@ struct FusionSupervisor::Impl {
             const auto T = gw::fusion::extrapolate_planar(
                 st.T_field_robot, st.vx_mps, st.vy_mps, st.omega_radps, dt_s);
 
-            gw::FusedPose pose;
+            gw::net::RobotLink::PoseSend pose;
             pose.t_ns      = static_cast<uint64_t>(st.t_ns + dt_ns);
             pose.x_m       = static_cast<float>(T[0][3]);
             pose.y_m       = static_cast<float>(T[1][3]);
             pose.theta_rad = static_cast<float>(std::atan2(T[1][0], T[0][0]));
             pose.quality   = st.quality;
+            pose.mode      = current_mode_enum(st);
+            pose.extrap_clamped = raw_ns > max_ns;
+            // Planar marginal out of the 6×6 body-tangent cov ([ω, t]:
+            // θz = index 2, x = 3, y = 4): xx yy tt xy xt yt.
+            pose.cov[0] = static_cast<float>(st.cov[3 * 6 + 3]);
+            pose.cov[1] = static_cast<float>(st.cov[4 * 6 + 4]);
+            pose.cov[2] = static_cast<float>(st.cov[2 * 6 + 2]);
+            pose.cov[3] = static_cast<float>(st.cov[3 * 6 + 4]);
+            pose.cov[4] = static_cast<float>(st.cov[3 * 6 + 2]);
+            pose.cov[5] = static_cast<float>(st.cov[4 * 6 + 2]);
 
-            std::string err;
-            if (teensy.send_pose(pose, err)) {
+            if (robot.send_pose(pose)) {
                 output_sent.fetch_add(1, std::memory_order_relaxed);
             } else {
                 output_send_errors.fetch_add(1, std::memory_order_relaxed);
             }
         }
+    }
+
+    // The degraded-mode byte for the POSE packet — same derivation as
+    // status(), evaluated fresh on the output thread.
+    uint8_t current_mode_enum(const gw::fusion::FusedState& st) {
+        bool vio_enabled = false;
+        {
+            std::lock_guard lk(cfg_mu);
+            if (active_cfg) {
+                vio_enabled = active_cfg->params.T_robot_imu.has_value();
+            }
+        }
+        FusionStatus::SourceEntry tag_e, vio_e, odom_e;
+        tag_stats.fill(tag_e);
+        vio_stats.fill(vio_e);
+        odom_stats.fill(odom_e);
+        const std::string mode = derive_fusion_mode(
+            st.initialized, tag_e.last_age_ms, vio_e.last_age_ms,
+            odom_e.last_age_ms, vio_enabled, st.collision_mode);
+        if (mode == "nominal") return gw::udpp::kModeNominal;
+        if (mode == "no_vio") return gw::udpp::kModeNoVio;
+        if (mode == "no_odom") return gw::udpp::kModeNoOdom;
+        if (mode == "tags_only") return gw::udpp::kModeTagsOnly;
+        if (mode == "dead_reckoning") return gw::udpp::kModeDeadReckoning;
+        if (mode == "collision") return gw::udpp::kModeCollision;
+        return gw::udpp::kModeUninitialized;
     }
 };
 
@@ -354,16 +390,16 @@ FusionSupervisor::FusionSupervisor(FusionConfigRepository& fusion_config,
                                    ImuConfigRepository&    imu_config,
                                    ApriltagSupervisor&     apriltag,
                                    VioSupervisor&          vio,
-                                   TeensyManager&          teensy)
+                                   gw::net::RobotLink&     robot)
     : impl_(std::make_unique<Impl>(fusion_config, imu_config, apriltag, vio,
-                                   teensy)) {
+                                   robot)) {
     auto& im = *impl_;
 
     im.tag_bus  = apriltag.bus();
     im.vio_bus  = vio.bus();
     im.tag_sub  = im.tag_bus->subscribe(1024);
     im.vio_sub  = im.vio_bus->subscribe(1024);
-    im.odom_sub = teensy.odom_bus().subscribe(1024);
+    im.odom_sub = robot.odom_bus().subscribe(1024);
 
     reload();  // seeds the first Reconfigure before any measurement events
 
@@ -403,9 +439,13 @@ FusionSupervisor::FusionSupervisor(FusionConfigRepository& fusion_config,
     });
     im.odom_thread = std::thread([this] {
         gw::ChassisSpeeds m;
-        while (impl_->teensy.odom_bus().wait_pop(impl_->odom_sub, m)) {
+        while (impl_->robot.odom_bus().wait_pop(impl_->odom_sub, m)) {
             impl_->odom_stats.note();
-            {
+            // t_ns / t_arrival_ns are 0 while the two-hop clock mapping is
+            // unhealthy (Teensy telemetry down) — such samples can't be
+            // placed on the fusion timeline; count the rate, feed nothing.
+            if (m.t_ns == 0) continue;
+            if (m.t_arrival_ns != 0) {
                 const auto host_now =
                     std::chrono::steady_clock::now().time_since_epoch().count();
                 std::lock_guard lk(impl_->now_mu);
@@ -424,7 +464,7 @@ FusionSupervisor::~FusionSupervisor() {
     im.stop_flag.store(true, std::memory_order_release);
     im.tag_bus->unsubscribe(im.tag_sub);
     im.vio_bus->unsubscribe(im.vio_sub);
-    im.teensy.odom_bus().unsubscribe(im.odom_sub);
+    im.robot.odom_bus().unsubscribe(im.odom_sub);
     {
         std::lock_guard lk(im.q_mu);
         im.stopping = true;
@@ -498,7 +538,7 @@ FusionStatus FusionSupervisor::status() {
     im.odom_stats.fill(st.odom);
     st.tag.bus_dropped  = im.tag_bus->dropped(im.tag_sub);
     st.vio.bus_dropped  = im.vio_bus->dropped(im.vio_sub);
-    st.odom.bus_dropped = im.teensy.odom_bus().dropped(im.odom_sub);
+    st.odom.bus_dropped = im.robot.odom_bus().dropped(im.odom_sub);
 
     st.mode = derive_fusion_mode(st.state.initialized, st.tag.last_age_ms,
                                  st.vio.last_age_ms, st.odom.last_age_ms,

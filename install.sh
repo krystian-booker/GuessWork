@@ -80,6 +80,10 @@ BREW_PKGS=(
     ninja          # required by Basalt's CMake presets (opt-in via --with-basalt)
     pkg-config     # used by find_library/find_path lookups
     openssl@3      # libdatachannel WebRTC stack
+    opencv         # gw_apriltag undistort/PnP
+    eigen          # OpenVINS + GTSAM
+    boost          # OpenVINS
+    ceres-solver   # OpenVINS
     node           # web/ frontend build (npm + Vite)
     colima         # Linux VM that runs the Kalibr container
     docker         # docker CLI; talks to Colima's docker socket
@@ -122,6 +126,8 @@ distributed via Homebrew and requires accepting a license. To install:
   4. Re-run ./install.sh.
 
 Skipping the CMake build for now; everything else is set up.
+(For a camera-less dev machine you can build anyway by configuring with
+ -DGW_STUB_SPINNAKER=ON — see CLAUDE.md.)
 ------------------------------------------------------------------------
 EOF
     DO_BUILD=0

@@ -9,10 +9,10 @@
 namespace gw::server {
 
 class CameraRepository;
-class CanConfigRepository;
 class FieldLayoutRepository;
 class FusionConfigRepository;
 class ImuConfigRepository;
+class NetConfigRepository;
 class TriggerGroupRepository;
 class VioConfigRepository;
 
@@ -29,9 +29,10 @@ class VioConfigRepository;
 // layouts by name; local rows absent from the snapshot are left alone; blob
 // fields are only set when present (never cleared by absence). Every per-row
 // failure is recorded in the report and skipped — only a version mismatch /
-// non-object root throws. The caller is responsible for post-import
-// propagation (CameraSupervisor notifications, supervisor reloads, CAN mode
-// push) — see routes_config.cpp.
+// non-object root throws. Unknown sections (e.g. the legacy "can_config" of
+// pre-UDP snapshots) are silently ignored. The caller is responsible for
+// post-import propagation (CameraSupervisor notifications, supervisor
+// reloads, robot-link reconfigure) — see routes_config.cpp.
 
 inline constexpr int kSnapshotVersion = 1;
 
@@ -43,7 +44,7 @@ struct SectionReport {
 
 struct ImportReport {
     SectionReport cameras, trigger_groups, field_layouts;
-    SectionReport imu_config, vio_config, can_config, fusion_config;
+    SectionReport imu_config, vio_config, net_config, fusion_config;
 
     // For CameraSupervisor::on_camera_added / on_camera_updated.
     std::vector<int64_t> camera_ids_created;
@@ -52,7 +53,7 @@ struct ImportReport {
     bool ok() const {
         for (const SectionReport* s :
              {&cameras, &trigger_groups, &field_layouts, &imu_config,
-              &vio_config, &can_config, &fusion_config}) {
+              &vio_config, &net_config, &fusion_config}) {
             if (!s->errors.empty()) return false;
         }
         return true;
@@ -65,7 +66,7 @@ crow::json::wvalue export_snapshot(CameraRepository&       cameras,
                                    FieldLayoutRepository&  field_layouts,
                                    ImuConfigRepository&    imu_config,
                                    VioConfigRepository&    vio_config,
-                                   CanConfigRepository&    can_config,
+                                   NetConfigRepository&    net_config,
                                    FusionConfigRepository& fusion_config);
 
 // Throws std::runtime_error on snapshot_version mismatch or non-object root.
@@ -75,7 +76,7 @@ ImportReport import_snapshot(const crow::json::rvalue& snap,
                              FieldLayoutRepository&    field_layouts,
                              ImuConfigRepository&      imu_config,
                              VioConfigRepository&      vio_config,
-                             CanConfigRepository&      can_config,
+                             NetConfigRepository&      net_config,
                              FusionConfigRepository&   fusion_config);
 
 }  // namespace gw::server

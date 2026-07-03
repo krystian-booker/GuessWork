@@ -11,7 +11,8 @@
 #include "server/apriltag_supervisor.hpp"
 #include "server/calibration_supervisor.hpp"
 #include "server/camera_repository.hpp"
-#include "server/can_config_repository.hpp"
+#include "net/robot_link.hpp"
+#include "server/net_config_repository.hpp"
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
 #include "server/field_layout_repository.hpp"
@@ -79,19 +80,32 @@ int main(int argc, char** argv) {
     gw::server::CameraRepository       cameras(database);
     gw::server::TriggerGroupRepository trigger_groups(database);
     gw::server::ImuConfigRepository    imu_config(database);
-    gw::server::CanConfigRepository    can_config(database);
+    gw::server::NetConfigRepository    net_config(database);
     gw::server::TeensyManager          teensy;
-    // Seed the desired CAN mode from the DB before the I/O thread starts so
-    // the first connect's resync already carries it.
-    {
-        const std::string mode = can_config.get().mode;
-        gw::server::CanMode m  = gw::server::CanMode::Off;
-        if (mode == "roborio")    m = gw::server::CanMode::Classic;
-        if (mode == "systemcore") m = gw::server::CanMode::Fd;
-        std::string ignored;
-        teensy.set_can_mode(m, ignored);  // offline now — remembered for resync
-    }
     teensy.start();
+
+    // UDP robot link (chassis speeds in, fused pose out). The Teensy clock
+    // view chains the host<->Teensy sync into the link's RIO<->host sync so
+    // chassis speeds land on the Teensy clock (docs/ethernet-protocol.md).
+    gw::net::RobotLink robot(gw::net::RobotLink::TeensyClockView{
+        [&teensy](uint64_t host_ns) { return teensy.host_to_teensy_ns(host_ns); },
+        [&teensy](uint64_t teensy_ns) { return teensy.teensy_to_host_ns(teensy_ns); }});
+    try {
+        const auto nc = net_config.get();
+        gw::net::RobotLink::Config lc;
+        lc.enabled    = nc.enabled;
+        lc.bind_port  = static_cast<uint16_t>(nc.bind_port);
+        lc.robot_port = static_cast<uint16_t>(nc.robot_port);
+        lc.robot_ip   = nc.robot_ip;
+        robot.start(lc);
+        if (lc.enabled) {
+            std::cerr << "guesswork: robot link listening on UDP :"
+                      << lc.bind_port << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "guesswork: robot link failed to start: " << e.what()
+                  << " (fix via PUT /api/robot/config)\n";
+    }
     std::cerr << "guesswork: database at " << db_path << "\n";
 
     gw::server::StreamParams params{
@@ -131,11 +145,11 @@ int main(int argc, char** argv) {
     std::cerr << "guesswork: calibration recordings at " << calibration_root << "\n";
 
     // GTSAM fusion: subscribes the tag/VIO/odom buses (all live for the
-    // supervisors' lifetimes) and ships the fused pose via teensy.send_pose.
-    // Declared after apriltag/vio/teensy so it tears down first.
+    // supervisors' lifetimes) and ships the fused pose via robot.send_pose.
+    // Declared after apriltag/vio/robot so it tears down first.
     gw::server::FusionConfigRepository fusion_config(database);
     gw::server::FusionSupervisor fusion(fusion_config, imu_config, apriltag,
-                                        vio, teensy);
+                                        vio, robot);
 
     // Allan-variance IMU refinement: long static recordings + analysis.
     gw::server::ImuAllanService allan(
@@ -150,8 +164,8 @@ int main(int argc, char** argv) {
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
                                   trigger_groups, teensy, imu_config,
                                   field_layouts, apriltag, vio, vio_config,
-                                  can_config, fusion, fusion_config, allan,
-                                  started_at);
+                                  net_config, robot, fusion, fusion_config,
+                                  allan, started_at);
 
     // Startup banner — printed last so it's the first thing you see in a
     // debug console. In non-embedded (Debug) builds the web UI is served by

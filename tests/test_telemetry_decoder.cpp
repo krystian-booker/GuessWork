@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
 
+#include "firmware/src/telemetry_payloads.h"
 #include "server/telemetry_decoder.hpp"
 
 namespace gw::server {
@@ -71,54 +73,32 @@ std::vector<uint8_t> heartbeat_frame(uint64_t t_us, bool imu_ok,
     return frame(0x02, payload);
 }
 
-// fw=3 heartbeat: the fw=2 prefix plus the CAN extension (binary_proto.h).
-std::vector<uint8_t> heartbeat_v3_frame(uint64_t t_us, uint8_t flags,
-                                        uint32_t imu_samples, uint32_t imu_drops,
-                                        uint32_t can_rx, uint32_t can_rx_drops,
-                                        uint32_t odom_tx_drops, uint32_t pose_tx,
-                                        uint8_t can_mode) {
+// An un-reflashed fw=3 board's heartbeat: the 17-byte prefix plus the old
+// CAN-counter extension (34 bytes total). The decoder must parse the prefix
+// and ignore the tail.
+std::vector<uint8_t> heartbeat_frame_with_tail(uint64_t t_us, uint8_t flags,
+                                               uint32_t imu_samples,
+                                               uint32_t imu_drops,
+                                               size_t tail_bytes) {
     std::vector<uint8_t> payload;
     put_u64(payload, t_us);
     payload.push_back(flags);
     put_u32(payload, imu_samples);
     put_u32(payload, imu_drops);
-    put_u32(payload, can_rx);
-    put_u32(payload, can_rx_drops);
-    put_u32(payload, odom_tx_drops);
-    put_u32(payload, pose_tx);
-    payload.push_back(can_mode);
+    for (size_t i = 0; i < tail_bytes; ++i) {
+        payload.push_back(static_cast<uint8_t>(0xC0 + i));
+    }
     return frame(0x02, payload);
-}
-
-std::vector<uint8_t> odom_payload(uint64_t t_arrival_us, uint64_t rio_time_us,
-                                  float vx, float vy, float omega,
-                                  uint16_t status_flags, uint8_t counter,
-                                  uint8_t mode) {
-    std::vector<uint8_t> payload;
-    put_u64(payload, t_arrival_us);
-    put_u64(payload, rio_time_us);
-    put_f32(payload, vx);
-    put_f32(payload, vy);
-    put_f32(payload, omega);
-    payload.push_back(static_cast<uint8_t>(status_flags));
-    payload.push_back(static_cast<uint8_t>(status_flags >> 8));
-    payload.push_back(counter);
-    payload.push_back(mode);
-    return payload;
 }
 
 struct Collector {
     std::vector<gw::ImuSample>               imu;
     std::vector<TelemetryDecoder::Heartbeat> hb;
-    std::vector<TelemetryDecoder::Odom>      odom;
 
     void attach(TelemetryDecoder& d) {
         d.on_imu       = [this](const gw::ImuSample& s) { imu.push_back(s); };
         d.on_heartbeat = [this](const TelemetryDecoder::Heartbeat& h) {
             hb.push_back(h);
-        };
-        d.on_odom = [this](const TelemetryDecoder::Odom& o) {
-            odom.push_back(o);
         };
     }
 };
@@ -241,116 +221,69 @@ TEST(TelemetryDecoderTest, SkipsUnknownTypeWithValidCrc) {
     ASSERT_EQ(c.hb.size(), 1u);
 }
 
-TEST(TelemetryDecoderTest, DecodesFw2HeartbeatWithoutCanFields) {
+TEST(TelemetryDecoderTest, HeartbeatWithFw3CanTailParsesFirst17Bytes) {
     TelemetryDecoder d;
     Collector c;
     c.attach(d);
 
-    const auto f = heartbeat_frame(5'000'000, true, 2000, 3);  // len 17
+    // An un-reflashed fw=3 board sends a 34-byte heartbeat (17-byte prefix
+    // + 17 bytes of CAN counters). The prefix decodes; the tail is ignored.
+    const auto f = heartbeat_frame_with_tail(9'000'000, /*flags=*/0x03,
+                                             4000, 1, /*tail_bytes=*/17);
     d.feed(f.data(), f.size());
 
     ASSERT_EQ(c.hb.size(), 1u);
-    EXPECT_FALSE(c.hb[0].can_present);
-    EXPECT_FALSE(c.hb[0].can_ok);
-    EXPECT_EQ(c.hb[0].can_rx, 0u);
-}
-
-TEST(TelemetryDecoderTest, DecodesFw3HeartbeatCanExtension) {
-    TelemetryDecoder d;
-    Collector c;
-    c.attach(d);
-
-    // flags: imu_ok | can_ok.
-    const auto f = heartbeat_v3_frame(9'000'000, 0x03, 4000, 1,
-                                      12345, 7, 2, 99, /*can_mode=*/1);
-    d.feed(f.data(), f.size());
-
-    ASSERT_EQ(c.hb.size(), 1u);
-    EXPECT_TRUE(c.hb[0].imu_ok);
-    EXPECT_TRUE(c.hb[0].can_present);
-    EXPECT_TRUE(c.hb[0].can_ok);
+    EXPECT_EQ(c.hb[0].t_us, 9'000'000ull);
+    EXPECT_TRUE(c.hb[0].imu_ok);  // bit0 only; bit1 (old can_ok) ignored
     EXPECT_EQ(c.hb[0].imu_samples, 4000u);
-    EXPECT_EQ(c.hb[0].can_rx, 12345u);
-    EXPECT_EQ(c.hb[0].can_rx_drops, 7u);
-    EXPECT_EQ(c.hb[0].odom_tx_drops, 2u);
-    EXPECT_EQ(c.hb[0].pose_tx, 99u);
-    EXPECT_EQ(c.hb[0].can_mode, 1);
+    EXPECT_EQ(c.hb[0].imu_drops, 1u);
+    EXPECT_EQ(d.stats().packets, 1u);
 }
 
-TEST(TelemetryDecoderTest, DecodesOdomPacket) {
+TEST(TelemetryDecoderTest, DropsShortHeartbeatWithValidCrc) {
     TelemetryDecoder d;
     Collector c;
     c.attach(d);
 
-    const auto f = frame(0x03, odom_payload(123'456'789ull, 55'000'000ull,
-                                            1.5f, -0.25f, 0.75f,
-                                            0x0003, 42, /*mode=*/2));
-    d.feed(f.data(), f.size());
-
-    ASSERT_EQ(c.odom.size(), 1u);
-    EXPECT_EQ(c.odom[0].t_arrival_us, 123'456'789ull);
-    EXPECT_EQ(c.odom[0].rio_time_us, 55'000'000ull);
-    EXPECT_FLOAT_EQ(c.odom[0].vx, 1.5f);
-    EXPECT_FLOAT_EQ(c.odom[0].vy, -0.25f);
-    EXPECT_FLOAT_EQ(c.odom[0].omega, 0.75f);
-    EXPECT_EQ(c.odom[0].status_flags, 0x0003);
-    EXPECT_EQ(c.odom[0].counter, 42);
-    EXPECT_EQ(c.odom[0].mode, 2);
-    EXPECT_EQ(d.stats().odom_packets, 1u);
-}
-
-TEST(TelemetryDecoderTest, DecodesOdomWithUnknownRioTime) {
-    TelemetryDecoder d;
-    Collector c;
-    c.attach(d);
-
-    const auto f = frame(0x03, odom_payload(1'000ull, /*rio=*/0ull,
-                                            0.0f, 0.0f, 0.0f, 0, 1, 1));
-    d.feed(f.data(), f.size());
-
-    ASSERT_EQ(c.odom.size(), 1u);
-    EXPECT_EQ(c.odom[0].rio_time_us, 0ull);  // 0 = unknown, per contract
-}
-
-TEST(TelemetryDecoderTest, DropsWrongLengthOdomWithValidCrc) {
-    TelemetryDecoder d;
-    Collector c;
-    c.attach(d);
-
-    auto payload = odom_payload(1'000ull, 2'000ull, 1, 2, 3, 0, 1, 1);
-    payload.pop_back();  // 31 bytes — valid CRC, wrong length
-    const auto bad  = frame(0x03, payload);
+    // 16-byte heartbeat payload: valid CRC, one byte short of the 17-byte
+    // layout — the frame is consumed but the heartbeat is dropped.
+    std::vector<uint8_t> payload;
+    put_u64(payload, 1);
+    payload.push_back(0x01);
+    put_u32(payload, 1);
+    payload.push_back(0);
+    payload.push_back(0);
+    payload.push_back(0);
+    const auto bad  = frame(0x02, payload);
     const auto good = heartbeat_frame(7, true, 0, 0);
     std::vector<uint8_t> stream;
     stream.insert(stream.end(), bad.begin(), bad.end());
     stream.insert(stream.end(), good.begin(), good.end());
     d.feed(stream.data(), stream.size());
 
-    EXPECT_TRUE(c.odom.empty());
-    EXPECT_EQ(d.stats().odom_packets, 0u);
-    ASSERT_EQ(c.hb.size(), 1u);  // stream recovered
+    ASSERT_EQ(c.hb.size(), 1u);  // only the good frame; stream recovered
+    EXPECT_EQ(c.hb[0].t_us, 7ull);
 }
 
-TEST(TelemetryDecoderTest, OdomInterleavedWithImuAcrossFragments) {
+TEST(TelemetryDecoderTest, HeartbeatInterleavedWithImuAcrossFragments) {
     TelemetryDecoder d;
     Collector c;
     c.attach(d);
 
     std::vector<uint8_t> stream;
     const auto imu1 = imu_batch_frame({{1000, {1, 2, 3, 4, 5, 6}}});
-    const auto odo  = frame(0x03, odom_payload(2'000ull, 1'500ull,
-                                               0.5f, 0.0f, -0.5f, 0, 9, 1));
+    const auto hb   = heartbeat_frame(2'000, true, 9, 0);
     const auto imu2 = imu_batch_frame({{3000, {6, 5, 4, 3, 2, 1}}});
     stream.insert(stream.end(), imu1.begin(), imu1.end());
-    stream.insert(stream.end(), odo.begin(), odo.end());
+    stream.insert(stream.end(), hb.begin(), hb.end());
     stream.insert(stream.end(), imu2.begin(), imu2.end());
 
     // Worst-case fragmentation: byte at a time.
     for (uint8_t b : stream) d.feed(&b, 1);
 
     ASSERT_EQ(c.imu.size(), 2u);
-    ASSERT_EQ(c.odom.size(), 1u);
-    EXPECT_EQ(c.odom[0].counter, 9);
+    ASSERT_EQ(c.hb.size(), 1u);
+    EXPECT_EQ(c.hb[0].imu_samples, 9u);
     EXPECT_EQ(d.stats().packets, 3u);
 }
 
@@ -370,6 +303,96 @@ TEST(TelemetryDecoderTest, RejectsMalformedBatchCount) {
 
     EXPECT_TRUE(c.imu.empty());
     EXPECT_EQ(d.stats().packets, 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Single-pipe contract test: frames built by the REAL shared firmware header
+// (gw_fw::telem — the exact code the Teensy compiles) must decode on the
+// host. Every other test in this file uses a test-local mirror of the
+// framing; this one would catch a CRC/packing drift between the two
+// implementations that the mirrors can't see.
+TEST(TelemetryDecoderTest, DecodesFramesBuiltByTheSharedFirmwareHeader) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    namespace telem = gw_fw::telem;
+
+    // IMU batch payload laid out with the firmware header's own helpers.
+    uint8_t payload[1 + 2 * (8 + 6 * 4)];
+    size_t  off  = 0;
+    payload[off++] = 2;  // sample count
+    off = telem::le_put_u64(payload, off, 555'000ull);
+    for (float v : {1.f, 2.f, 3.f, 0.1f, 0.2f, 0.3f}) {
+        off = telem::le_put_f32(payload, off, v);
+    }
+    off = telem::le_put_u64(payload, off, 557'500ull);
+    for (float v : {4.f, 5.f, 6.f, 0.4f, 0.5f, 0.6f}) {
+        off = telem::le_put_f32(payload, off, v);
+    }
+    ASSERT_EQ(off, sizeof(payload));
+
+    uint8_t frame_buf[6 + sizeof(payload)];
+    const size_t n = telem::build_telemetry_frame(
+        telem::kBinTypeImuBatch, payload, sizeof(payload), frame_buf);
+    d.feed(frame_buf, n);
+
+    ASSERT_EQ(c.imu.size(), 2u);
+    EXPECT_EQ(c.imu[0].t_ns, 555'000ull * 1000);
+    EXPECT_FLOAT_EQ(c.imu[1].accel[2], 6.0f);
+
+    // fw=4 heartbeat through the same pipe.
+    uint8_t hb[17];
+    size_t  ho = 0;
+    ho = telem::le_put_u64(hb, ho, 999'999ull);
+    hb[ho++] = 0x01;  // imu_ok
+    ho = telem::le_put_u32(hb, ho, 4242);
+    ho = telem::le_put_u32(hb, ho, 7);
+    ASSERT_EQ(ho, sizeof(hb));
+    uint8_t hb_frame[6 + sizeof(hb)];
+    const size_t hn = telem::build_telemetry_frame(telem::kBinTypeHeartbeat,
+                                                   hb, sizeof(hb), hb_frame);
+    d.feed(hb_frame, hn);
+
+    ASSERT_EQ(c.hb.size(), 1u);
+    EXPECT_TRUE(c.hb[0].imu_ok);
+    EXPECT_EQ(c.hb[0].imu_samples, 4242u);
+    EXPECT_EQ(c.hb[0].imu_drops, 7u);
+    EXPECT_EQ(d.stats().crc_errors, 0u);
+}
+
+// Robustness: the decoder ingests bytes straight off a USB CDC — feed it a
+// deterministic pseudo-random stream (chunked arbitrarily) and demand no
+// crash and no spurious callbacks, then prove it recovers by decoding a
+// valid frame appended after the noise.
+TEST(TelemetryDecoderTest, SurvivesRandomByteStream) {
+    TelemetryDecoder d;
+    Collector c;
+    c.attach(d);
+
+    uint64_t lcg = 0x5DEECE66Dull;
+    std::vector<uint8_t> noise(16 * 1024);
+    for (auto& b : noise) {
+        lcg = lcg * 6364136223846793005ull + 1442695040888963407ull;
+        b   = static_cast<uint8_t>(lcg >> 33);
+    }
+    size_t fed = 0;
+    while (fed < noise.size()) {
+        const size_t chunk = 1 + static_cast<size_t>((lcg >> 40) % 97);
+        lcg = lcg * 6364136223846793005ull + 1442695040888963407ull;
+        const size_t n = std::min(chunk, noise.size() - fed);
+        d.feed(noise.data() + fed, n);
+        fed += n;
+    }
+    // Random bytes may accidentally form a valid-looking frame only if they
+    // beat a CRC16 behind a magic + type + length gate — astronomically
+    // unlikely in 16 KiB; assert nothing decoded.
+    EXPECT_TRUE(c.imu.empty());
+    EXPECT_TRUE(c.hb.empty());
+
+    const auto f = heartbeat_frame(1'000'000ull, true, 1, 0);
+    d.feed(f.data(), f.size());
+    ASSERT_EQ(c.hb.size(), 1u);  // resynced after arbitrary garbage
 }
 
 }  // namespace gw::server

@@ -5,12 +5,12 @@
 #include <string>
 
 #include "server/camera_repository.hpp"
-#include "server/can_config_repository.hpp"
 #include "server/config_snapshot.hpp"
 #include "server/database.hpp"
 #include "server/field_layout_repository.hpp"
 #include "server/fusion_config_repository.hpp"
 #include "server/imu_config_repository.hpp"
+#include "server/net_config_repository.hpp"
 #include "server/trigger_group_repository.hpp"
 #include "server/vio_config_repository.hpp"
 
@@ -33,24 +33,24 @@ constexpr const char* kLayoutJsonB =
 struct Repos {
     explicit Repos(Database& db)
         : cameras(db), trigger_groups(db), field_layouts(db), imu_config(db),
-          vio_config(db), can_config(db), fusion_config(db) {}
+          vio_config(db), net_config(db), fusion_config(db) {}
 
     CameraRepository       cameras;
     TriggerGroupRepository trigger_groups;
     FieldLayoutRepository  field_layouts;
     ImuConfigRepository    imu_config;
     VioConfigRepository    vio_config;
-    CanConfigRepository    can_config;
+    NetConfigRepository    net_config;
     FusionConfigRepository fusion_config;
 
     crow::json::wvalue export_all() {
         return export_snapshot(cameras, trigger_groups, field_layouts,
-                               imu_config, vio_config, can_config,
+                               imu_config, vio_config, net_config,
                                fusion_config);
     }
     ImportReport import_all(const crow::json::rvalue& snap) {
         return import_snapshot(snap, cameras, trigger_groups, field_layouts,
-                               imu_config, vio_config, can_config,
+                               imu_config, vio_config, net_config,
                                fusion_config);
     }
 };
@@ -109,9 +109,12 @@ protected:
         vio.num_pts = 200;
         a_->vio_config.update(vio);
 
-        CanConfigUpdate can;
-        can.mode = "roborio";
-        a_->can_config.update(can);
+        NetConfigUpdate net;  // every field off its default
+        net.enabled    = false;
+        net.bind_port  = 5801;
+        net.robot_port = 5802;
+        net.robot_ip   = "10.28.52.2";
+        a_->net_config.update(net);
 
         FusionConfigUpdate fusion;
         fusion.lag_s     = 3.0;
@@ -181,7 +184,11 @@ TEST_F(ConfigSnapshotTest, RoundTripRestoresEverything) {
     EXPECT_EQ(cam->trigger_output_pin, 3);
     ASSERT_TRUE(b_->field_layouts.get_active().has_value());
     EXPECT_EQ(b_->field_layouts.get_active()->name, "practice");
-    EXPECT_EQ(b_->can_config.get().mode, "roborio");
+    const auto net = b_->net_config.get();
+    EXPECT_FALSE(net.enabled);
+    EXPECT_EQ(net.bind_port, 5801);
+    EXPECT_EQ(net.robot_port, 5802);
+    EXPECT_EQ(net.robot_ip, "10.28.52.2");
     EXPECT_DOUBLE_EQ(b_->fusion_config.get().lag_s, 3.0);
 }
 
@@ -275,17 +282,44 @@ TEST_F(ConfigSnapshotTest, ActiveLayoutReplacedInPlace) {
 TEST_F(ConfigSnapshotTest, BadSectionFailsPartially) {
     populate_a();
     auto snap = a_->export_all();
-    snap["can_config"]["mode"] = "bogus";  // CHECK violation on import
+    snap["net_config"]["bind_port"] = 80;  // CHECK violation on import
 
     const auto parsed = crow::json::load(snap.dump());
     const auto report = b_->import_all(parsed);
 
     EXPECT_FALSE(report.ok());
-    EXPECT_FALSE(report.can_config.errors.empty());
+    EXPECT_FALSE(report.net_config.errors.empty());
     // Everything else still applied.
     EXPECT_TRUE(report.cameras.errors.empty());
-    EXPECT_EQ(b_->can_config.get().mode, "off");
+    // The failed UPDATE is atomic — the whole row keeps its defaults.
+    EXPECT_TRUE(b_->net_config.get().enabled);
+    EXPECT_EQ(b_->net_config.get().bind_port, 5809);
     EXPECT_DOUBLE_EQ(b_->fusion_config.get().lag_s, 3.0);
+}
+
+TEST_F(ConfigSnapshotTest, LegacyCanConfigSectionIgnored) {
+    // Pre-UDP exports carried a "can_config" section (the Teensy CAN bridge,
+    // since replaced by the UDP robot link). Like any unknown section it must
+    // be silently skipped — never an import failure.
+    crow::json::wvalue snap;
+    snap["snapshot_version"]       = kSnapshotVersion;
+    snap["can_config"]["mode"]     = "roborio";
+    snap["fusion_config"]["lag_s"] = 4.0;
+
+    const auto parsed = crow::json::load(snap.dump());
+    const auto report = b_->import_all(parsed);
+
+    EXPECT_TRUE(report.ok());
+    EXPECT_TRUE(report.net_config.errors.empty());
+    EXPECT_EQ(report.net_config.updated, 0);
+    // net_config row untouched (schema defaults).
+    const auto net = b_->net_config.get();
+    EXPECT_TRUE(net.enabled);
+    EXPECT_EQ(net.bind_port, 5809);
+    EXPECT_EQ(net.robot_port, 5810);
+    EXPECT_EQ(net.robot_ip, "");
+    // Recognized sections in the same snapshot still applied.
+    EXPECT_DOUBLE_EQ(b_->fusion_config.get().lag_s, 4.0);
 }
 
 TEST_F(ConfigSnapshotTest, VersionMismatchThrows) {

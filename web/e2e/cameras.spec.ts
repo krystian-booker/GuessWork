@@ -92,6 +92,56 @@ test.describe('Cameras (mocked)', () => {
     })
     expect(postBody).not.toHaveProperty('hardware_sync_enabled')
     expect(postBody).not.toHaveProperty('trigger_output_pin')
+    // Role/orientation are optional at creation — omitted when untouched.
+    expect(postBody).not.toHaveProperty('role')
+    expect(postBody).not.toHaveProperty('orientation')
+  })
+
+  test('add-camera dialog sends role and orientation when selected', async ({ page }) => {
+    await mockAllStatus(page)
+    await json(page, '**/api/cameras/available', [
+      { serial: '33333333', model: 'BFS-U3-32S4M', vendor: 'FLIR' },
+    ])
+    await json(page, '**/api/cameras/available/33333333/modes', {
+      supported: false,
+      current: null,
+      options: [],
+    })
+
+    let postBody: Record<string, unknown> | null = null
+    await page.route('**/api/cameras', (route) => {
+      if (route.request().method() === 'POST') {
+        postBody = route.request().postDataJSON()
+        return route.fulfill({
+          status: 201,
+          contentType: 'application/json',
+          body: JSON.stringify(cam({ id: 9, name: 'vio-l', serial: '33333333', role: 'vio_left', orientation: 180 })),
+        })
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+    })
+
+    await page.goto('/cameras')
+    await page.getByTestId('add-camera').click()
+
+    await page.getByLabel('Detected camera').click()
+    await page.getByRole('option', { name: /33333333/ }).click()
+    await page.getByLabel('Name').fill('vio-l')
+    await page.getByLabel('Focal length (mm)').fill('6')
+    await page.getByLabel('Camera role').click()
+    await page.getByRole('option', { name: 'VIO left' }).click()
+    await page.getByLabel('Orientation').click()
+    await page.getByRole('option', { name: '180° clockwise' }).click()
+    await page.getByTestId('add-camera-submit').click()
+
+    await expect.poll(() => postBody).not.toBeNull()
+    expect(postBody).toMatchObject({
+      name: 'vio-l',
+      serial: '33333333',
+      focal_length_mm: 6,
+      role: 'vio_left',
+      orientation: 180,
+    })
   })
 
   test('orientation select PUTs and rotates the preview', async ({ page }) => {

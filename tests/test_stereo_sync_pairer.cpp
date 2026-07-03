@@ -133,4 +133,34 @@ TEST(StereoSyncPairerTest, ResetClearsBuffersKeepsCounters) {
     EXPECT_EQ(p.counters().paired, 1u);       // counters survive
 }
 
+// Regression: the pairer outlives OpenVinsRunner, whose destructor calls
+// shutdown(). VioSupervisor then reset()s the same pairer and hands it to a
+// replacement runner (config change, calibration update, role flip). reset()
+// must clear the shutdown state or the rebuilt runner idles forever while
+// every feeder push() silently no-ops.
+TEST(StereoSyncPairerTest, ResetRevivesAfterShutdown) {
+    StereoSyncPairer p;
+
+    // Old runner tears down: wait_pop drains false, pushes become no-ops.
+    p.shutdown();
+    StereoPair out;
+    EXPECT_FALSE(p.wait_pop(out));
+    p.push(StereoSyncPairer::kLeft, frame(100));
+    EXPECT_EQ(p.counters().paired, 0u);
+
+    // Supervisor rebuild path.
+    p.reset();
+
+    // The replacement runner must see fresh pairs.
+    p.push(StereoSyncPairer::kLeft, frame(200, 1));
+    p.push(StereoSyncPairer::kRight, frame(200, 2));
+    ASSERT_TRUE(p.wait_pop(out));
+    EXPECT_EQ(out.t_ns, 200);
+    EXPECT_EQ(p.counters().paired, 1u);
+
+    // And a second shutdown still works for the new runner's teardown.
+    p.shutdown();
+    EXPECT_FALSE(p.wait_pop(out));
+}
+
 }  // namespace gw::vio

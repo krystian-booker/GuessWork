@@ -23,14 +23,24 @@ export interface SwitchFieldDef {
   help?: string
 }
 
-export type FieldDef = NumberFieldDef | SwitchFieldDef
+// Free-form string field (e.g. an IP address). Any value — including the
+// empty string — is valid; the server does the semantic validation.
+export interface TextFieldDef {
+  kind: 'text'
+  key: string
+  label: string
+  help?: string
+  placeholder?: string
+}
+
+export type FieldDef = NumberFieldDef | SwitchFieldDef | TextFieldDef
 
 export interface FieldGroup {
   title?: string
   fields: FieldDef[]
 }
 
-type ConfigValue = Record<string, number | boolean>
+type ConfigValue = Record<string, number | boolean | string>
 
 // Explicit-save tuning form: edits accumulate in a draft, Save sends only the
 // changed keys, Reset discards. The draft resets when `version` changes
@@ -63,6 +73,10 @@ export function ConfigForm({
       if (d === undefined) continue
       if (f.kind === 'switch') {
         if (d !== value[f.key]) patch[f.key] = d as boolean
+        continue
+      }
+      if (f.kind === 'text') {
+        if (typeof d === 'string' && d !== value[f.key]) patch[f.key] = d
         continue
       }
       const n = Number(d)
@@ -124,13 +138,17 @@ export function ConfigForm({
                   <Input
                     id={`cf-${f.key}`}
                     className={cn(
-                      'w-32 text-right font-mono text-xs tabular-nums',
+                      'w-32 font-mono text-xs tabular-nums',
+                      f.kind === 'number' && 'text-right',
                       invalid.has(f.key) && 'border-destructive',
                     )}
+                    placeholder={f.kind === 'text' ? f.placeholder : undefined}
                     value={(draft[f.key] as string | undefined) ?? String(value[f.key])}
                     onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
                   />
-                  {f.unit && <span className="w-10 text-xs text-muted-foreground">{f.unit}</span>}
+                  {f.kind === 'number' && f.unit && (
+                    <span className="w-10 text-xs text-muted-foreground">{f.unit}</span>
+                  )}
                 </div>
               </div>
             ),

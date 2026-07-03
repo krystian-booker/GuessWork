@@ -105,21 +105,32 @@ export const defaultAprilTagStatus = {
   ],
 }
 
-export const defaultCanStatus = {
-  mode: 'roborio',
-  fw_mode: 'classic',
-  teensy_connected: true,
-  telemetry_connected: true,
-  fw_version: 3,
-  can_ok: true,
+export const defaultRobotStatus = {
+  running: true,
+  bind_port: 5800,
+  robot_addr: '10.28.52.2:5800',
   odom: {
     rate_hz: 75.2,
     packets: 40000,
+    rejected: 2,
+    counter_gaps: 1,
     last_age_ms: 9,
-    last: { t_ns: 1, t_arrival_ns: 2, rio_time_us: 3, vx_mps: 1.2, vy_mps: 0.1, omega_radps: 0.4, status_flags: 0, counter: 41 },
+    last: { vx_mps: 1.2, vy_mps: 0.1, omega_radps: 0.4, rio_time_us: 1234567, status_flags: 0, t_ns: 123456789 },
   },
-  counters: { can_rx: 40000, can_rx_drops: 0, odom_tx_fw_drops: 0, odom_crc_errors: 0, pose_tx_fw: 5000, pose_sent: 5000, pose_send_errors: 0 },
-  clock_sync: { healthy: true, offset_us: 120, drift_ppm: 4.2, samples: 24, resets: 0 },
+  pose: { sent: 5000, send_errors: 0, no_dest: 3 },
+  clock_sync: {
+    healthy: true,
+    rio_host: { healthy: true, offset_us: 120, drift_ppm: 4.2, samples: 24, resets: 0 },
+    host_teensy: { healthy: true, offset_us: -80, drift_ppm: 1.1, samples: 240, resets: 1 },
+  },
+}
+
+export const defaultRobotConfig = {
+  enabled: true,
+  bind_port: 5800,
+  robot_port: 5800,
+  robot_ip: '',
+  updated_at: 1700000000,
 }
 
 export const defaultImuStatus = {
@@ -190,7 +201,8 @@ export async function mockAllStatus(page: Page) {
   await json(page, '**/api/fusion/status', defaultFusionStatus)
   await json(page, '**/api/vio/status', defaultVioStatus)
   await json(page, '**/api/apriltag/status', defaultAprilTagStatus)
-  await json(page, '**/api/can/status', defaultCanStatus)
+  await json(page, '**/api/robot/status', defaultRobotStatus)
+  await json(page, '**/api/robot/config', defaultRobotConfig)
   await json(page, '**/api/imu/status', defaultImuStatus)
   await json(page, '**/api/hardware-sync/status', defaultHwSyncStatus)
   await json(page, '**/api/field-layouts', defaultLayouts)

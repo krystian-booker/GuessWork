@@ -147,6 +147,14 @@ CalibrationSessionStatus CalibrationSupervisor::start(int64_t camera_id) {
     if (!row) {
         throw CalibrationError("camera not found");
     }
+    if (!(row->focal_length_mm > 0.0)) {
+        // focal=0 would flow into derive_kalibr_lens as focal_px=0 /
+        // hfov=180° and hand Kalibr a doomed initialization — fail before
+        // the operator wastes a recording.
+        throw CalibrationError(
+            "camera has no lens focal length configured — set focal_length_mm "
+            "before calibrating");
+    }
     gw::FrameChannel* ch = cameras_.frame_channel_for(camera_id);
     if (!ch) {
         throw CalibrationError("camera is offline");
@@ -401,6 +409,12 @@ CalibrationSupervisor::start_extrinsics(const std::vector<int64_t>& camera_ids) 
             throw CalibrationError(
                 "camera " + std::to_string(id) +
                 " is not hardware-synced — extrinsics bags need Teensy-clock stamps");
+        }
+        if (!(row->focal_length_mm > 0.0)) {
+            throw CalibrationError(
+                "camera " + std::to_string(id) +
+                " has no lens focal length configured — set focal_length_mm "
+                "before calibrating");
         }
         gw::FrameChannel* ch = cameras_.frame_channel_for(id);
         if (!ch) throw CalibrationError("camera " + std::to_string(id) + " is offline");

@@ -138,6 +138,10 @@ export async function createCamera(input: {
   serial: string
   focal_length_mm: number
   mode?: string
+  // Optional at creation (the server applies them post-create); omit to leave
+  // the defaults (no role, orientation 0).
+  role?: CameraRole
+  orientation?: CameraOrientation
   hardware_sync_enabled?: boolean
   trigger_output_pin?: number
 }): Promise<Camera> {
@@ -147,6 +151,8 @@ export async function createCamera(input: {
     focal_length_mm: input.focal_length_mm,
   }
   if (input.mode) body.mode = input.mode
+  if (input.role) body.role = input.role
+  if (input.orientation !== undefined) body.orientation = input.orientation
   if (input.hardware_sync_enabled) {
     body.hardware_sync_enabled = true
     body.trigger_output_pin    = input.trigger_output_pin

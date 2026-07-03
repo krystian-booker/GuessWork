@@ -7,12 +7,15 @@
 
 #include "fusion/fusion_types.hpp"
 
+namespace gw::net {
+class RobotLink;
+}
+
 namespace gw::server {
 
 class ApriltagSupervisor;
 class FusionConfigRepository;
 class ImuConfigRepository;
-class TeensyManager;
 class VioSupervisor;
 
 struct FusionStatus {
@@ -65,9 +68,9 @@ struct FusionStatus {
 //   - 1 engine thread drains the queue into the single-threaded
 //     gw::fusion::FusionEngine and publishes a snapshot,
 //   - 1 output thread extrapolates the snapshot to Teensy-now at output_hz
-//     and ships it via TeensyManager::send_pose.
+//     and ships it via RobotLink::send_pose (UDP to the controller).
 //
-// Construct after ApriltagSupervisor / VioSupervisor / TeensyManager and
+// Construct after ApriltagSupervisor / VioSupervisor / RobotLink and
 // destroy before them (declaration order in main.cpp handles both).
 class FusionSupervisor {
 public:
@@ -75,7 +78,7 @@ public:
                      ImuConfigRepository&    imu_config,
                      ApriltagSupervisor&     apriltag,
                      VioSupervisor&          vio,
-                     TeensyManager&          teensy);
+                     gw::net::RobotLink&     robot);
     ~FusionSupervisor();
 
     FusionSupervisor(const FusionSupervisor&)            = delete;

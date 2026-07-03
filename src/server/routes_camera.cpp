@@ -245,6 +245,8 @@ struct CreateBody {
     std::optional<std::string> mode;
     bool                       hardware_sync_enabled = false;
     std::optional<int64_t>     trigger_output_pin;
+    std::optional<std::string> role;         // applied post-create via update
+    std::optional<int64_t>     orientation;  // "
     crow::response             error;
     bool                       ok = false;
 };
@@ -282,6 +284,25 @@ CreateBody parse_create_body(const crow::request& req) {
         r.error = error_response(400,
             "trigger_output_pin is required when hardware_sync_enabled is true");
         return r;
+    }
+
+    // Optional role/orientation so a camera can be fully configured in one
+    // POST instead of create-then-edit. Same validation as PUT.
+    if (!parse_optional_string(body, "role", r.role, r.error)) return r;
+    if (r.role && !is_valid_role(*r.role)) {
+        r.error = error_response(
+            400, "role must be 'apriltag', 'vio_left', or 'vio_right'");
+        return r;
+    }
+    std::optional<double> orientation;
+    if (!parse_optional_number(body, "orientation", orientation, r.error)) return r;
+    if (orientation) {
+        const auto v = static_cast<int64_t>(*orientation);
+        if (static_cast<double>(v) != *orientation || !is_valid_orientation(v)) {
+            r.error = error_response(400, "orientation must be 0, 90, 180, or 270");
+            return r;
+        }
+        r.orientation = v;
     }
     r.ok = true;
     return r;
@@ -432,13 +453,31 @@ void register_camera_routes(crow::SimpleApp&  app,
         auto parsed = parse_create_body(req);
         if (!parsed.ok) return std::move(parsed.error);
         try {
+            // vio roles are exclusive (same route-layer check as PUT) —
+            // reject BEFORE creating so a 409 leaves no half-made camera.
+            if (parsed.role && *parsed.role != "apriltag") {
+                for (const auto& other : repo.list_all()) {
+                    if (other.role && *other.role == *parsed.role) {
+                        return error_response(409,
+                            "role '" + *parsed.role +
+                            "' is already assigned to camera '" + other.name +
+                            "'");
+                    }
+                }
+            }
             const std::optional<std::string_view> mode_view =
                 parsed.mode ? std::optional<std::string_view>(*parsed.mode)
                             : std::nullopt;
-            const auto c = repo.create(parsed.name, parsed.serial,
-                                       parsed.focal_length_mm, mode_view,
-                                       parsed.hardware_sync_enabled,
-                                       parsed.trigger_output_pin);
+            auto c = repo.create(parsed.name, parsed.serial,
+                                 parsed.focal_length_mm, mode_view,
+                                 parsed.hardware_sync_enabled,
+                                 parsed.trigger_output_pin);
+            if (parsed.role || parsed.orientation) {
+                CameraUpdate upd;
+                if (parsed.role) upd.role = std::optional<std::string>(*parsed.role);
+                upd.orientation = parsed.orientation;
+                if (const auto updated = repo.update(c.id, upd)) c = *updated;
+            }
             supervisor.on_camera_added(c.id);
             const bool on = supervisor.is_online(c.id);
             return json_response(

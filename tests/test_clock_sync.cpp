@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 
-#include "core/rio_clock_sync.hpp"
+#include "core/clock_sync.hpp"
 
 namespace gw {
 
@@ -23,7 +23,7 @@ struct Lcg {
 // Drives a synthetic stream at `rate_hz` for `seconds` of RIO time:
 // arrival = rio + offset_us + drift_ppm·t + jitter[lo, hi). Returns the last
 // arrival stamp (the "now" for healthy()).
-uint64_t drive(RioClockSync& sync, Lcg& rng, uint64_t& rio_us,
+uint64_t drive(ClockSync& sync, Lcg& rng, uint64_t& rio_us,
                double seconds, double offset_us, double drift_ppm,
                uint64_t jitter_lo_us, uint64_t jitter_hi_us,
                double rate_hz = 100.0) {
@@ -44,20 +44,20 @@ uint64_t drive(RioClockSync& sync, Lcg& rng, uint64_t& rio_us,
 
 }  // namespace
 
-TEST(RioClockSyncTest, UnhealthyDuringWarmUp) {
-    RioClockSync sync;
+TEST(ClockSyncTest, UnhealthyDuringWarmUp) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 10'000'000;
     // 0.8 s — fewer than the 4 completed buckets the fit needs.
     const auto now = drive(sync, rng, rio, 0.8, 5e6, 0.0, 100, 1000);
     EXPECT_FALSE(sync.healthy(now));
-    EXPECT_FALSE(sync.to_teensy_ns(rio).has_value());
-    EXPECT_FALSE(sync.to_rio_us(now * 1000).has_value());
+    EXPECT_FALSE(sync.to_local_ns(rio).has_value());
+    EXPECT_FALSE(sync.to_remote_us(now * 1000).has_value());
     EXPECT_GT(sync.samples(), 0u);
 }
 
-TEST(RioClockSyncTest, RecoversConstantOffsetUnderJitter) {
-    RioClockSync sync;
+TEST(ClockSyncTest, RecoversConstantOffsetUnderJitter) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 50'000'000;
     const double offset = 7'000'000.0;  // 7 s between the two clocks
@@ -71,7 +71,7 @@ TEST(RioClockSyncTest, RecoversConstantOffsetUnderJitter) {
     EXPECT_NEAR(sync.drift_ppm(), 0.0, 25.0);
     EXPECT_EQ(sync.resets(), 0u);
 
-    const auto mapped = sync.to_teensy_ns(rio);
+    const auto mapped = sync.to_local_ns(rio);
     ASSERT_TRUE(mapped.has_value());
     const double err_us =
         static_cast<double>(*mapped) / 1000.0 - (static_cast<double>(rio) + offset);
@@ -79,8 +79,8 @@ TEST(RioClockSyncTest, RecoversConstantOffsetUnderJitter) {
     EXPECT_LE(err_us, 1000.0);
 }
 
-TEST(RioClockSyncTest, TracksCrystalDrift) {
-    RioClockSync sync;
+TEST(ClockSyncTest, TracksCrystalDrift) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 1'000'000;
     // +50 ppm relative drift, tight jitter (CAN+ISR latency clusters tightly
@@ -91,7 +91,7 @@ TEST(RioClockSyncTest, TracksCrystalDrift) {
     EXPECT_NEAR(sync.drift_ppm(), 50.0, 15.0);
 
     // Mapping error at the window edge stays bounded.
-    const auto mapped = sync.to_teensy_ns(rio);
+    const auto mapped = sync.to_local_ns(rio);
     ASSERT_TRUE(mapped.has_value());
     const double truth_us = static_cast<double>(rio) + 2e6 +
                             50.0 * 1e-6 * static_cast<double>(rio - 1'000'000);
@@ -99,8 +99,8 @@ TEST(RioClockSyncTest, TracksCrystalDrift) {
     EXPECT_NEAR(err_us, 0.0, 300.0);
 }
 
-TEST(RioClockSyncTest, IgnoresLatencySpikes) {
-    RioClockSync sync;
+TEST(ClockSyncTest, IgnoresLatencySpikes) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 5'000'000;
     const double offset = 3e6;
@@ -120,8 +120,8 @@ TEST(RioClockSyncTest, IgnoresLatencySpikes) {
     EXPECT_EQ(sync.resets(), 0u);
 }
 
-TEST(RioClockSyncTest, BackwardRioJumpResetsAndReWarms) {
-    RioClockSync sync;
+TEST(ClockSyncTest, BackwardRioJumpResetsAndReWarms) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 60'000'000;
     auto now = drive(sync, rng, rio, 5.0, 1e6, 0.0, 100, 1000);
@@ -139,8 +139,8 @@ TEST(RioClockSyncTest, BackwardRioJumpResetsAndReWarms) {
     EXPECT_LE(sync.offset_us(), 66e6 + 1000.0);
 }
 
-TEST(RioClockSyncTest, OffsetStepResets) {
-    RioClockSync sync;
+TEST(ClockSyncTest, OffsetStepResets) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 20'000'000;
     auto now = drive(sync, rng, rio, 5.0, 1e6, 0.0, 100, 1000);
@@ -155,8 +155,8 @@ TEST(RioClockSyncTest, OffsetStepResets) {
     EXPECT_TRUE(sync.healthy(now));
 }
 
-TEST(RioClockSyncTest, GoesStaleWithoutFeeds) {
-    RioClockSync sync;
+TEST(ClockSyncTest, GoesStaleWithoutFeeds) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 30'000'000;
     const auto now = drive(sync, rng, rio, 5.0, 1e6, 0.0, 100, 1000);
@@ -164,25 +164,25 @@ TEST(RioClockSyncTest, GoesStaleWithoutFeeds) {
     EXPECT_FALSE(sync.healthy(now + 1'000'000));  // 1 s with no samples
     // The fit itself is still usable — mappings keep working for late
     // consumers; only the liveness gate trips.
-    EXPECT_TRUE(sync.to_teensy_ns(rio).has_value());
+    EXPECT_TRUE(sync.to_local_ns(rio).has_value());
 }
 
-TEST(RioClockSyncTest, MappingRoundTrips) {
-    RioClockSync sync;
+TEST(ClockSyncTest, MappingRoundTrips) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 40'000'000;
     drive(sync, rng, rio, 10.0, 5e6, 30.0, 100, 1000);
 
     const uint64_t probe_rio = rio - 2'000'000;
-    const auto t_ns = sync.to_teensy_ns(probe_rio);
+    const auto t_ns = sync.to_local_ns(probe_rio);
     ASSERT_TRUE(t_ns.has_value());
-    const auto back = sync.to_rio_us(*t_ns);
+    const auto back = sync.to_remote_us(*t_ns);
     ASSERT_TRUE(back.has_value());
     EXPECT_NEAR(static_cast<double>(*back), static_cast<double>(probe_rio), 2.0);
 }
 
-TEST(RioClockSyncTest, ManualResetClearsState) {
-    RioClockSync sync;
+TEST(ClockSyncTest, ManualResetClearsState) {
+    ClockSync sync;
     Lcg          rng;
     uint64_t     rio = 10'000'000;
     const auto now = drive(sync, rng, rio, 5.0, 1e6, 0.0, 100, 1000);

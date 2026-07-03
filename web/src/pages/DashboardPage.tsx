@@ -10,7 +10,7 @@ import { parseLayoutText } from '@/components/field/fieldGeometry'
 import { useTimeSeries } from '@/hooks/use-time-series'
 import { formatHz, formatMs, formatUptime } from '@/lib/format'
 import { useAprilTagStatus } from '@/queries/apriltag'
-import { useCanStatus } from '@/queries/can'
+import { useRobotStatus } from '@/queries/robot'
 import { useFieldLayout, useFieldLayouts } from '@/queries/fieldLayouts'
 import { useFusionStatus } from '@/queries/fusion'
 import { useImuStatus } from '@/queries/imu'
@@ -42,7 +42,7 @@ export default function DashboardPage() {
   const fusion = useFusionStatus()
   const vio = useVioStatus()
   const apriltag = useAprilTagStatus()
-  const can = useCanStatus()
+  const robot = useRobotStatus()
   const imu = useImuStatus()
 
   const layouts = useFieldLayouts()
@@ -88,8 +88,9 @@ export default function DashboardPage() {
   // Derived warnings.
   const alerts: string[] = []
   for (const c of cams.filter((c) => !c.online)) alerts.push(`Camera "${c.name}" is offline`)
-  if (can.data && !can.data.teensy_connected) alerts.push('Teensy is not connected')
-  if (can.data?.teensy_connected && imu.data && !imu.data.imu_ok) alerts.push('IMU is unhealthy')
+  if (imu.data && !imu.data.teensy_connected) alerts.push('Teensy is not connected')
+  if (robot.data && !robot.data.running) alerts.push('Robot link is down')
+  if (imu.data?.teensy_connected && !imu.data.imu_ok) alerts.push('IMU is unhealthy')
   if (fusion.data?.enabled && fusion.data.initialized && !fusion.data.pose)
     alerts.push('Fusion is initialized but publishing no pose')
   if (fusion.data?.collision_mode) alerts.push('Fusion is in collision mode (tag-gate fallback)')
@@ -138,13 +139,13 @@ export default function DashboardPage() {
         <StatCard
           label="Teensy"
           icon={Cpu}
-          value={can.data ? (can.data.teensy_connected ? 'online' : 'offline') : '—'}
+          value={imu.data ? (imu.data.teensy_connected ? 'online' : 'offline') : '—'}
           sub={
-            can.data?.teensy_connected
-              ? `clock sync ${can.data.clock_sync.healthy ? 'healthy' : 'unhealthy'}`
+            imu.data?.teensy_connected && robot.data
+              ? `clock sync ${robot.data.clock_sync.healthy ? 'healthy' : 'unhealthy'}`
               : undefined
           }
-          tone={can.data ? (can.data.teensy_connected ? 'good' : 'bad') : 'default'}
+          tone={imu.data ? (imu.data.teensy_connected ? 'good' : 'bad') : 'default'}
           testId="stat-teensy"
         />
         <StatCard

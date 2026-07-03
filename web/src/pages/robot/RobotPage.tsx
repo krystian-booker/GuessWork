@@ -2,19 +2,12 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Send } from 'lucide-react'
-import type { CanMode } from '@/api/can'
+import type { ClockSyncHop, RobotConfigPatch } from '@/api/robot'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { ConfigForm } from '@/components/config/ConfigForm'
 import { Mat4Table } from '@/components/Mat4Table'
@@ -24,20 +17,39 @@ import { StatusDot } from '@/components/StatusDot'
 import { useTimeSeries } from '@/hooks/use-time-series'
 import { formatCount, formatHz, formatMs } from '@/lib/format'
 import { isMat4 } from '@/lib/matrices'
-import { useBenchPose, useCanConfig, useCanStatus, useUpdateCanConfig } from '@/queries/can'
+import { useBenchPose, useRobotConfig, useRobotStatus, useUpdateRobotConfig } from '@/queries/robot'
 import { useImuConfig, useImuStatus, useUpdateImuConfig } from '@/queries/imu'
-
-const MODE_LABELS: Record<CanMode, string> = {
-  off: 'Off',
-  roborio: 'roboRIO — classic CAN 2.0 @ 1 Mbps',
-  systemcore: 'SystemCore — CAN FD 1/4 Mbps',
-}
 
 function KV({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-4 text-sm">
       <span className="text-muted-foreground">{label}</span>
       <span className="text-right font-mono text-xs tabular-nums">{value}</span>
+    </div>
+  )
+}
+
+// One hop of the rio↔host↔teensy timestamp chain.
+function SyncHopRow({ label, hop }: { label: string; hop: ClockSyncHop | undefined }) {
+  return (
+    <div className="rounded-md border px-3 py-2">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-2 text-sm font-medium">
+          <StatusDot tone={hop ? (hop.healthy ? 'good' : 'warn') : 'idle'} />
+          {label}
+        </span>
+        <span className={`text-xs ${hop?.healthy ? 'text-success' : 'text-warning'}`}>
+          {hop ? (hop.healthy ? 'healthy' : 'warming up') : '—'}
+        </span>
+      </div>
+      {hop && (
+        <div className="mt-1.5 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs tabular-nums text-muted-foreground">
+          <span>offset {formatCount(Math.round(hop.offset_us))} µs</span>
+          <span>drift {hop.drift_ppm.toFixed(1)} ppm</span>
+          <span>{formatCount(hop.samples)} samples</span>
+          <span>{formatCount(hop.resets)} resets</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -53,7 +65,7 @@ function BenchPoseSender({ disabled }: { disabled: boolean }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Bench downlink: hand-craft a POSE frame to verify controller-side reception.
+        Bench downlink: hand-craft a pose packet to verify controller-side reception.
       </p>
       <div className="grid grid-cols-3 gap-2">
         <div className="space-y-1">
@@ -190,131 +202,65 @@ function TRobotImuEditor() {
   )
 }
 
-export default function CanPage() {
-  const canStatus = useCanStatus()
-  const canConfig = useCanConfig()
-  const updateCan = useUpdateCanConfig()
+export default function RobotPage() {
+  const robotStatus = useRobotStatus()
+  const robotConfig = useRobotConfig()
+  const updateRobot = useUpdateRobotConfig()
   const imuStatus = useImuStatus()
   const imuConfig = useImuConfig()
   const updateImu = useUpdateImuConfig()
 
-  const s = canStatus.data
+  const s = robotStatus.data
+  const cfg = robotConfig.data
   const imu = imuStatus.data
 
   const odomSeries = useTimeSeries(
-    'can-odom',
+    'robot-odom',
     { rate: s?.odom.rate_hz },
-    canStatus.dataUpdatedAt,
+    robotStatus.dataUpdatedAt,
   )
   const imuSeries = useTimeSeries('imu-rate', { rate: imu?.rate_hz }, imuStatus.dataUpdatedAt)
 
   return (
     <div>
       <PageHeader
-        title="CAN / IMU"
-        description="Teensy bridge: chassis-speed odometry uplink, pose downlink, and the onboard IMU."
+        title="Robot"
+        description="UDP robot link: chassis-speed odometry uplink and pose downlink, plus the onboard IMU."
       />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {/* CAN / Teensy column */}
+        {/* Robot link column */}
         <div className="space-y-4">
-          <Card className="py-4 gap-3">
-            <CardHeader className="px-4">
-              <CardTitle className="text-sm">CAN mode</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 px-4">
-              <Select
-                value={canConfig.data?.mode ?? ''}
-                onValueChange={(mode) =>
-                  updateCan.mutate(mode as CanMode, {
-                    onSuccess: (r) => {
-                      if (r.pushed) toast.success(`CAN mode set to ${r.mode}`)
-                      else
-                        toast.warning(
-                          `Saved, but push to Teensy failed${r.push_error ? `: ${r.push_error}` : ''} — it re-syncs on reconnect`,
-                        )
-                    },
-                  })
-                }
-              >
-                <SelectTrigger className="w-full" aria-label="CAN mode">
-                  <SelectValue placeholder="Loading…" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(Object.keys(MODE_LABELS) as CanMode[]).map((m) => (
-                    <SelectItem key={m} value={m}>
-                      {MODE_LABELS[m]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Pushed to the Teensy immediately and on every reconnect (firmware ≥ 3).
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card className="py-4 gap-3">
+          <Card className="py-4 gap-3" data-testid="robot-link-card">
             <CardHeader className="px-4">
               <CardTitle className="flex items-center gap-2 text-sm">
-                Teensy
-                <StatusDot tone={s?.teensy_connected ? 'good' : 'bad'} />
+                Robot link
+                <StatusDot tone={s ? (s.running ? 'good' : 'bad') : 'idle'} />
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-1.5 px-4">
-              <KV label="Firmware" value={s?.fw_version ?? '—'} />
-              <KV label="Firmware CAN mode" value={s?.fw_mode ?? '—'} />
-              <KV
-                label="CAN bus"
-                value={
-                  <span className={s?.can_ok ? 'text-success' : 'text-destructive'}>
-                    {s ? (s.can_ok ? 'ok' : 'fault') : '—'}
-                  </span>
-                }
-              />
-              <KV
-                label="Clock sync"
-                value={
-                  s ? (
-                    <span className={s.clock_sync.healthy ? 'text-success' : 'text-warning'}>
-                      {s.clock_sync.healthy ? 'healthy' : 'warming up'} ·{' '}
-                      {s.clock_sync.drift_ppm.toFixed(1)} ppm · {s.clock_sync.resets} resets
-                    </span>
-                  ) : (
-                    '—'
-                  )
-                }
-              />
-              <KV
-                label="RX / drops / CRC"
-                value={
-                  s
-                    ? `${formatCount(s.counters.can_rx)} / ${formatCount(s.counters.can_rx_drops)} / ${formatCount(s.counters.odom_crc_errors)}`
-                    : '—'
-                }
-              />
-              <KV
-                label="Poses sent / errors"
-                value={
-                  s
-                    ? `${formatCount(s.counters.pose_sent)} / ${formatCount(s.counters.pose_send_errors)}`
-                    : '—'
-                }
-              />
-            </CardContent>
-          </Card>
-
-          <Card className="py-4 gap-3">
-            <CardHeader className="px-4">
-              <CardTitle className="text-sm">Chassis odometry</CardTitle>
-            </CardHeader>
             <CardContent className="space-y-3 px-4">
+              <div className="space-y-1.5">
+                <KV label="Bind port" value={s?.bind_port ?? '—'} />
+                <KV
+                  label="Robot address"
+                  value={
+                    s?.robot_addr ? (
+                      s.robot_addr
+                    ) : cfg && cfg.robot_ip !== '' ? (
+                      `${cfg.robot_ip} (configured)`
+                    ) : (
+                      <span className="text-warning">learning from inbound packets…</span>
+                    )
+                  }
+                />
+              </div>
               <div className="flex items-baseline gap-4">
                 <span className="font-mono text-2xl font-semibold tabular-nums">
                   {formatHz(s?.odom.rate_hz, 0)}
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {formatCount(s?.odom.packets)} packets
+                  {formatCount(s?.odom.packets)} packets · {formatCount(s?.odom.rejected)} rejected
+                  · {formatCount(s?.odom.counter_gaps)} counter gaps
                   {s?.odom.last_age_ms != null ? ` · last ${formatMs(s.odom.last_age_ms, 0)} ago` : ''}
                 </span>
               </div>
@@ -329,12 +275,113 @@ export default function CanPage() {
             </CardContent>
           </Card>
 
+          <Card className="py-4 gap-3" data-testid="clock-sync-card">
+            <CardHeader className="px-4">
+              <CardTitle className="flex items-center justify-between gap-2 text-sm">
+                Clock sync
+                <Badge
+                  variant="outline"
+                  className={
+                    s?.clock_sync.healthy
+                      ? 'border-success/50 text-success'
+                      : 'border-warning/50 text-warning'
+                  }
+                >
+                  {s ? (s.clock_sync.healthy ? 'chain healthy' : 'chain warming up') : '—'}
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 px-4">
+              <p className="text-xs text-muted-foreground">
+                Timestamp chain: RIO sample stamps map to the host clock over UDP, then to the
+                Teensy clock over USB. Both hops must be healthy for fused timestamps.
+              </p>
+              <SyncHopRow label="RIO ↔ host" hop={s?.clock_sync.rio_host} />
+              <SyncHopRow label="Host ↔ Teensy" hop={s?.clock_sync.host_teensy} />
+            </CardContent>
+          </Card>
+
+          <Card className="py-4 gap-3" data-testid="pose-downlink-card">
+            <CardHeader className="px-4">
+              <CardTitle className="text-sm">Pose downlink</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 px-4">
+              <div className="space-y-1.5">
+                <KV label="Poses sent" value={formatCount(s?.pose.sent)} />
+                <KV
+                  label="Send errors"
+                  value={
+                    <span className={s && s.pose.send_errors > 0 ? 'text-warning' : undefined}>
+                      {formatCount(s?.pose.send_errors)}
+                    </span>
+                  }
+                />
+                <KV
+                  label="No destination"
+                  value={
+                    <span className={s && s.pose.no_dest > 0 ? 'text-warning' : undefined}>
+                      {formatCount(s?.pose.no_dest)}
+                    </span>
+                  }
+                />
+              </div>
+              <BenchPoseSender disabled={!s?.running} />
+            </CardContent>
+          </Card>
+
           <Card className="py-4 gap-3">
             <CardHeader className="px-4">
-              <CardTitle className="text-sm">Bench pose downlink</CardTitle>
+              <CardTitle className="text-sm">Link configuration</CardTitle>
             </CardHeader>
             <CardContent className="px-4">
-              <BenchPoseSender disabled={!s?.teensy_connected} />
+              <ConfigForm
+                value={
+                  cfg
+                    ? {
+                        enabled: cfg.enabled,
+                        bind_port: cfg.bind_port,
+                        robot_port: cfg.robot_port,
+                        robot_ip: cfg.robot_ip,
+                      }
+                    : undefined
+                }
+                version={cfg?.updated_at}
+                saving={updateRobot.isPending}
+                onSave={(patch) =>
+                  updateRobot.mutate(patch as RobotConfigPatch, {
+                    onSuccess: (r) => {
+                      if (r.restarted) toast.success('Saved — robot link restarted')
+                      else
+                        toast.warning(
+                          `Saved, but the link restart failed${r.restart_error ? `: ${r.restart_error}` : ''}`,
+                        )
+                    },
+                  })
+                }
+                groups={[
+                  {
+                    fields: [
+                      { kind: 'switch', key: 'enabled', label: 'Enabled' },
+                      { kind: 'number', key: 'bind_port', label: 'Bind port', int: true, min: 1024 },
+                      {
+                        kind: 'number',
+                        key: 'robot_port',
+                        label: 'Robot port',
+                        int: true,
+                        min: 1024,
+                        help: 'Destination port for pose packets',
+                      },
+                      {
+                        kind: 'text',
+                        key: 'robot_ip',
+                        label: 'Robot IP',
+                        placeholder: 'auto',
+                        help: "leave empty to learn the robot's address automatically",
+                      },
+                    ],
+                  },
+                ]}
+              />
             </CardContent>
           </Card>
         </div>

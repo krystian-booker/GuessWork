@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { defaultCanStatus, defaultStatus, json, mockAllStatus } from './helpers'
+import { defaultImuStatus, defaultRobotStatus, defaultStatus, json, mockAllStatus } from './helpers'
 
 test.describe('Dashboard (mocked)', () => {
   test('stat cards and header health render from status endpoints', async ({ page }) => {
@@ -23,18 +23,20 @@ test.describe('Dashboard (mocked)', () => {
     await expect(page.getByTestId('alerts-strip')).toHaveCount(0)
   })
 
-  test('alerts strip surfaces offline camera and disconnected Teensy', async ({ page }) => {
+  test('alerts strip surfaces offline camera, disconnected Teensy and dead robot link', async ({ page }) => {
     await mockAllStatus(page)
     await json(page, '**/api/status', {
       ...defaultStatus,
       cameras: [{ ...defaultStatus.cameras[0], online: false, fps_1s: 0 }],
     })
-    await json(page, '**/api/can/status', { ...defaultCanStatus, teensy_connected: false })
+    await json(page, '**/api/imu/status', { ...defaultImuStatus, teensy_connected: false })
+    await json(page, '**/api/robot/status', { ...defaultRobotStatus, running: false })
 
     await page.goto('/')
     const alerts = page.getByTestId('alerts-strip')
     await expect(alerts).toBeVisible()
     await expect(alerts).toContainText('Camera "front" is offline')
     await expect(alerts).toContainText('Teensy is not connected')
+    await expect(alerts).toContainText('Robot link is down')
   })
 })

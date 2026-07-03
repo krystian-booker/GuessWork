@@ -8,10 +8,10 @@
 
 #include "apriltag/field_layout.hpp"
 #include "server/camera_repository.hpp"
-#include "server/can_config_repository.hpp"
 #include "server/field_layout_repository.hpp"
 #include "server/fusion_config_repository.hpp"
 #include "server/imu_config_repository.hpp"
+#include "server/net_config_repository.hpp"
 #include "server/trigger_group_repository.hpp"
 #include "server/vio_config_repository.hpp"
 
@@ -62,7 +62,7 @@ crow::json::wvalue export_snapshot(CameraRepository&       cameras,
                                    FieldLayoutRepository&  field_layouts,
                                    ImuConfigRepository&    imu_config,
                                    VioConfigRepository&    vio_config,
-                                   CanConfigRepository&    can_config,
+                                   NetConfigRepository&    net_config,
                                    FusionConfigRepository& fusion_config) {
     crow::json::wvalue j;
     j["snapshot_version"] = kSnapshotVersion;
@@ -141,9 +141,13 @@ crow::json::wvalue export_snapshot(CameraRepository&       cameras,
         j["vio_config"] = std::move(cj);
     }
     {
+        const auto c = net_config.get();
         crow::json::wvalue cj;
-        cj["mode"]      = can_config.get().mode;
-        j["can_config"] = std::move(cj);
+        cj["enabled"]    = c.enabled;
+        cj["bind_port"]  = c.bind_port;
+        cj["robot_port"] = c.robot_port;
+        cj["robot_ip"]   = c.robot_ip;  // "" = learn from inbound packets
+        j["net_config"]  = std::move(cj);
     }
     {
         const auto c = fusion_config.get();
@@ -362,7 +366,7 @@ ImportReport import_snapshot(const crow::json::rvalue& snap,
                              FieldLayoutRepository&    field_layouts,
                              ImuConfigRepository&      imu_config,
                              VioConfigRepository&      vio_config,
-                             CanConfigRepository&      can_config,
+                             NetConfigRepository&      net_config,
                              FusionConfigRepository&   fusion_config) {
     if (snap.t() != crow::json::type::Object) {
         throw std::runtime_error("snapshot must be a JSON object");
@@ -419,16 +423,23 @@ ImportReport import_snapshot(const crow::json::rvalue& snap,
             rep.vio_config.errors.emplace_back(e.what());
         }
     }
-    if (snap.has("can_config")) {
+    // Legacy pre-UDP snapshots carry a "can_config" section instead; like any
+    // unknown section it is silently ignored (the CAN bridge was replaced by
+    // the UDP robot link — there is nothing to map its mode onto).
+    if (snap.has("net_config")) {
         try {
-            CanConfigUpdate patch;
-            patch.mode = opt_string(snap["can_config"], "mode");
+            const auto&     cj = snap["net_config"];
+            NetConfigUpdate patch;
+            patch.enabled    = opt_bool(cj, "enabled");
+            patch.bind_port  = opt_int(cj, "bind_port");
+            patch.robot_port = opt_int(cj, "robot_port");
+            patch.robot_ip   = opt_string(cj, "robot_ip");
             if (!patch.empty()) {
-                can_config.update(patch);
-                ++rep.can_config.updated;
+                net_config.update(patch);
+                ++rep.net_config.updated;
             }
         } catch (const std::exception& e) {
-            rep.can_config.errors.emplace_back(e.what());
+            rep.net_config.errors.emplace_back(e.what());
         }
     }
     if (snap.has("fusion_config")) {
@@ -479,7 +490,7 @@ crow::json::wvalue ImportReport::to_json() const {
     j["field_layouts"]  = section(field_layouts);
     j["imu_config"]     = section(imu_config);
     j["vio_config"]     = section(vio_config);
-    j["can_config"]     = section(can_config);
+    j["net_config"]     = section(net_config);
     j["fusion_config"]  = section(fusion_config);
     return j;
 }

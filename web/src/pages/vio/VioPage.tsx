@@ -16,8 +16,9 @@ import { PageHeader } from '@/components/PageHeader'
 import { RollingChart } from '@/components/RollingChart'
 import { StatCard } from '@/components/StatCard'
 import { StatusDot } from '@/components/StatusDot'
+import { useChangeAge } from '@/hooks/use-change-age'
 import { useTimeSeries } from '@/hooks/use-time-series'
-import { formatCount, formatHz, formatMeters } from '@/lib/format'
+import { formatAgeMs, formatCount, formatHz, formatMeters } from '@/lib/format'
 import { useRestartVio, useUpdateVioConfig, useVioConfig, useVioStatus } from '@/queries/vio'
 
 function phaseBadge(phase: string, running: boolean): string {
@@ -39,6 +40,7 @@ export default function VioPage() {
     { freq: s?.freq_hz, features: s?.tracked_features },
     status.dataUpdatedAt,
   )
+  const lastPoseAge = useChangeAge(s?.last_pose?.t_ns)
 
   return (
     <div>
@@ -157,7 +159,30 @@ export default function VioPage() {
                   <span>imu fed: {formatCount(s.counters.imu_fed)}</span>
                   <span>zero-ts drops: {formatCount(s.counters.dropped_zero_ts)}</span>
                   <span>queue drops: {formatCount(s.counters.dropped_pair_queue)}</span>
+                  <span>imu bus drops: {formatCount(s.counters.imu_bus_dropped)}</span>
                 </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="py-4 gap-3">
+            <CardHeader className="px-4">
+              <CardTitle className="text-sm">Last odometry pose (T_odom_imu)</CardTitle>
+            </CardHeader>
+            <CardContent className="px-4">
+              {s?.last_pose ? (
+                <div
+                  className="flex flex-wrap gap-x-6 gap-y-1 font-mono text-xs tabular-nums"
+                  data-testid="vio-last-pose"
+                >
+                  <span>x {formatMeters(s.last_pose.T_odom_imu[0][3])}</span>
+                  <span>y {formatMeters(s.last_pose.T_odom_imu[1][3])}</span>
+                  <span>z {formatMeters(s.last_pose.T_odom_imu[2][3])}</span>
+                  <span className="text-muted-foreground">epoch {s.last_pose.epoch}</span>
+                  <span className="text-muted-foreground">{formatAgeMs(lastPoseAge)}</span>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No odometry published yet.</p>
               )}
             </CardContent>
           </Card>

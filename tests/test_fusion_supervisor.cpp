@@ -15,6 +15,7 @@
 #include "server/fusion_supervisor.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/routes_apriltag.hpp"
+#include "net/robot_link.hpp"
 #include "server/teensy_manager.hpp"
 #include "server/vio_config_repository.hpp"
 #include "server/vio_supervisor.hpp"
@@ -63,9 +64,14 @@ TEST_F(FusionSupervisorTest, ConcurrentFeedStatusReloadIsClean) {
     seed_default_field_layout(layouts);
 
     TeensyManager      teensy;  // not start()ed — no serial probing in tests
+    // Never start()ed either — the odom bus works without a socket; send_pose
+    // fails cleanly (fd < 0), exercising the output error path.
+    gw::net::RobotLink robot(gw::net::RobotLink::TeensyClockView{
+        [](uint64_t host_ns) { return std::optional<uint64_t>(host_ns); },
+        [](uint64_t teensy_ns) { return std::optional<uint64_t>(teensy_ns); }});
     ApriltagSupervisor apriltag(cameras, layouts, imu_cfg);
     VioSupervisor      vio(cameras, imu_cfg, vio_cfg, teensy);
-    FusionSupervisor   fusion(fusion_cfg, imu_cfg, apriltag, vio, teensy);
+    FusionSupervisor   fusion(fusion_cfg, imu_cfg, apriltag, vio, robot);
 
     std::atomic<bool> stop{false};
     const int64_t     t0 = steady_ns();
@@ -95,7 +101,7 @@ TEST_F(FusionSupervisorTest, ConcurrentFeedStatusReloadIsClean) {
             s.t_arrival_ns = s.t_ns;
             s.vx_mps       = 0.1f;
             s.counter      = ++counter;
-            teensy.odom_bus().publish(s);
+            robot.odom_bus().publish(s);
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });

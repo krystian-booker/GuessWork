@@ -93,7 +93,7 @@ export default function SettingsPage() {
             <CardContent className="space-y-3 px-4">
               <p className="text-xs text-muted-foreground">
                 Everything that defines this robot: cameras (including calibration blobs), field
-                layouts, trigger groups, and the IMU / VIO / CAN / fusion configs.
+                layouts, trigger groups, and the IMU / VIO / robot-link / fusion configs.
               </p>
               <Button onClick={download} data-testid="export-config">
                 <Download /> Download snapshot
@@ -136,7 +136,7 @@ export default function SettingsPage() {
                 variant="default"
                 disabled={!snapshot || importing}
                 title="Import this snapshot?"
-                description="Merges into the current configuration and reloads AprilTag, VIO, fusion and the CAN mode. Existing items with matching identity are updated in place."
+                description="Merges into the current configuration and reloads AprilTag, VIO, fusion and the robot link. Existing items with matching identity are updated in place."
                 confirmLabel={importing ? 'Importing…' : 'Import'}
                 onConfirm={runImport}
               >

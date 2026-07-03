@@ -28,6 +28,21 @@ export async function asJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
+// Some endpoints reply with a full result body on a specific non-2xx status
+// (e.g. DELETE …/recording returns 409 with the kept recording_result when
+// the Kalibr launch was rejected). Treat those statuses as values, not
+// errors, so callers can surface `job_error` instead of a bare toast.
+export async function asJsonSoft<T>(res: Response, softStatuses: number[]): Promise<T> {
+  if (softStatuses.includes(res.status)) {
+    try {
+      return (await res.json()) as T
+    } catch {
+      throw new ApiError(`HTTP ${res.status}`, res.status)
+    }
+  }
+  return asJson<T>(res)
+}
+
 export async function getJson<T>(url: string): Promise<T> {
   return asJson<T>(await fetch(url))
 }

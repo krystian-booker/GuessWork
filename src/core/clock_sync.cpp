@@ -1,37 +1,37 @@
-#include "core/rio_clock_sync.hpp"
+#include "core/clock_sync.hpp"
 
 #include <cmath>
 
 namespace gw {
 
-void RioClockSync::feed(uint64_t rio_time_us, uint64_t teensy_arrival_us) {
-    // Controller reboot / clock-set detection. Frames are in-order at
-    // 50–100 Hz, so any real backward movement is a clock event, not
-    // reordering.
-    if (samples_ > 0 && rio_time_us + kBackwardJumpUs < last_rio_us_) {
+void ClockSync::feed(uint64_t remote_us, uint64_t local_arrival_us) {
+    // Remote reboot / clock-set detection. Feeding streams are in-order
+    // (50–400 Hz periodic sources), so any real backward movement is a
+    // clock event, not reordering.
+    if (samples_ > 0 && remote_us + kBackwardJumpUs < last_remote_us_) {
         reset();
         ++resets_;
     }
     const double delta =
-        static_cast<double>(teensy_arrival_us) - static_cast<double>(rio_time_us);
+        static_cast<double>(local_arrival_us) - static_cast<double>(remote_us);
     if (fit_valid_ &&
-        std::abs(delta - offset_at(static_cast<double>(rio_time_us))) >
+        std::abs(delta - offset_at(static_cast<double>(remote_us))) >
             kOffsetStepUs) {
         reset();
         ++resets_;
     }
 
-    last_rio_us_     = rio_time_us;
-    last_arrival_us_ = teensy_arrival_us;
+    last_remote_us_     = remote_us;
+    last_arrival_us_ = local_arrival_us;
     ++samples_;
 
-    const uint64_t key = rio_time_us / kBucketUs;
-    if (buckets_.empty() || buckets_.back().rio_start_us != key) {
+    const uint64_t key = remote_us / kBucketUs;
+    if (buckets_.empty() || buckets_.back().remote_start_us != key) {
         // The just-closed bucket changes the fit; recompute before opening a
         // new one so to_*()/healthy() always see the freshest usable line.
         Bucket b;
-        b.rio_start_us = key;
-        b.rio_mid_us   = static_cast<double>(key) * kBucketUs + kBucketUs / 2.0;
+        b.remote_start_us = key;
+        b.remote_mid_us   = static_cast<double>(key) * kBucketUs + kBucketUs / 2.0;
         b.min_delta_us = delta;
         b.count        = 1;
         buckets_.push_back(b);
@@ -43,26 +43,26 @@ void RioClockSync::feed(uint64_t rio_time_us, uint64_t teensy_arrival_us) {
         ++b.count;
     }
     if (fit_valid_) {
-        last_offset_us_ = offset_at(static_cast<double>(rio_time_us));
+        last_offset_us_ = offset_at(static_cast<double>(remote_us));
     }
 }
 
-void RioClockSync::refit() {
+void ClockSync::refit() {
     // Fit min_delta vs rio_mid over completed buckets only (the last bucket
     // is still accumulating and its minimum is biased high). Ordinary least
     // squares; x is re-origined to the first bucket to keep the products
-    // well-conditioned (rio_us values are ~1e9+).
+    // well-conditioned (remote_us values are ~1e9+).
     const size_t n_total = buckets_.size();
     if (n_total < kMinFitBuckets + 1) {  // +1: last bucket excluded
         fit_valid_ = false;
         return;
     }
     const size_t n  = n_total - 1;
-    const double x0 = buckets_.front().rio_mid_us;
+    const double x0 = buckets_.front().remote_mid_us;
 
     double sx = 0, sy = 0, sxx = 0, sxy = 0;
     for (size_t i = 0; i < n; ++i) {
-        const double x = buckets_[i].rio_mid_us - x0;
+        const double x = buckets_[i].remote_mid_us - x0;
         const double y = buckets_[i].min_delta_us;
         sx += x;
         sy += y;
@@ -81,7 +81,7 @@ void RioClockSync::refit() {
 
     double ss = 0;
     for (size_t i = 0; i < n; ++i) {
-        const double x = buckets_[i].rio_mid_us - x0;
+        const double x = buckets_[i].remote_mid_us - x0;
         const double r = buckets_[i].min_delta_us - (fit_intercept_ + fit_slope_ * x);
         ss += r * r;
     }
@@ -89,41 +89,41 @@ void RioClockSync::refit() {
     fit_valid_  = true;
 }
 
-double RioClockSync::offset_at(double rio_us) const {
-    return fit_intercept_ + fit_slope_ * (rio_us - fit_x0_us_);
+double ClockSync::offset_at(double remote_us) const {
+    return fit_intercept_ + fit_slope_ * (remote_us - fit_x0_us_);
 }
 
-bool RioClockSync::fit_usable() const {
+bool ClockSync::fit_usable() const {
     return fit_valid_ && fit_rms_us_ <= kMaxResidualUs &&
            std::abs(drift_ppm_) <= kMaxDriftPpm;
 }
 
-bool RioClockSync::healthy(uint64_t now_teensy_us) const {
+bool ClockSync::healthy(uint64_t now_local_us) const {
     if (!fit_usable()) return false;
-    if (now_teensy_us > last_arrival_us_ + kMaxFeedAgeUs) return false;
+    if (now_local_us > last_arrival_us_ + kMaxFeedAgeUs) return false;
     return true;
 }
 
-std::optional<uint64_t> RioClockSync::to_teensy_ns(uint64_t rio_time_us) const {
+std::optional<uint64_t> ClockSync::to_local_ns(uint64_t remote_us) const {
     if (!fit_usable()) return std::nullopt;
-    const double rio_us = static_cast<double>(rio_time_us);
-    const double teensy_us = rio_us + offset_at(rio_us);
-    if (teensy_us < 0.0) return std::nullopt;
-    return static_cast<uint64_t>(teensy_us * 1000.0 + 0.5);
+    const double remote = static_cast<double>(remote_us);
+    const double local_us = remote + offset_at(remote);
+    if (local_us < 0.0) return std::nullopt;
+    return static_cast<uint64_t>(local_us * 1000.0 + 0.5);
 }
 
-std::optional<uint64_t> RioClockSync::to_rio_us(uint64_t teensy_ns) const {
+std::optional<uint64_t> ClockSync::to_remote_us(uint64_t local_ns) const {
     if (!fit_usable()) return std::nullopt;
-    // Invert teensy = rio + intercept + slope·(rio − x0). The closed form is
-    // exact; with |slope| ≤ 2e-4 the division is numerically benign.
-    const double teensy_us = static_cast<double>(teensy_ns) * 1e-3;
-    const double rio_us =
-        (teensy_us - fit_intercept_ + fit_slope_ * fit_x0_us_) / (1.0 + fit_slope_);
-    if (rio_us < 0.0) return std::nullopt;
-    return static_cast<uint64_t>(rio_us + 0.5);
+    // Invert local = remote + intercept + slope·(remote − x0). The closed
+    // form is exact; with |slope| ≤ 2e-4 the division is numerically benign.
+    const double local_us = static_cast<double>(local_ns) * 1e-3;
+    const double remote_us =
+        (local_us - fit_intercept_ + fit_slope_ * fit_x0_us_) / (1.0 + fit_slope_);
+    if (remote_us < 0.0) return std::nullopt;
+    return static_cast<uint64_t>(remote_us + 0.5);
 }
 
-void RioClockSync::reset() {
+void ClockSync::reset() {
     buckets_.clear();
     fit_valid_      = false;
     fit_x0_us_      = 0;
@@ -132,7 +132,7 @@ void RioClockSync::reset() {
     fit_rms_us_     = 0;
     drift_ppm_      = 0;
     last_offset_us_ = 0;
-    last_rio_us_     = 0;
+    last_remote_us_     = 0;
     last_arrival_us_ = 0;
     samples_         = 0;
 }

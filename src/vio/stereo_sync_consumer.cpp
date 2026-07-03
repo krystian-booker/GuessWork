@@ -95,6 +95,12 @@ void StereoSyncPairer::reset() {
     sides_[0].clear();
     sides_[1].clear();
     pairs_.clear();
+    // Revive after shutdown(): the pairer outlives OpenVinsRunner, whose
+    // destructor shuts it down to unblock wait_pop. VioSupervisor resets it
+    // before constructing the replacement runner; without clearing the flag
+    // every push() would stay a no-op and the rebuilt runner would idle
+    // forever.
+    shutdown_ = false;
 }
 
 StereoSyncPairer::Counters StereoSyncPairer::counters() const {

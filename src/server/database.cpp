@@ -123,17 +123,21 @@ constexpr const char* kSchemaVioConfig =
     ");"
     "INSERT OR IGNORE INTO vio_config (id) VALUES (1);";
 
-// Single-row CAN bridge configuration. 'roborio' = classic CAN 2.0 @ 1 Mbps,
-// 'systemcore' = CAN FD 1M/4M; the host pushes the matching CAN_MODE command
-// to the Teensy on update and on every reconnect (docs/can-protocol.md).
-constexpr const char* kSchemaCanConfig =
-    "CREATE TABLE IF NOT EXISTS can_config ("
+// Single-row UDP robot-link configuration (docs/ethernet-protocol.md).
+// robot_ip '' = learn the controller's address from inbound chassis-speeds
+// packets; both ports default into the FRC team-use range (5800-5810).
+constexpr const char* kSchemaNetConfig =
+    "CREATE TABLE IF NOT EXISTS net_config ("
     "  id         INTEGER PRIMARY KEY CHECK (id = 1),"
-    "  mode       TEXT NOT NULL DEFAULT 'off'"
-    "             CHECK (mode IN ('off','roborio','systemcore')),"
+    "  enabled    INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),"
+    "  bind_port  INTEGER NOT NULL DEFAULT 5809"
+    "             CHECK (bind_port BETWEEN 1024 AND 65535),"
+    "  robot_port INTEGER NOT NULL DEFAULT 5810"
+    "             CHECK (robot_port BETWEEN 1024 AND 65535),"
+    "  robot_ip   TEXT NOT NULL DEFAULT '',"
     "  updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))"
     ");"
-    "INSERT OR IGNORE INTO can_config (id) VALUES (1);";
+    "INSERT OR IGNORE INTO net_config (id) VALUES (1);";
 
 // Single-row fusion (GTSAM fixed-lag smoother) configuration. Sigma units:
 // odom_sigma_* are 1σ velocity error (m/s, rad/s — interval noise scales
@@ -184,7 +188,7 @@ Database::Database(const std::filesystem::path& db_path) {
     exec_or_throw(db_, kSchemaFieldLayouts);
     exec_or_throw(db_, kSchemaImuConfig);
     exec_or_throw(db_, kSchemaVioConfig);
-    exec_or_throw(db_, kSchemaCanConfig);
+    exec_or_throw(db_, kSchemaNetConfig);
     exec_or_throw(db_, kSchemaFusionConfig);
 }
 

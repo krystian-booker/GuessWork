@@ -31,7 +31,8 @@ struct TagObservation {
 };
 
 struct EstimatorConfig {
-    double tag_size_m          = kFrcTagSizeM;
+    // Tag size lives on PreparedLayout (the corner table is built with it);
+    // the estimator reads layout.tag_size_m so the two can never disagree.
     double sigma_px            = 0.7;   // corner noise, decimation-adjusted
     double ambiguity_min_ratio = 2.0;   // single-tag: reject if err1/err0 below
     double max_mean_reproj_px  = 2.0;   // global sanity gate

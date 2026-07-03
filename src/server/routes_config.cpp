@@ -1,16 +1,17 @@
 #include "server/routes_config.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <string>
 
+#include "net/robot_link.hpp"
 #include "server/apriltag_supervisor.hpp"
 #include "server/camera_supervisor.hpp"
-#include "server/can_config_repository.hpp"
 #include "server/config_snapshot.hpp"
 #include "server/fusion_supervisor.hpp"
+#include "server/net_config_repository.hpp"
 #include "server/route_helpers.hpp"
-#include "server/teensy_manager.hpp"
 #include "server/vio_supervisor.hpp"
 
 namespace gw::server {
@@ -21,19 +22,19 @@ void register_config_routes(crow::SimpleApp&        app,
                             FieldLayoutRepository&  field_layouts,
                             ImuConfigRepository&    imu_config,
                             VioConfigRepository&    vio_config,
-                            CanConfigRepository&    can_config,
+                            NetConfigRepository&    net_config,
                             FusionConfigRepository& fusion_config,
                             CameraSupervisor&       supervisor,
                             ApriltagSupervisor&     apriltag,
                             VioSupervisor&          vio,
                             FusionSupervisor&       fusion,
-                            TeensyManager&          teensy) {
+                            gw::net::RobotLink&     robot) {
     CROW_ROUTE(app, "/api/config/export").methods("GET"_method)
     ([&cameras, &trigger_groups, &field_layouts, &imu_config, &vio_config,
-      &can_config, &fusion_config] {
+      &net_config, &fusion_config] {
         try {
             auto snap = export_snapshot(cameras, trigger_groups, field_layouts,
-                                        imu_config, vio_config, can_config,
+                                        imu_config, vio_config, net_config,
                                         fusion_config);
             auto res  = json_response(200, std::move(snap));
             const auto ts =
@@ -51,8 +52,8 @@ void register_config_routes(crow::SimpleApp&        app,
 
     CROW_ROUTE(app, "/api/config/import").methods("POST"_method)
     ([&cameras, &trigger_groups, &field_layouts, &imu_config, &vio_config,
-      &can_config, &fusion_config, &supervisor, &apriltag, &vio, &fusion,
-      &teensy](const crow::request& req) {
+      &net_config, &fusion_config, &supervisor, &apriltag, &vio, &fusion,
+      &robot](const crow::request& req) {
         const auto body = crow::json::load(req.body);
         if (!body) return error_response(400, "invalid JSON body");
 
@@ -60,7 +61,7 @@ void register_config_routes(crow::SimpleApp&        app,
         try {
             report = import_snapshot(body, cameras, trigger_groups,
                                      field_layouts, imu_config, vio_config,
-                                     can_config, fusion_config);
+                                     net_config, fusion_config);
         } catch (const std::exception& e) {
             return error_response(400, e.what());
         }
@@ -75,18 +76,29 @@ void register_config_routes(crow::SimpleApp&        app,
         apriltag.reload_shared();  // layouts and/or T_robot_imu may have changed
         vio.reload();
         fusion.reload();
-        try {
-            const std::string mode = can_config.get().mode;
-            CanMode m = CanMode::Off;
-            if (mode == "roborio")    m = CanMode::Classic;
-            if (mode == "systemcore") m = CanMode::Fd;
-            std::string ignored;
-            teensy.set_can_mode(m, ignored);  // best-effort; resync re-pushes
-        } catch (...) {}
 
         crow::json::wvalue j;
         j["ok"]     = report.ok();
         j["report"] = report.to_json();
+
+        // Best-effort robot-link rebind from the freshly-imported row. A
+        // failed rebind is not an error response — the DB row is the source
+        // of truth; the response says what happened.
+        try {
+            const auto cfg = net_config.get();
+            gw::net::RobotLink::Config lc;
+            lc.enabled    = cfg.enabled;
+            lc.bind_port  = static_cast<uint16_t>(cfg.bind_port);
+            lc.robot_port = static_cast<uint16_t>(cfg.robot_port);
+            lc.robot_ip   = cfg.robot_ip;
+            robot.reconfigure(lc);
+            j["robot_link_restarted"] = true;
+            j["robot_link_error"]     = nullptr;
+        } catch (const std::exception& e) {
+            j["robot_link_restarted"] = false;
+            j["robot_link_error"]     = std::string(e.what());
+        }
+
         j["note"] =
             "trigger groups stored; re-arm via /api/hardware-sync to push "
             "them to the Teensy";

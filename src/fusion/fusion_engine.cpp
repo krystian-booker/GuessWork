@@ -446,6 +446,20 @@ void FusionEngine::Impl::feed_vio(const gw::vio::VioOdometry& m) {
 
     vio_deltas_.push_back(std::move(d));
     while (vio_deltas_.size() > 512) vio_deltas_.pop_front();
+
+    // Odom death + tag blackout must not freeze the state chain: no other
+    // source creates keys in that regime, the deltas above would buffer
+    // forever, and the published pose would stop advancing entirely (the
+    // dead_reckoning row of the degraded-modes matrix). VIO stamps trail
+    // real time, so with odom or tags alive states_.back() is always newer
+    // and this never fires; when both are gone it drives keys at VIO
+    // cadence — integrate_odom finds no samples and emits the
+    // constant-velocity bridge, and the flush inside create_state attaches
+    // the buffered betweens.
+    if (m.t_ns >= states_.back().t_ns + p_.min_state_dt_ns) {
+        create_state(m.t_ns);  // flushes vio intervals itself
+        return;
+    }
     flush_vio_intervals();
 }
 
