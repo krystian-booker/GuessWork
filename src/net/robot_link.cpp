@@ -32,7 +32,7 @@ std::string addr_to_string(const sockaddr_in& a) {
 
 struct RobotLink::Impl {
     gw::OdomBus     odom_bus;
-    TeensyClockView teensy_clock;
+    SyncClockView controller_clock;
 
     mutable std::mutex mu_;
     Config             cfg;
@@ -53,7 +53,7 @@ struct RobotLink::Impl {
     uint32_t pose_counter = 0;
     uint64_t pose_sent = 0, pose_send_errors = 0, pose_no_dest = 0;
 
-    explicit Impl(TeensyClockView view) : teensy_clock(std::move(view)) {}
+    explicit Impl(SyncClockView view) : controller_clock(std::move(view)) {}
 
     void run();
     void handle_packet(const uint8_t* buf, size_t len, const sockaddr_in& src,
@@ -105,25 +105,25 @@ void RobotLink::Impl::handle_packet(const uint8_t* buf, size_t len,
 
         rio_sync.feed(pkt.rio_time_us, arrival_ns / 1000);
 
-        // Timestamp chain: RIO sample time → host → Teensy. Falls back to
+        // Timestamp chain: RIO sample time → host → sync controller. Falls back to
         // the mapped arrival time, then to 0 (consumers drop zero stamps —
-        // if the Teensy hop is down there are no frames to fuse against
+        // if the sync controller hop is down there are no frames to fuse against
         // anyway).
         out.rio_time_us = pkt.rio_time_us;
-        uint64_t t_teensy = 0, arrival_teensy = 0;
-        if (teensy_clock.to_teensy_ns) {
-            if (const auto a = teensy_clock.to_teensy_ns(arrival_ns)) {
-                arrival_teensy = *a;
+        uint64_t t_controller = 0, arrival_controller = 0;
+        if (controller_clock.to_controller_ns) {
+            if (const auto a = controller_clock.to_controller_ns(arrival_ns)) {
+                arrival_controller = *a;
             }
             if (const auto host_ns = rio_sync.to_local_ns(pkt.rio_time_us);
                 host_ns && rio_sync.healthy(arrival_ns / 1000)) {
-                if (const auto t = teensy_clock.to_teensy_ns(*host_ns)) {
-                    t_teensy = *t;
+                if (const auto t = controller_clock.to_controller_ns(*host_ns)) {
+                    t_controller = *t;
                 }
             }
         }
-        out.t_ns         = t_teensy ? t_teensy : arrival_teensy;
-        out.t_arrival_ns = arrival_teensy;
+        out.t_ns         = t_controller ? t_controller : arrival_controller;
+        out.t_arrival_ns = arrival_controller;
         out.vx_mps       = pkt.vx_mps;
         out.vy_mps       = pkt.vy_mps;
         out.omega_radps  = pkt.omega_radps;
@@ -134,8 +134,8 @@ void RobotLink::Impl::handle_packet(const uint8_t* buf, size_t len,
     odom_bus.publish(out);  // bus is thread-safe; publish outside the lock
 }
 
-RobotLink::RobotLink(TeensyClockView teensy_clock)
-    : impl_(std::make_unique<Impl>(std::move(teensy_clock))) {}
+RobotLink::RobotLink(SyncClockView controller_clock)
+    : impl_(std::make_unique<Impl>(std::move(controller_clock))) {}
 
 RobotLink::~RobotLink() { stop(); }
 
@@ -224,9 +224,9 @@ bool RobotLink::send_pose(const PoseSend& pose) {
         for (int i = 0; i < 6; ++i) pkt.cov[i] = pose.cov[i];
         if (pose.extrap_clamped) pkt.flags |= udpp::kPoseFlagExtrapClamped;
 
-        // Validity time back through the chain: Teensy → host → RIO.
-        if (impl_->teensy_clock.to_host_ns) {
-            if (const auto host_ns = impl_->teensy_clock.to_host_ns(pose.t_ns)) {
+        // Validity time back through the chain: sync controller → host → RIO.
+        if (impl_->controller_clock.to_host_ns) {
+            if (const auto host_ns = impl_->controller_clock.to_host_ns(pose.t_ns)) {
                 if (const auto rio = impl_->rio_sync.to_remote_us(*host_ns);
                     rio && impl_->rio_sync.healthy(gw::Clock::now_ns() / 1000)) {
                     pkt.rio_time_us = *rio;
@@ -291,9 +291,9 @@ RobotLink::Status RobotLink::status() const {
     st.sync_samples   = impl_->rio_sync.samples();
     st.sync_resets    = impl_->rio_sync.resets();
 
-    st.teensy_hop_healthy =
-        impl_->teensy_clock.to_teensy_ns &&
-        impl_->teensy_clock.to_teensy_ns(now).has_value();
+    st.controller_hop_healthy =
+        impl_->controller_clock.to_controller_ns &&
+        impl_->controller_clock.to_controller_ns(now).has_value();
     return st;
 }
 

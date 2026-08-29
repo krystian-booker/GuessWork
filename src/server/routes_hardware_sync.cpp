@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "server/route_helpers.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 #include "server/trigger_group_repository.hpp"
 
 namespace gw::server {
@@ -70,17 +70,23 @@ crow::response map_repo_exception_to_http(const std::exception& e) {
 
 void register_hardware_sync_routes(crow::SimpleApp&        app,
                                    TriggerGroupRepository& repo,
-                                   TeensyManager&          teensy) {
+                                   SyncControllerManager&  controller) {
     CROW_ROUTE(app, "/api/hardware-sync/status").methods("GET"_method)
-    ([&teensy] {
-        const auto s = teensy.status();
+    ([&controller] {
+        const auto s = controller.status();
         crow::json::wvalue j;
         j["connected"]    = s.connected;
         j["armed"]        = s.armed;
         j["total_pulses"] = s.total_pulses;
         put_opt(j, "port",              s.port);
+        put_opt(j, "board",             s.board);
+        put_opt(j, "firmware_version",  s.firmware_version);
+        put_opt(j, "protocol_version",  s.protocol_version);
         put_opt(j, "last_pulse_age_ms", s.last_pulse_age_ms);
         put_opt(j, "last_error",        s.last_error);
+        j["reset_reason"] = s.reset_reason;
+        j["trigger_drops"] = s.trigger_fw_drops;
+        j["usb_errors"] = s.usb_errors;
         return json_response(200, std::move(j));
     });
 
@@ -172,23 +178,23 @@ void register_hardware_sync_routes(crow::SimpleApp&        app,
     });
 
     CROW_ROUTE(app, "/api/hardware-sync/arm").methods("POST"_method)
-    ([&repo, &teensy] {
+    ([&repo, &controller] {
         try {
             const auto groups = repo.list_all();
             if (groups.empty()) {
                 return error_response(409, "no trigger groups configured");
             }
             // Intent first: even if the push below fails, the desired state
-            // is persisted (survives reboots) and TeensyManager's retry
+            // is persisted (survives reboots) and SyncControllerManager's retry
             // resync converges the device onto it.
             repo.set_armed(true);
-            std::vector<TeensyManager::GroupConfig> cfg;
+            std::vector<SyncControllerManager::GroupConfig> cfg;
             cfg.reserve(groups.size());
             for (const auto& g : groups) {
                 cfg.push_back({g.name, g.fps, g.output_pins});
             }
             std::string err;
-            const bool pushed = teensy.push_config(cfg, err);
+            const bool pushed = controller.push_config(cfg, err);
             crow::json::wvalue j;
             j["armed_desired"] = true;
             j["pushed"]        = pushed;
@@ -201,15 +207,33 @@ void register_hardware_sync_routes(crow::SimpleApp&        app,
     });
 
     CROW_ROUTE(app, "/api/hardware-sync/stop").methods("POST"_method)
-    ([&repo, &teensy] {
+    ([&repo, &controller] {
         try {
             repo.set_armed(false);  // intent first, mirror of arm
         } catch (const std::exception& e) {
             return error_response(500, e.what());
         }
         std::string err;
-        if (!teensy.stop_outputs(err)) {
+        if (!controller.stop_outputs(err)) {
             return error_response(503, err.empty() ? "stop failed" : err);
+        }
+        return json_response(200, crow::json::wvalue{});
+    });
+
+    CROW_ROUTE(app, "/api/hardware-sync/test-output").methods("POST"_method)
+    ([&controller](const crow::request& req) {
+        const auto body = crow::json::load(req.body);
+        if (!body || !body.has("output_pin") ||
+            body["output_pin"].t() != crow::json::type::Number) {
+            return error_response(400, "missing number field: output_pin");
+        }
+        const int64_t output = body["output_pin"].i();
+        if (output < 1 || output > 6) {
+            return error_response(400, "output_pin must be 1..6");
+        }
+        std::string err;
+        if (!controller.test_output(static_cast<uint8_t>(output), err)) {
+            return error_response(409, err.empty() ? "output test failed" : err);
         }
         return json_response(200, crow::json::wvalue{});
     });

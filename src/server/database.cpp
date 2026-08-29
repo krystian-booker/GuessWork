@@ -65,8 +65,8 @@ constexpr const char* kSchemaSyncConfig =
     ");"
     "INSERT OR IGNORE INTO sync_config (id) VALUES (1);";
 
-// Source of truth for Teensy trigger groups. `outputs_bitmask` is a 6-bit
-// field where bit (n-1) is set iff Teensy output `n` belongs to this group.
+// Source of truth for sync controller trigger groups. `outputs_bitmask` is a 6-bit
+// field where bit (n-1) is set iff sync controller output `n` belongs to this group.
 // Uniqueness of pin assignment across groups is enforced in
 // TriggerGroupRepository (no SQL constraint can express it cleanly).
 constexpr const char* kSchemaTriggerGroups =

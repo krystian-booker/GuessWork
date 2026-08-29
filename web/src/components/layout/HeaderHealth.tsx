@@ -15,7 +15,7 @@ export function HeaderHealth() {
   const online = cams.filter((c) => c.online).length
   const camTone = cams.length === 0 ? 'idle' : online === cams.length ? 'good' : online > 0 ? 'warn' : 'bad'
 
-  const teensyOk = imu.data?.teensy_connected ?? false
+  const controllerOk = imu.data?.controller_connected ?? false
 
   return (
     <div className="flex items-center gap-4 text-xs text-muted-foreground" data-testid="header-health">
@@ -26,9 +26,9 @@ export function HeaderHealth() {
         </span>
         <span className="hidden sm:inline">cameras</span>
       </span>
-      <span className="flex items-center gap-1.5" data-testid="header-teensy">
-        <StatusDot tone={teensyOk ? 'good' : 'bad'} />
-        <span className="hidden sm:inline">Teensy</span>
+      <span className="flex items-center gap-1.5" data-testid="header-controller">
+        <StatusDot tone={controllerOk ? 'good' : 'bad'} />
+        <span className="hidden sm:inline">sync controller</span>
       </span>
       {fusion.data && (
         <Badge variant="outline" className="font-mono text-[11px]" data-testid="header-fusion-mode">

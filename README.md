@@ -1,6 +1,6 @@
 # GuessWork
 
-FRC pose estimation: hardware-synced FLIR cameras + Teensy-bridged IMU →
+FRC pose estimation: MicoAir F405 V2-synced FLIR cameras + onboard BMI088 →
 AprilTag detection + OpenVINS stereo VIO → fused field pose.
 
 License note: the `guesswork` binary links [OpenVINS](https://github.com/rpng/open_vins)

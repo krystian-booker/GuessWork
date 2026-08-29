@@ -1,7 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test'
 
 // Hardware suite — requires a physically connected Spinnaker camera and the
-// guesswork binary (GW_E2E_HW=1 npx playwright test). No Teensy required:
+// guesswork binary (GW_E2E_HW=1 npx playwright test). No sync controller required:
 // with hw-sync on and no trigger pulses the camera legitimately produces no
 // frames; what this guards is the producer restart surviving the mode flip.
 //
@@ -92,7 +92,7 @@ test.describe('Hardware-sync toggle lifecycle', () => {
       await put({ hardware_sync_enabled: true, trigger_output_pin: 1 })
 
       // The producer must come back up in trigger-slave mode: online, no
-      // start error. With no Teensy pulsing, fps settles at 0.
+      // start error. With no sync controller pulsing, fps settles at 0.
       await expect
         .poll(async () => {
           const s = await camStatus(request, seeded.id)

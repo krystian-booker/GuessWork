@@ -15,21 +15,21 @@
 #include "net/udp_payloads.h"
 
 // Loopback tests: a fake "controller" socket on 127.0.0.1 exchanges real
-// datagrams with a RobotLink. The Teensy clock view is identity (host==
-// teensy), which exercises the full mapping plumbing without a Teensy.
+// datagrams with a RobotLink. The sync controller clock view is identity (host==
+// controller), which exercises the full mapping plumbing without a sync controller.
 
 namespace gw::net {
 
 namespace {
 
-RobotLink::TeensyClockView identity_view() {
+RobotLink::SyncClockView identity_view() {
     return {
         [](uint64_t host_ns) { return std::optional<uint64_t>(host_ns); },
-        [](uint64_t teensy_ns) { return std::optional<uint64_t>(teensy_ns); },
+        [](uint64_t controller_ns) { return std::optional<uint64_t>(controller_ns); },
     };
 }
 
-RobotLink::TeensyClockView dead_view() {
+RobotLink::SyncClockView dead_view() {
     return {
         [](uint64_t) { return std::optional<uint64_t>(); },
         [](uint64_t) { return std::optional<uint64_t>(); },
@@ -115,7 +115,7 @@ bool wait_for(const std::function<bool()>& pred, int timeout_ms) {
 
 }  // namespace
 
-TEST(RobotLinkTest, ReceivesSpeedsAndPublishesOnTeensyClock) {
+TEST(RobotLinkTest, ReceivesSpeedsAndPublishesOnSyncControllerClock) {
     RobotLink link(identity_view());
     FakeController robot;
 
@@ -153,7 +153,7 @@ TEST(RobotLinkTest, ReceivesSpeedsAndPublishesOnTeensyClock) {
     link.stop();
 }
 
-TEST(RobotLinkTest, DeadTeensyHopPublishesZeroStamp) {
+TEST(RobotLinkTest, DeadSyncControllerHopPublishesZeroStamp) {
     RobotLink link(dead_view());
     FakeController robot;
 
@@ -169,7 +169,7 @@ TEST(RobotLinkTest, DeadTeensyHopPublishesZeroStamp) {
 
     gw::ChassisSpeeds m;
     ASSERT_TRUE(link.odom_bus().wait_pop(sub, m));
-    // No host→Teensy mapping ⇒ the sample can't be placed on the fusion
+    // No host→sync controller mapping ⇒ the sample can't be placed on the fusion
     // timeline; consumers drop zero stamps.
     EXPECT_EQ(m.t_ns, 0u);
     EXPECT_EQ(m.t_arrival_ns, 0u);
@@ -286,7 +286,7 @@ TEST(RobotLinkTest, TwoHopMappingWarmsAndMapsRioSampleTime) {
         << "rio<->host sync failed to warm";
 
     // The freshest samples must now carry the MAPPED rio sample time, which
-    // under the identity teensy view is host0 + (rio − rio0) ± jitter floor.
+    // under the identity controller view is host0 + (rio − rio0) ± jitter floor.
     gw::ChassisSpeeds m{};
     while (link.odom_bus().try_pop(sub, m)) {
     }

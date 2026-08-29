@@ -1,11 +1,11 @@
 # GuessWork ↔ Robot Controller UDP Protocol
 
 *Prose copy of the normative wire contract in `src/net/udp_payloads.h` —
-change them together. This replaces the retired Teensy CAN bridge
+change them together. This replaces the retired microcontroller CAN bridge
 (`docs/can-protocol.md`, deleted with fw=4); robot communication is now
 direct UDP between the Mac Mini and the controller over the robot LAN. The
-Teensy keeps its two real jobs — camera trigger master and IMU — and no
-longer touches robot traffic.*
+MicoAir F405 V2 sync controller owns camera triggers and the onboard BMI088,
+and does not touch robot traffic.*
 
 ## 1. Overview
 
@@ -78,15 +78,15 @@ measurement with latency compensation
 (`addVisionMeasurement(pose, Utils.fpgaToCurrentTime(rio_time_us * 1e-6))`
 -style). With it clear, fall back to counter-freshness gating only.
 
-## 4. Time synchronization (two hops, no direct RIO↔Teensy link)
+## 4. Time synchronization (two hops, no direct RIO↔sync-controller link)
 
-Every GuessWork measurement (frames, IMU, tags) is stamped on the **Teensy
-clock** — the trigger master is the time ground truth. Chassis speeds arrive
+Every GuessWork measurement (frames, IMU, tags) is stamped on the
+**sync-controller clock** — the trigger master is the time ground truth. Chassis speeds arrive
 stamped on the **RIO FPGA clock**. The mapping is chained through the host:
 
 ```
 RIO µs  ──(hop A: ClockSync fed by UDP recvfrom stamps)──►  host µs
-host µs ──(hop B: ClockSync fed by IMU/TRIG USB stamps)──►  Teensy µs
+host µs ──(hop B: ClockSync fed by IMU/TRIG USB stamps)──►  sync-controller µs
 ```
 
 Both hops are the same estimator (`src/core/clock_sync.hpp`): per-250 ms
@@ -102,8 +102,8 @@ Health and fallbacks:
 
 - Hop A unhealthy (controller just booted, < ~1.3 s of packets): chassis
   speeds are stamped with the **arrival time** mapped through hop B.
-- Hop B unhealthy (Teensy telemetry down): speeds are published with
-  `t_ns = 0` and fusion drops them — without the Teensy there are no frames
+- Hop B unhealthy (sync-controller telemetry down): speeds are published with
+  `t_ns = 0` and fusion drops them — without the sync controller there are no frames
   to fuse against anyway.
 - Controller reboot: the backward `rio_time_us` jump resets hop A; it
   re-warms in ~1 s (`resets` increments once in

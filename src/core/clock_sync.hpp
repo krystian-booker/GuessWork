@@ -15,7 +15,7 @@ namespace gw {
 // sync):
 //   - RIO↔host:    remote = controller FPGA µs (UDP chassis-speeds packets),
 //                  local = host monotonic µs stamped at recvfrom.
-//   - Teensy↔host: remote = Teensy µs (IMU/TRIG telemetry stamps),
+//   - sync controller↔host: remote = sync controller µs (IMU/TRIG telemetry stamps),
 //                  local = host monotonic µs stamped at CDC read.
 // Chaining the two maps any remote domain onto any other without a direct
 // link between them.

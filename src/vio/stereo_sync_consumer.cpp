@@ -147,7 +147,7 @@ void VioFeederConsumer::run() {
         sf.width  = f->width();
         sf.height = f->height();
 
-        // Zero stamp = no Teensy pulse matched; the pairer would drop it
+        // Zero stamp = no sync controller pulse matched; the pairer would drop it
         // anyway — skip the copy entirely.
         if (sf.t_ns == 0) {
             f->release();

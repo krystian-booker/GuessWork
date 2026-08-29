@@ -88,9 +88,9 @@ export default function DashboardPage() {
   // Derived warnings.
   const alerts: string[] = []
   for (const c of cams.filter((c) => !c.online)) alerts.push(`Camera "${c.name}" is offline`)
-  if (imu.data && !imu.data.teensy_connected) alerts.push('Teensy is not connected')
+  if (imu.data && !imu.data.controller_connected) alerts.push('sync controller is not connected')
   if (robot.data && !robot.data.running) alerts.push('Robot link is down')
-  if (imu.data?.teensy_connected && !imu.data.imu_ok) alerts.push('IMU is unhealthy')
+  if (imu.data?.controller_connected && !imu.data.imu_ok) alerts.push('IMU is unhealthy')
   if (fusion.data?.enabled && fusion.data.initialized && !fusion.data.pose)
     alerts.push('Fusion is initialized but publishing no pose')
   if (fusion.data?.collision_mode) alerts.push('Fusion is in collision mode (tag-gate fallback)')
@@ -137,16 +137,16 @@ export default function DashboardPage() {
           testId="stat-fusion"
         />
         <StatCard
-          label="Teensy"
+          label="sync controller"
           icon={Cpu}
-          value={imu.data ? (imu.data.teensy_connected ? 'online' : 'offline') : '—'}
+          value={imu.data ? (imu.data.controller_connected ? 'online' : 'offline') : '—'}
           sub={
-            imu.data?.teensy_connected && robot.data
+            imu.data?.controller_connected && robot.data
               ? `clock sync ${robot.data.clock_sync.healthy ? 'healthy' : 'unhealthy'}`
               : undefined
           }
-          tone={imu.data ? (imu.data.teensy_connected ? 'good' : 'bad') : 'default'}
-          testId="stat-teensy"
+          tone={imu.data ? (imu.data.controller_connected ? 'good' : 'bad') : 'default'}
+          testId="stat-controller"
         />
         <StatCard
           label="VIO"

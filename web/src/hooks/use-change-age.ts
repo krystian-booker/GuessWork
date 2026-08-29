@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 
 // Milliseconds since `stamp` last changed, measured on the browser clock.
-// The backend publishes pose timestamps on the Teensy clock domain, which the
+// The backend publishes pose timestamps on the sync controller clock domain, which the
 // browser can't map — "time since the value last changed" is the honest local
 // proxy. Relies on the caller re-rendering (the status polls tick at 1–2 s)
 // to refresh the reading; no timer of its own.

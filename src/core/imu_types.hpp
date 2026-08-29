@@ -4,9 +4,9 @@
 
 namespace gw {
 
-// One BMI088 sample as decoded from the Teensy's binary telemetry stream.
+// One BMI088 sample as decoded from the sync controller's binary telemetry stream.
 //
-// t_ns is on the Teensy clock (wrap-extended micros × 1000) — the same time
+// t_ns is on the sync controller clock (wrap-extended micros × 1000) — the same time
 // domain as hardware-synced Frame::camera_ts_ns, so IMU samples and camera
 // frames are directly comparable with no host-side clock translation.
 struct ImuSample {

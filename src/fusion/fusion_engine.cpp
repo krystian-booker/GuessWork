@@ -678,7 +678,7 @@ void FusionEngine::Impl::try_init() {
 }
 
 void FusionEngine::Impl::feed_tag(const gw::apriltag::TagPoseMeasurement& m) {
-    if (m.clock_source != gw::apriltag::TagPoseMeasurement::Clock::kTeensy) {
+    if (m.clock_source != gw::apriltag::TagPoseMeasurement::Clock::kSyncController) {
         ++c_.tag_rejected_clock;
         return;
     }

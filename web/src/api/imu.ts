@@ -2,15 +2,17 @@ import { getJson, sendJson } from './http'
 import type { Mat4 } from '@/lib/matrices'
 
 export interface ImuStatus {
-  teensy_connected: boolean
-  telemetry_connected: boolean
+  controller_connected: boolean
   imu_ok: boolean
   rate_hz: number
   samples: number
   fw_drops: number
   crc_errors: number
   last_sample_age_ms?: number | null
-  fw_version?: number | string | null
+  usb_errors: number
+  firmware_version?: number | string | null
+  protocol_version?: number | string | null
+  board?: string | null
 }
 
 // t_imu_robot schema: {"T_robot_imu": [[4x4 row-major]]} (parsed/validated

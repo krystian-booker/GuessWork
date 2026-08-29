@@ -50,7 +50,7 @@ export const defaultFusionStatus = {
     pose_staleness: { last_ms: 28, p95_ms: 41, count: 1000 },
   },
   lag: { states: 60, lag_s: 2.0, oldest_age_s: 1.9 },
-  teensy_now: { healthy: true, offset_ms: 0.3 },
+  sync_clock_now: { healthy: true, offset_ms: 0.3 },
   output: { sent: 5000, send_errors: 0, queue_dropped: 0, bridge_factors: 12, gate_reopens: 0, update_exceptions: 0 },
 }
 
@@ -121,7 +121,7 @@ export const defaultRobotStatus = {
   clock_sync: {
     healthy: true,
     rio_host: { healthy: true, offset_us: 120, drift_ppm: 4.2, samples: 24, resets: 0 },
-    host_teensy: { healthy: true, offset_us: -80, drift_ppm: 1.1, samples: 240, resets: 1 },
+    host_sync_controller: { healthy: true, offset_us: -80, drift_ppm: 1.1, samples: 240, resets: 1 },
   },
 }
 
@@ -134,15 +134,18 @@ export const defaultRobotConfig = {
 }
 
 export const defaultImuStatus = {
-  teensy_connected: true,
-  telemetry_connected: true,
+  controller_connected: true,
   imu_ok: true,
   rate_hz: 400.3,
   samples: 1000000,
   fw_drops: 0,
   crc_errors: 0,
   last_sample_age_ms: 2,
-  fw_version: 3,
+  usb_errors: 0,
+  firmware_version: 1,
+  protocol_version: 1,
+  reset_reason: 0,
+  board: 'micoair_f405_v2',
 }
 
 // q matches euler (ZYX, roll 12.3° / pitch -4.5° / yaw 87.6°).

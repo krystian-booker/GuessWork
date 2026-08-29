@@ -155,7 +155,7 @@ void register_fusion_routes(crow::SimpleApp&        app,
             j["solve_ms"] = std::move(solve);
 
             // Per-stage latency (docs/pose_pipeline.md); pose_staleness is
-            // the headline trigger-pulse→pose-on-CAN number (< 50 ms target).
+            // the headline trigger-pulse→pose-on-wire number (< 50 ms target).
             const auto lat_json = [](const FusionStatus::LatencyEntry& e) {
                 crow::json::wvalue v;
                 v["last_ms"] = e.last_ms;
@@ -183,9 +183,9 @@ void register_fusion_routes(crow::SimpleApp&        app,
             j["lag"] = std::move(lag);
 
             crow::json::wvalue tnow;
-            tnow["healthy"]   = st.teensy_now_healthy;
-            tnow["offset_ms"] = st.teensy_now_offset_ms;
-            j["teensy_now"] = std::move(tnow);
+            tnow["healthy"]   = st.sync_clock_now_healthy;
+            tnow["offset_ms"] = st.sync_clock_now_offset_ms;
+            j["sync_clock_now"] = std::move(tnow);
 
             crow::json::wvalue output;
             output["sent"]              = st.output_sent;

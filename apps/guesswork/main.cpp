@@ -24,7 +24,7 @@
 #include "server/imu_config_repository.hpp"
 #include "server/static_assets.hpp"
 #include "server/routes_apriltag.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 #include "server/trigger_group_repository.hpp"
 #include "server/vio_config_repository.hpp"
 #include "server/vio_supervisor.hpp"
@@ -82,32 +82,32 @@ int main(int argc, char** argv) {
     gw::server::TriggerGroupRepository trigger_groups(database);
     gw::server::ImuConfigRepository    imu_config(database);
     gw::server::NetConfigRepository    net_config(database);
-    gw::server::TeensyManager          teensy;
+    gw::server::SyncControllerManager controller;
     // Auto-arm: seed the desired trigger config from the DB BEFORE the I/O
     // thread starts, so the first connect's resync pushes and arms with no
     // API call — a robot power-cycle converges back to armed on its own.
     if (trigger_groups.armed()) {
         const auto groups = trigger_groups.list_all();
         if (!groups.empty()) {
-            std::vector<gw::server::TeensyManager::GroupConfig> cfg;
+            std::vector<gw::server::SyncControllerManager::GroupConfig> cfg;
             cfg.reserve(groups.size());
             for (const auto& g : groups) {
                 cfg.push_back({g.name, g.fps, g.output_pins});
             }
             std::string ignored;
-            teensy.push_config(cfg, ignored);  // offline now — resync delivers
+            controller.push_config(cfg, ignored);  // offline now — resync delivers
             std::cerr << "guesswork: auto-arm pending (" << groups.size()
                       << " trigger group(s) from DB)\n";
         }
     }
-    teensy.start();
+    controller.start();
 
-    // UDP robot link (chassis speeds in, fused pose out). The Teensy clock
-    // view chains the host<->Teensy sync into the link's RIO<->host sync so
-    // chassis speeds land on the Teensy clock (docs/ethernet-protocol.md).
-    gw::net::RobotLink robot(gw::net::RobotLink::TeensyClockView{
-        [&teensy](uint64_t host_ns) { return teensy.host_to_teensy_ns(host_ns); },
-        [&teensy](uint64_t teensy_ns) { return teensy.teensy_to_host_ns(teensy_ns); }});
+    // UDP robot link (chassis speeds in, fused pose out). The sync controller clock
+    // view chains the host<->sync controller sync into the link's RIO<->host sync so
+    // chassis speeds land on the sync controller clock (docs/ethernet-protocol.md).
+    gw::net::RobotLink robot(gw::net::RobotLink::SyncClockView{
+        [&controller](uint64_t host_ns) { return controller.host_to_controller_ns(host_ns); },
+        [&controller](uint64_t controller_ns) { return controller.controller_to_host_ns(controller_ns); }});
     try {
         const auto nc = net_config.get();
         gw::net::RobotLink::Config lc;
@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
 
     gw::server::StreamParams params{
         cli.stream_width, cli.stream_height, cli.stream_fps, cli.stream_bitrate};
-    gw::server::CameraSupervisor supervisor(cameras, params, &teensy);
+    gw::server::CameraSupervisor supervisor(cameras, params, &controller);
 
     // AprilTag pipeline: seed the bundled season layout, then register the
     // detection-consumer factory BEFORE supervisor.start() so cameras that
@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
     // lifecycle; the runner itself lives in the supervisor and is gated on
     // calibration quality.
     gw::server::VioConfigRepository vio_config(database);
-    gw::server::VioSupervisor vio(cameras, imu_config, vio_config, teensy);
+    gw::server::VioSupervisor vio(cameras, imu_config, vio_config, controller);
     supervisor.register_consumer_factory(
         [&vio](const gw::server::Camera& row) { return vio.make_consumer(row); });
 
@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
     vio.reload();  // evaluate gating once the boot-time slots are up
 
     const auto calibration_root = gw::server::Database::data_dir() / "calibrations";
-    gw::server::CalibrationSupervisor calibration(supervisor, cameras, teensy,
+    gw::server::CalibrationSupervisor calibration(supervisor, cameras, controller,
                                                   imu_config, calibration_root);
     std::cerr << "guesswork: calibration recordings at " << calibration_root << "\n";
 
@@ -171,10 +171,10 @@ int main(int argc, char** argv) {
 
     // Allan-variance IMU refinement: long static recordings + analysis.
     gw::server::ImuAllanService allan(
-        teensy, imu_config, gw::server::Database::data_dir() / "imu_logs");
+        controller, imu_config, gw::server::Database::data_dir() / "imu_logs");
 
     // 3D attitude preview for the web UI (visualization-only).
-    gw::server::ImuAttitudeService attitude(teensy);
+    gw::server::ImuAttitudeService attitude(controller);
 
     const auto started_at = std::chrono::steady_clock::now();
     std::cerr << "guesswork: stream defaults "
@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
               << (cli.stream_bitrate / 1000) << " kbps\n";
 
     gw::server::HttpServer server(cli.port, supervisor, cameras, calibration,
-                                  trigger_groups, teensy, imu_config,
+                                  trigger_groups, controller, imu_config,
                                   field_layouts, apriltag, vio, vio_config,
                                   net_config, robot, fusion, fusion_config,
                                   allan, attitude, started_at);
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
         server.run();  // Blocks; Crow installs SIGINT/SIGTERM handlers that call stop().
     } catch (const std::exception& e) {
         std::cerr << "guesswork: " << e.what() << "\n";
-        return 1;  // normal unwinding — supervisors/Teensy/Spinnaker tear down in order
+        return 1;  // normal unwinding — supervisors/sync controller/Spinnaker tear down in order
     }
 
     return 0;

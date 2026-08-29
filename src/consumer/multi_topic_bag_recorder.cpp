@@ -171,7 +171,7 @@ void MultiTopicBagRecorder::run_pull(size_t camera_idx) {
         task.width        = f->width();
         task.height       = f->height();
 
-        // No Teensy pulse matched this frame (fallback-stamped). Unusable
+        // No sync controller pulse matched this frame (fallback-stamped). Unusable
         // for a shared-clock bag — see the class comment.
         if (task.timestamp_ns == 0) {
             f->release();

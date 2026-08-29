@@ -101,7 +101,7 @@ void register_config_routes(crow::SimpleApp&        app,
 
         j["note"] =
             "trigger groups stored; re-arm via /api/hardware-sync to push "
-            "them to the Teensy";
+            "them to the sync controller";
         return json_response(200, std::move(j));
     });
 }

@@ -77,10 +77,10 @@ void set_bool_node(Spinnaker::GenApi::INodeMap& nm,
 // we toggle Off → write → On regardless of the previous state.
 //
 // FallingEdge is deliberate and matches the low-side trigger wiring
-// (docs/teensy-pinout.md): the Chameleon3 opto input does NOT register a
+// (docs/controller-pinout.md): the Chameleon3 opto input does NOT register a
 // 3.3 V high-side drive (verified on the bench — the LED threshold needs
 // ~5 V through the internal series resistor), so OPTO_IN sits on the
-// Teensy's 5 V rail and the trigger pin switches OPTO_GND. Current flows
+// sync controller's 5 V rail and the trigger pin switches OPTO_GND. Current flows
 // while the pin is LOW (idle) ⇒ Line0 idles HIGH and the 100 µs pulse
 // appears as a LOW window — exposure starts on the FALLING edge, which is
 // pulse start, exactly when the firmware latches the TRIG timestamp.
@@ -503,7 +503,7 @@ void SpinnakerProducer::Impl::capture_loop() {
             img = cam->GetNextImage(kGetNextImageTimeoutMs);
         } catch (const Spinnaker::Exception& e) {
             // Timeouts are expected in hw-sync mode whenever no trigger pulses
-            // arrive (Teensy disarmed/unplugged) — GetNextImage already blocked
+            // arrive (sync controller disarmed/unplugged) — GetNextImage already blocked
             // for the full timeout, so just poll again quietly.
             if (e.GetError() == Spinnaker::SPINNAKER_ERR_TIMEOUT) continue;
             std::cerr << "[" << name << "] Spinnaker GetNextImage failed: " << e.what() << "\n";
@@ -520,7 +520,7 @@ void SpinnakerProducer::Impl::capture_loop() {
         const uint64_t camera_ts = static_cast<uint64_t>(img->GetTimeStamp());
 
         // In hardware-sync mode we replace the camera's own timestamp with
-        // the Teensy-side rising-edge timestamp for THIS frame. Two cameras
+        // the sync controller-side rising-edge timestamp for THIS frame. Two cameras
         // wired to the same trigger group resolve to the same pulse event,
         // which is the mechanism behind the "identical timestamps" guarantee.
         uint64_t stamp_ts = camera_ts;

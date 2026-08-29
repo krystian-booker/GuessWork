@@ -47,7 +47,7 @@ function qualityTone(q: number | undefined): StatTone {
 }
 
 // p50-ish (last) + p95 horizontal bars per pipeline stage; pose_staleness is
-// the trigger-pulse → pose-on-CAN headline (<50 ms target).
+// the trigger-pulse → pose-on-wire headline (<50 ms target).
 function LatencyStages({ latency }: { latency: FusionStatus['latency'] }) {
   const max = Math.max(10, ...STAGES.map((s) => (latency[s.key] as LatencyStat).p95_ms))
   return (
@@ -200,10 +200,10 @@ export default function FusionPage() {
           sub={s ? `states · ${s.lag.lag_s.toFixed(1)} s` : undefined}
         />
         <StatCard
-          label="Teensy-now"
-          value={s ? (s.teensy_now.healthy ? 'healthy' : 'unwarmed') : '—'}
-          sub={s ? `offset ${s.teensy_now.offset_ms.toFixed(1)} ms` : undefined}
-          tone={s?.teensy_now.healthy ? 'good' : 'warn'}
+          label="sync controller-now"
+          value={s ? (s.sync_clock_now.healthy ? 'healthy' : 'unwarmed') : '—'}
+          sub={s ? `offset ${s.sync_clock_now.offset_ms.toFixed(1)} ms` : undefined}
+          tone={s?.sync_clock_now.healthy ? 'good' : 'warn'}
         />
       </div>
 

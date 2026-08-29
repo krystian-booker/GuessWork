@@ -14,7 +14,7 @@
 #include "core/latency_stats.hpp"
 #include "core/odom_types.hpp"
 #include "fusion/fusion_engine.hpp"
-#include "fusion/teensy_now.hpp"
+#include "fusion/sync_clock_now.hpp"
 #include "server/apriltag_supervisor.hpp"
 #include "server/fusion_config_repository.hpp"
 #include "server/fusion_mode.hpp"
@@ -152,15 +152,15 @@ struct FusionSupervisor::Impl {
     std::atomic<int64_t>        output_period_ns{10'000'000};
     std::atomic<int64_t>        max_extrapolation_ns{150'000'000};
 
-    // --- Teensy-now (odom + tag drainers write, output/status read) -----------
+    // --- sync controller-now (odom + tag drainers write, output/status read) -----------
     std::mutex                     now_mu;
-    gw::fusion::TeensyNowEstimator teensy_now;
+    gw::fusion::SyncClockNowEstimator sync_clock_now;
 
     // --- per-stage latency (drainer/engine/output threads write) --------------
     std::mutex       lat_mu;
     gw::LatencyStats tag_lat;        // trigger pulse → tag entering fusion
     gw::LatencyStats queue_lat;      // internal queue dwell
-    gw::LatencyStats staleness_lat;  // teensy_now − newest state at CAN send
+    gw::LatencyStats staleness_lat;  // sync_clock_now − newest state at UDP send
 
     // --- per-source stats + output counters -----------------------------------
     SourceStats           tag_stats, vio_stats, odom_stats;
@@ -314,11 +314,11 @@ struct FusionSupervisor::Impl {
                 const auto host_now =
                     std::chrono::steady_clock::now().time_since_epoch().count();
                 std::lock_guard lk(now_mu);
-                t_now = teensy_now.now(host_now);
+                t_now = sync_clock_now.now(host_now);
             }
             if (!t_now) continue;
 
-            // Pre-clamp staleness IS the headline trigger-pulse→pose-on-CAN
+            // Pre-clamp staleness is the trigger-pulse→pose-on-UDP
             // latency (st.t_ns is the newest fused state's pulse stamp).
             // Signed: slightly negative when the estimator is tag-biased.
             const int64_t raw_ns = *t_now - st.t_ns;
@@ -408,9 +408,9 @@ FusionSupervisor::FusionSupervisor(FusionConfigRepository& fusion_config,
         while (impl_->tag_bus->wait_pop(impl_->tag_sub, m)) {
             impl_->tag_stats.note();
             if (m.clock_source ==
-                gw::apriltag::TagPoseMeasurement::Clock::kTeensy) {
-                // Tags also feed the Teensy-now estimator so it survives
-                // CAN-odom death. The ~15–40 ms detect latency biases the
+                gw::apriltag::TagPoseMeasurement::Clock::kSyncController) {
+                // Tags also feed the sync controller-now estimator so it survives
+                // UDP-odom death. The ~15–40 ms detect latency biases the
                 // estimate EARLY (the EMA mixes it with the dominant
                 // higher-rate odom feed when that's alive), which only
                 // shortens output extrapolation — never overshoots it.
@@ -418,8 +418,8 @@ FusionSupervisor::FusionSupervisor(FusionConfigRepository& fusion_config,
                 std::optional<int64_t> t_now;
                 {
                     std::lock_guard lk(impl_->now_mu);
-                    impl_->teensy_now.feed(m.t_ns, host_now);
-                    t_now = impl_->teensy_now.now(host_now);
+                    impl_->sync_clock_now.feed(m.t_ns, host_now);
+                    t_now = impl_->sync_clock_now.now(host_now);
                 }
                 if (t_now) {
                     std::lock_guard lk(impl_->lat_mu);
@@ -442,14 +442,14 @@ FusionSupervisor::FusionSupervisor(FusionConfigRepository& fusion_config,
         while (impl_->robot.odom_bus().wait_pop(impl_->odom_sub, m)) {
             impl_->odom_stats.note();
             // t_ns / t_arrival_ns are 0 while the two-hop clock mapping is
-            // unhealthy (Teensy telemetry down) — such samples can't be
+            // unhealthy (sync controller telemetry down) — such samples can't be
             // placed on the fusion timeline; count the rate, feed nothing.
             if (m.t_ns == 0) continue;
             if (m.t_arrival_ns != 0) {
                 const auto host_now =
                     std::chrono::steady_clock::now().time_since_epoch().count();
                 std::lock_guard lk(impl_->now_mu);
-                impl_->teensy_now.feed(static_cast<int64_t>(m.t_arrival_ns),
+                impl_->sync_clock_now.feed(static_cast<int64_t>(m.t_arrival_ns),
                                        host_now);
             }
             impl_->push(m);
@@ -559,8 +559,8 @@ FusionStatus FusionSupervisor::status() {
 
     {
         std::lock_guard lk(im.now_mu);
-        st.teensy_now_healthy   = im.teensy_now.healthy();
-        st.teensy_now_offset_ms = im.teensy_now.offset_ms();
+        st.sync_clock_now_healthy   = im.sync_clock_now.healthy();
+        st.sync_clock_now_offset_ms = im.sync_clock_now.offset_ms();
     }
     st.output_sent        = im.output_sent.load(std::memory_order_relaxed);
     st.output_send_errors = im.output_send_errors.load(std::memory_order_relaxed);

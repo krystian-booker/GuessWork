@@ -7,7 +7,7 @@
 
 namespace gw::server {
 
-class TeensyManager;
+class SyncControllerManager;
 
 // Drains the live ImuBus into an AttitudeFilter for the web UI's 3D IMU
 // preview (`GET /api/imu/attitude`). Visualization-only — nothing in the
@@ -23,7 +23,7 @@ public:
         std::int64_t last_age_ms = -1;  // -1 = never seen
     };
 
-    explicit ImuAttitudeService(TeensyManager& teensy);
+    explicit ImuAttitudeService(SyncControllerManager& controller);
     ~ImuAttitudeService();
 
     ImuAttitudeService(const ImuAttitudeService&)            = delete;

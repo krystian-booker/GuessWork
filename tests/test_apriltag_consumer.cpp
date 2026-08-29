@@ -125,7 +125,7 @@ TEST(AprilTagConsumerTest, RenderedTagProducesMeasurementOnBus) {
     ASSERT_NE(f, nullptr);
     f->set_sequence(1);
     f->set_host_capture_ns(1'000'000);
-    f->set_camera_ts_ns(5'000'000'000ull);  // Teensy-domain stamp
+    f->set_camera_ts_ns(5'000'000'000ull);  // sync controller-domain stamp
     draw_tag_frame(f);
     ch.publish(f);
 
@@ -145,7 +145,7 @@ TEST(AprilTagConsumerTest, RenderedTagProducesMeasurementOnBus) {
 
     EXPECT_EQ(m.camera_id, 42);
     EXPECT_EQ(m.t_ns, 5'000'000'000ll);
-    EXPECT_EQ(m.clock_source, TagPoseMeasurement::Clock::kTeensy);
+    EXPECT_EQ(m.clock_source, TagPoseMeasurement::Clock::kSyncController);
     EXPECT_EQ(m.n_tags, 1u);
     ASSERT_EQ(m.tag_ids.size(), 1u);
     EXPECT_EQ(m.tag_ids[0], kTagId);

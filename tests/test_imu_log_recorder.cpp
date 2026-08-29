@@ -10,7 +10,7 @@
 
 #include "core/imu_types.hpp"
 #include "server/imu_log_recorder.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 namespace gw::server {
 
@@ -26,9 +26,9 @@ protected:
     }
     void TearDown() override { std::filesystem::remove_all(dir_); }
 
-    // TeensyManager is constructed but never start()ed — its imu_bus works
+    // SyncControllerManager is constructed but never start()ed — its imu_bus works
     // without the I/O thread, and tests must not probe real serial devices.
-    TeensyManager         teensy_;
+    SyncControllerManager         controller_;
     std::filesystem::path dir_;
 };
 
@@ -56,13 +56,13 @@ void wait_for_samples(ImuLogRecorder& rec, uint64_t samples) {
 }  // namespace
 
 TEST_F(ImuLogRecorderTest, RecordsBitExactRecords) {
-    ImuLogRecorder rec(teensy_, dir_);
+    ImuLogRecorder rec(controller_, dir_);
     std::string    err;
     ASSERT_TRUE(rec.start(3600, err)) << err;
 
     constexpr int kN = 1000;
     for (int i = 0; i < kN; ++i) {
-        teensy_.imu_bus().publish(
+        controller_.imu_bus().publish(
             sample(1'000'000'000ull + static_cast<uint64_t>(i) * 2'500'000ull,
                    static_cast<float>(i) * 0.5f));
     }
@@ -99,7 +99,7 @@ TEST_F(ImuLogRecorderTest, RecordsBitExactRecords) {
 }
 
 TEST_F(ImuLogRecorderTest, DoubleStartRejected) {
-    ImuLogRecorder rec(teensy_, dir_);
+    ImuLogRecorder rec(controller_, dir_);
     std::string    err;
     ASSERT_TRUE(rec.start(60, err));
     EXPECT_FALSE(rec.start(60, err));
@@ -108,14 +108,14 @@ TEST_F(ImuLogRecorderTest, DoubleStartRejected) {
 }
 
 TEST_F(ImuLogRecorderTest, AutoStopsAtDuration) {
-    ImuLogRecorder rec(teensy_, dir_);
+    ImuLogRecorder rec(controller_, dir_);
     std::string    err;
-    ASSERT_TRUE(rec.start(1, err));  // 1 s of Teensy-clock span
+    ASSERT_TRUE(rec.start(1, err));  // 1 s of sync controller-clock span
 
     // 600 samples spanning 1.5 fake seconds at 400 Hz — auto-stop fires at
     // the 1 s mark (~401 samples consumed).
     for (int i = 0; i < 600; ++i) {
-        teensy_.imu_bus().publish(
+        controller_.imu_bus().publish(
             sample(static_cast<uint64_t>(i) * 2'500'000ull + 1, 0.0f));
     }
     const auto deadline =
@@ -131,7 +131,7 @@ TEST_F(ImuLogRecorderTest, AutoStopsAtDuration) {
 }
 
 TEST_F(ImuLogRecorderTest, NewestLogPicksLatest) {
-    ImuLogRecorder rec(teensy_, dir_);
+    ImuLogRecorder rec(controller_, dir_);
     std::filesystem::create_directories(dir_);
     std::ofstream(dir_ / "1000000000.bin").put('x');
     std::ofstream(dir_ / "2000000000.bin").put('x');
@@ -141,7 +141,7 @@ TEST_F(ImuLogRecorderTest, NewestLogPicksLatest) {
 }
 
 TEST_F(ImuLogRecorderTest, StopWhenIdleReturnsFalse) {
-    ImuLogRecorder rec(teensy_, dir_);
+    ImuLogRecorder rec(controller_, dir_);
     EXPECT_FALSE(rec.stop());
 }
 

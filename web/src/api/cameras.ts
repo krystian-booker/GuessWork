@@ -28,8 +28,8 @@ export interface Camera {
   exposure_auto: boolean | null
   exposure: number | null
   // When true, the producer configures the camera as a slave on Line0/OPTO_IN
-  // and re-stamps frame timestamps from the matching Teensy pulse. The
-  // physical wire to the Teensy is recorded in trigger_output_pin (1..6).
+  // and re-stamps frame timestamps from the matching sync controller pulse. The
+  // physical wire to the sync controller is recorded in trigger_output_pin (1..6).
   hardware_sync_enabled: boolean
   trigger_output_pin: number | null
   // Pipeline role. 'apriltag' feeds the tag detector; 'vio_left'/'vio_right'

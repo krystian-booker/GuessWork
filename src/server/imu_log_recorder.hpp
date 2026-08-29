@@ -8,7 +8,7 @@
 
 namespace gw::server {
 
-class TeensyManager;
+class SyncControllerManager;
 
 // Records the raw IMU stream to disk for Allan-variance analysis. One file
 // per recording: <dir>/<unix_ts>.bin of fixed 32-byte little-endian records
@@ -16,11 +16,11 @@ class TeensyManager;
 // (no header — the layout is also parsed by ImuAllanService::analyze).
 //
 // One drain thread per recording (MultiTopicBagRecorder pattern): subscribes
-// teensy.imu_bus() with a 4096 ring, wait_pop loop into a buffered ofstream,
-// auto-stops when the Teensy-clock span reaches the requested duration.
+// controller.imu_bus() with a 4096 ring, wait_pop loop into a buffered ofstream,
+// auto-stops when the sync controller-clock span reaches the requested duration.
 class ImuLogRecorder {
 public:
-    ImuLogRecorder(TeensyManager& teensy, std::filesystem::path dir);
+    ImuLogRecorder(SyncControllerManager& controller, std::filesystem::path dir);
     ~ImuLogRecorder();  // stops + joins
 
     ImuLogRecorder(const ImuLogRecorder&)            = delete;
@@ -53,7 +53,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    TeensyManager&        teensy_;
+    SyncControllerManager&        controller_;
     std::filesystem::path dir_;
 };
 

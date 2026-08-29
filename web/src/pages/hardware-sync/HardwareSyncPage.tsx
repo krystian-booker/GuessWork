@@ -48,7 +48,7 @@ export default function HardwareSyncPage() {
     <div>
       <PageHeader
         title="Hardware Sync"
-        description="Teensy trigger groups — pulse cameras in lockstep on a shared clock."
+        description="sync controller trigger groups — pulse cameras in lockstep on a shared clock."
         actions={
           <Button
             onClick={() => {
@@ -65,7 +65,7 @@ export default function HardwareSyncPage() {
         <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 text-sm">
           <span className="flex items-center gap-2">
             <StatusDot tone={s?.connected ? 'good' : 'bad'} />
-            Teensy {s?.connected ? 'connected' : 'disconnected'}
+            sync controller {s?.connected ? 'connected' : 'disconnected'}
             {s?.port && <span className="font-mono text-xs text-muted-foreground">{s.port}</span>}
           </span>
           <span className="flex items-center gap-2">
@@ -166,7 +166,7 @@ export default function HardwareSyncPage() {
                             variant="ghost"
                             aria-label={`Delete ${g.name}`}
                             title={`Delete group "${g.name}"?`}
-                            description="Re-arm afterwards to push the change to the Teensy."
+                            description="Re-arm afterwards to push the change to the sync controller."
                             confirmLabel="Delete"
                             onConfirm={() => deleteGroup.mutate(g.id)}
                           >
@@ -180,7 +180,7 @@ export default function HardwareSyncPage() {
               </Table>
             )}
             <p className="mt-3 text-xs text-muted-foreground">
-              Changes are stored immediately but only pushed to the Teensy when you arm.
+              Changes are stored immediately but only pushed to the sync controller when you arm.
             </p>
           </CardContent>
         </Card>

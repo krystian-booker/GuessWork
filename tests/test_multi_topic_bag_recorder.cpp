@@ -41,7 +41,7 @@ void fill_frame(Frame* f, uint8_t marker) {
     CVPixelBufferUnlockBaseAddress(pb, 0);
 }
 
-// Publishes a frame stamped on the "Teensy clock" (camera_ts_ns) — the
+// Publishes a frame stamped on the "sync controller clock" (camera_ts_ns) — the
 // stamp the extrinsics recorder must use.
 void publish_seq(FrameChannel& ch, FramePool& pool, uint64_t seq, uint64_t ts_ns) {
     Frame* f = pool.acquire();
@@ -153,7 +153,7 @@ TEST_F(MultiTopicBagRecorderTest, RecordsTwoCamerasAndImuIntoOneBag) {
     EXPECT_GE(count_substr(bag, "6a62c6daae103f4ff57a132d6f95cec2"), 2u);
 }
 
-TEST_F(MultiTopicBagRecorderTest, DropsFramesWithoutTeensyStamp) {
+TEST_F(MultiTopicBagRecorderTest, DropsFramesWithoutSyncControllerStamp) {
     FramePool    pool(kMono32x32, 4);
     FrameChannel ch;
 

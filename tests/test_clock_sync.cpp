@@ -146,7 +146,7 @@ TEST(ClockSyncTest, OffsetStepResets) {
     auto now = drive(sync, rng, rio, 5.0, 1e6, 0.0, 100, 1000);
     ASSERT_TRUE(sync.healthy(now));
 
-    // The Teensy side of the mapping steps by +100 ms (rio keeps counting
+    // The sync controller side of the mapping steps by +100 ms (rio keeps counting
     // forward — e.g. an FPGA time re-sync on the controller).
     now = drive(sync, rng, rio, 0.1, 1e6 + 100'000.0, 0.0, 100, 1000);
     EXPECT_EQ(sync.resets(), 1u);

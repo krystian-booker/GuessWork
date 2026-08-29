@@ -6,13 +6,13 @@ namespace gw {
 
 // Abstraction the SpinnakerProducer uses to source per-frame timestamps when
 // the camera is in hardware-trigger slave mode. The implementation
-// (`gw::server::TeensyManager`) lives in the server layer; this interface is
+// (`gw::server::SyncControllerManager`) lives in the server layer; this interface is
 // defined in `gw::` so the producer library doesn't pull in the server layer.
 //
 // Contract:
 //   - `pop_pulse_ns(pin, camera_frame_id)` returns the rising-edge timestamp
 //     (in nanoseconds on the source clock) for the next-expected pulse on
-//     the given Teensy output pin. The implementation tracks per-pin state
+//     the given sync controller output pin. The implementation tracks per-pin state
 //     so subsequent calls advance through the pulse stream; gaps in
 //     camera_frame_id cause matching pulses to be discarded so the streams
 //     stay aligned across dropped camera frames.

@@ -57,11 +57,11 @@ export interface FusionStatus {
     tag_pulse_to_fusion: LatencyStat
     queue_wait: LatencyStat
     solve: LatencyStat
-    // Trigger-pulse → pose-on-CAN headline; p95 target < 50 ms.
+    // Trigger-pulse → pose-on-wire headline; p95 target < 50 ms.
     pose_staleness: LatencyStat
   }
   lag: { states: number; lag_s: number; oldest_age_s: number }
-  teensy_now: { healthy: boolean; offset_ms: number }
+  sync_clock_now: { healthy: boolean; offset_ms: number }
   output: {
     sent: number
     send_errors: number

@@ -24,12 +24,12 @@ constexpr double kMinCredibleS  = 3.0 * 3600.0;
 
 }  // namespace
 
-ImuAllanService::ImuAllanService(TeensyManager&        teensy,
+ImuAllanService::ImuAllanService(SyncControllerManager&        controller,
                                  ImuConfigRepository&  imu_config,
                                  std::filesystem::path log_dir)
-    : teensy_(teensy),
+    : controller_(controller),
       imu_config_(imu_config),
-      recorder_(teensy, std::move(log_dir)) {}
+      recorder_(controller, std::move(log_dir)) {}
 
 bool ImuAllanService::start_recording(int64_t duration_s, std::string& err) {
     return recorder_.start(duration_s, err);

@@ -38,7 +38,7 @@ struct Lcg {
     }
 };
 
-constexpr int64_t kT0Ns = 1'000'000'000'000ll;  // arbitrary Teensy-clock epoch
+constexpr int64_t kT0Ns = 1'000'000'000'000ll;  // arbitrary sync controller-clock epoch
 
 ga::Mat4 planar_pose(double x, double y, double theta) {
     const double c = std::cos(theta), s = std::sin(theta);
@@ -91,7 +91,7 @@ gw::apriltag::TagPoseMeasurement make_tag(const Sim& sim, double t, Lcg& rng,
                                           bool outlier = false) {
     gw::apriltag::TagPoseMeasurement m;
     m.t_ns         = kT0Ns + static_cast<int64_t>(t * 1e9);
-    m.clock_source = gw::apriltag::TagPoseMeasurement::Clock::kTeensy;
+    m.clock_source = gw::apriltag::TagPoseMeasurement::Clock::kSyncController;
     m.n_tags       = 2;
 
     ga::Vec6 xi{};

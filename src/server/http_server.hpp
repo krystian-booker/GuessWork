@@ -14,7 +14,7 @@ class CameraRepository;
 class CameraSupervisor;
 class CalibrationSupervisor;
 class TriggerGroupRepository;
-class TeensyManager;
+class SyncControllerManager;
 class ImuConfigRepository;
 class FieldLayoutRepository;
 class ApriltagSupervisor;
@@ -36,7 +36,7 @@ public:
                CameraRepository&                     cameras,
                CalibrationSupervisor&                calibration,
                TriggerGroupRepository&               trigger_groups,
-               TeensyManager&                        teensy,
+               SyncControllerManager&                        controller,
                ImuConfigRepository&                  imu_config,
                FieldLayoutRepository&                field_layouts,
                ApriltagSupervisor&                   apriltag,

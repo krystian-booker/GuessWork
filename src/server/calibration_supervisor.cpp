@@ -16,7 +16,7 @@
 #include "server/imu_config_repository.hpp"
 #include "server/kalibr_imu_job.hpp"
 #include "server/kalibr_job.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 #ifndef GW_KALIBR_DOCKER_IMAGE
 #define GW_KALIBR_DOCKER_IMAGE "guesswork/kalibr:latest"
@@ -84,12 +84,12 @@ constexpr uint32_t kFallbackSensorWidthPx = 2048;
 
 CalibrationSupervisor::CalibrationSupervisor(CameraSupervisor&     cameras,
                                              CameraRepository&     repository,
-                                             TeensyManager&        teensy,
+                                             SyncControllerManager&        controller,
                                              ImuConfigRepository&  imu_config,
                                              std::filesystem::path root)
     : cameras_(cameras),
       repository_(repository),
-      teensy_(teensy),
+      controller_(controller),
       imu_config_(imu_config),
       root_(std::move(root)) {
     std::error_code ec;
@@ -385,11 +385,16 @@ CalibrationSupervisor::start_extrinsics(const std::vector<int64_t>& camera_ids) 
         throw CalibrationError("an extrinsics session is already active");
     }
 
-    const auto teensy = teensy_.status();
-    if (!teensy.connected)           throw CalibrationError("Teensy not connected");
-    if (!teensy.armed)               throw CalibrationError("Teensy not armed — arm hardware sync first");
-    if (!teensy.telemetry_connected) throw CalibrationError("Teensy telemetry interface not connected (fw=2 required)");
-    if (!teensy.imu_ok)              throw CalibrationError("IMU not healthy (heartbeat reports imu_ok=0)");
+    const auto controller = controller_.status();
+    if (!controller.connected) {
+        throw CalibrationError("sync controller not connected");
+    }
+    if (!controller.armed) {
+        throw CalibrationError("sync controller not armed — arm hardware sync first");
+    }
+    if (!controller.imu_ok) {
+        throw CalibrationError("IMU not healthy (heartbeat reports imu_ok=0)");
+    }
 
     std::vector<ExtrinsicsParticipant> cams;
     std::vector<gw::CameraInputSpec>   specs;
@@ -408,7 +413,7 @@ CalibrationSupervisor::start_extrinsics(const std::vector<int64_t>& camera_ids) 
         if (!row->hardware_sync_enabled) {
             throw CalibrationError(
                 "camera " + std::to_string(id) +
-                " is not hardware-synced — extrinsics bags need Teensy-clock stamps");
+                " is not hardware-synced — extrinsics bags need sync controller-clock stamps");
         }
         if (!(row->focal_length_mm > 0.0)) {
             throw CalibrationError(
@@ -527,7 +532,7 @@ CalibrationSupervisor::start_extrinsics(const std::vector<int64_t>& camera_ids) 
 
     s.recorder = std::make_unique<gw::MultiTopicBagRecorder>(
         s.root, std::filesystem::path(GW_KALIBR_TARGET_DEFAULT), std::move(specs),
-        &teensy_.imu_bus());
+        &controller_.imu_bus());
     s.recorder->start();  // may throw on filesystem error
 
     ext_session_ = std::move(s);

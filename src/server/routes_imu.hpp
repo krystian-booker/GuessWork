@@ -9,7 +9,7 @@ class FusionSupervisor;
 class ImuAllanService;
 class ImuAttitudeService;
 class ImuConfigRepository;
-class TeensyManager;
+class SyncControllerManager;
 
 // /api/imu/config  GET, PUT  — single-row IMU noise/transform configuration.
 // /api/imu/status  GET       — live telemetry health (rate, drops, CRC).
@@ -31,7 +31,7 @@ class TeensyManager;
 //   POST /api/imu/attitude/zero-yaw — re-reference the drifting yaw
 void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
-                         TeensyManager&       teensy,
+                         SyncControllerManager&       controller,
                          ApriltagSupervisor&  apriltag,
                          FusionSupervisor&    fusion,
                          ImuAllanService&     allan,

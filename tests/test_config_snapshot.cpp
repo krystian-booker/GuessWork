@@ -298,7 +298,7 @@ TEST_F(ConfigSnapshotTest, BadSectionFailsPartially) {
 }
 
 TEST_F(ConfigSnapshotTest, LegacyCanConfigSectionIgnored) {
-    // Pre-UDP exports carried a "can_config" section (the Teensy CAN bridge,
+    // Pre-UDP exports carried a "can_config" section (the sync controller CAN bridge,
     // since replaced by the UDP robot link). Like any unknown section it must
     // be silently skipped — never an import failure.
     crow::json::wvalue snap;

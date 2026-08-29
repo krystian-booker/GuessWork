@@ -39,7 +39,7 @@ VioRunnerConfig build_runner_config(const gw::calib::CamchainEntry& left,
     cfg.sigma_a  = noise.accel_noise_density;
     cfg.sigma_ab = noise.accel_random_walk;
 
-    // Both cameras share the Teensy pulse clock, so the two Kalibr
+    // Both cameras share the sync controller pulse clock, so the two Kalibr
     // timeshifts are ≈ equal; OpenVINS takes one offset — use the left's.
     cfg.calib_camimu_dt = left.imu->timeshift_cam_imu;
 

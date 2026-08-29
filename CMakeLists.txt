@@ -282,7 +282,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/gtsam.cmake)
 
 add_library(gw_fusion
     src/fusion/fusion_engine.cpp
-    src/fusion/teensy_now.cpp
+    src/fusion/sync_clock_now.cpp
 )
 target_include_directories(gw_fusion PUBLIC src)
 target_link_libraries(gw_fusion
@@ -338,12 +338,11 @@ add_library(gw_server
     src/server/imu_attitude_service.cpp
     src/server/config_snapshot.cpp
     src/server/routes_config.cpp
-    src/server/teensy_manager.cpp
-    src/server/telemetry_decoder.cpp
+    src/server/sync_controller_manager.cpp
+    src/server/sync_protocol_decoder.cpp
 )
 target_link_libraries(gw_server PUBLIC gw_core gw_producer gw_encoder gw_consumer gw_calibration gw_apriltag gw_vio gw_fusion Crow::Crow LibDataChannel::LibDataChannel SQLite3::SQLite3)
-# teensy_manager.cpp includes the freestanding CAN wire contract straight from
-# the firmware tree ("firmware/src/can_payloads.h") — one copy, no drift.
+# Host and firmware compile the same freestanding USB wire contract.
 target_include_directories(gw_server PRIVATE ${PROJECT_SOURCE_DIR})
 
 # Crow's headers trip a few -Wpedantic warnings (notably the pre-C++23
@@ -464,7 +463,7 @@ if(GW_BUILD_TESTS)
         tests/test_rosbag_writer.cpp
         tests/test_rosbag_recording_consumer.cpp
         tests/test_subprocess_job.cpp
-        tests/test_telemetry_decoder.cpp
+        tests/test_sync_protocol_decoder.cpp
         tests/test_measurement_bus.cpp
         tests/test_imu_config_repository.cpp
         tests/test_calibration_store.cpp
@@ -478,17 +477,17 @@ if(GW_BUILD_TESTS)
         tests/test_stereo_sync_pairer.cpp
         tests/test_vio_config_builder.cpp
         tests/test_vio_config_repository.cpp
-        tests/test_telemetry_payloads.cpp
+        tests/test_sync_controller_protocol.cpp
         tests/test_calibration_supervisor.cpp
         tests/test_apriltag_supervisor.cpp
         tests/test_attitude_filter.cpp
-        tests/test_teensy_manager.cpp
+        tests/test_sync_controller_manager.cpp
         tests/test_trigger_group_repository.cpp
         tests/test_udp_payloads.cpp
         tests/test_clock_sync.cpp
         tests/test_robot_link.cpp
         tests/test_net_config_repository.cpp
-        tests/test_teensy_now.cpp
+        tests/test_controller_now.cpp
         tests/test_fusion_engine.cpp
         tests/test_fusion_config_repository.cpp
         tests/test_latency_stats.cpp
@@ -502,8 +501,8 @@ if(GW_BUILD_TESTS)
     # The estimator tests build synthetic projections with OpenCV directly,
     # the consumer test renders a real tag bitmap via the apriltag library,
     # and the field-layout test parses the shipped season fixture.
-    # test_telemetry_payloads includes the freestanding firmware wire-contract
-    # header ("firmware/src/can_payloads.h") directly.
+    # Protocol tests compile the same freestanding USB wire-contract header as
+    # the STM32 firmware.
     target_include_directories(gw_tests PRIVATE ${OpenCV_INCLUDE_DIRS}
                                                 ${PROJECT_SOURCE_DIR})
     target_link_libraries(gw_tests PRIVATE ${OpenCV_LIBS} apriltag)

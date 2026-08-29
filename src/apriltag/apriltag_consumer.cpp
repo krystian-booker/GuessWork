@@ -179,7 +179,7 @@ void AprilTagConsumer::process_frame(gw::Frame* f) {
                 TagPoseMeasurement m;
                 if (t_camera != 0) {
                     m.t_ns         = static_cast<int64_t>(t_camera);
-                    m.clock_source = TagPoseMeasurement::Clock::kTeensy;
+                    m.clock_source = TagPoseMeasurement::Clock::kSyncController;
                 } else {
                     m.t_ns         = static_cast<int64_t>(t_capture_host);
                     m.clock_source = TagPoseMeasurement::Clock::kHost;

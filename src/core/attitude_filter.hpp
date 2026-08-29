@@ -28,7 +28,7 @@ public:
         double                roll_deg  = 0;  // ZYX euler of q
         double                pitch_deg = 0;
         double                yaw_deg   = 0;
-        uint64_t              last_t_ns = 0;  // Teensy clock of last sample
+        uint64_t              last_t_ns = 0;  // sync controller clock of last sample
         uint64_t              samples   = 0;
     };
 

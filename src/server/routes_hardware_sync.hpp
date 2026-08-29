@@ -5,10 +5,10 @@
 namespace gw::server {
 
 class TriggerGroupRepository;
-class TeensyManager;
+class SyncControllerManager;
 
 void register_hardware_sync_routes(crow::SimpleApp&        app,
                                    TriggerGroupRepository& repo,
-                                   TeensyManager&          teensy);
+                                   SyncControllerManager&  controller);
 
 }  // namespace gw::server

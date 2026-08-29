@@ -12,7 +12,7 @@
 namespace gw::net {
 
 // UDP link to the robot controller (RoboRIO / SystemCore) — the transport
-// that replaced the Teensy CAN bridge. Wire contract: src/net/udp_payloads.h
+// that replaced the sync controller CAN bridge. Wire contract: src/net/udp_payloads.h
 // (prose copy docs/ethernet-protocol.md).
 //
 //   controller --UDP:bind_port--> host   CHASSIS_SPEEDS @ 50-100 Hz
@@ -22,9 +22,9 @@ namespace gw::net {
 // speeds packet (a static robot_ip can override). Timestamps: each inbound
 // packet carries the controller's 64-bit FPGA sample time; an internal
 // ClockSync (fed with host recvfrom stamps) maps RIO→host, and the injected
-// TeensyClockView (fed by TeensyManager's telemetry stream) maps host→Teensy
-// — chassis speeds are published on the Teensy clock like every other
-// measurement, with no direct RIO↔Teensy link. Fallback ladder for t_ns:
+// SyncClockView (fed by SyncControllerManager's telemetry stream) maps host→sync controller
+// — chassis speeds are published on the sync controller clock like every other
+// measurement, with no direct RIO↔sync controller link. Fallback ladder for t_ns:
 // mapped sample time → mapped arrival time → 0 (consumers drop zero stamps).
 class RobotLink {
 public:
@@ -35,17 +35,17 @@ public:
         std::string robot_ip;           // empty = learn from inbound packets
     };
 
-    // Host↔Teensy clock mapping, provided by TeensyManager (thread-safe
+    // Host↔sync controller clock mapping, provided by SyncControllerManager (thread-safe
     // snapshots). Both return nullopt while the mapping is unhealthy.
-    struct TeensyClockView {
-        std::function<std::optional<uint64_t>(uint64_t host_ns)>   to_teensy_ns;
-        std::function<std::optional<uint64_t>(uint64_t teensy_ns)> to_host_ns;
+    struct SyncClockView {
+        std::function<std::optional<uint64_t>(uint64_t host_ns)>   to_controller_ns;
+        std::function<std::optional<uint64_t>(uint64_t controller_ns)> to_host_ns;
     };
 
     // Everything the fusion output loop knows about the pose it is
     // publishing; maps 1:1 onto the POSE packet (udp_payloads.h).
     struct PoseSend {
-        uint64_t t_ns = 0;  // Teensy-domain validity time
+        uint64_t t_ns = 0;  // sync controller-domain validity time
         float    x_m = 0, y_m = 0, theta_rad = 0;
         uint8_t  quality        = 0;
         uint8_t  mode           = 0;      // udpp::kMode*
@@ -74,17 +74,17 @@ public:
         double   sync_drift_ppm = 0.0;
         uint64_t sync_samples   = 0;
         uint64_t sync_resets    = 0;
-        // Host ↔ Teensy hop (from the injected view; false = unhealthy).
-        bool teensy_hop_healthy = false;
+        // Host ↔ sync controller hop (from the injected view; false = unhealthy).
+        bool controller_hop_healthy = false;
     };
 
-    explicit RobotLink(TeensyClockView teensy_clock);
+    explicit RobotLink(SyncClockView controller_clock);
     ~RobotLink();
 
     RobotLink(const RobotLink&)            = delete;
     RobotLink& operator=(const RobotLink&) = delete;
 
-    // Decoded chassis-speeds samples (Teensy-clock timestamps when the
+    // Decoded chassis-speeds samples (sync controller-clock timestamps when the
     // two-hop mapping is healthy; see class comment). Subscriber: fusion.
     // Valid for the link's lifetime.
     gw::OdomBus& odom_bus();

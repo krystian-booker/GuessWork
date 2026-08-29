@@ -6,12 +6,12 @@
 #include <mutex>
 #include <thread>
 
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 namespace gw::server {
 
 struct ImuAttitudeService::Impl {
-    TeensyManager& teensy;
+    SyncControllerManager& controller;
 
     gw::MeasurementBus<gw::ImuSample>::SubscriberHandle sub;
     std::thread       worker;
@@ -24,11 +24,11 @@ struct ImuAttitudeService::Impl {
     std::chrono::steady_clock::time_point       last_at{};
     std::deque<std::chrono::steady_clock::time_point> window;  // ~1 s
 
-    explicit Impl(TeensyManager& t) : teensy(t) {}
+    explicit Impl(SyncControllerManager& t) : controller(t) {}
 
     void run() {
         gw::ImuSample s;
-        while (teensy.imu_bus().wait_pop(sub, s)) {
+        while (controller.imu_bus().wait_pop(sub, s)) {
             if (stop.load(std::memory_order_acquire)) break;
             const auto now = std::chrono::steady_clock::now();
             std::lock_guard lk(mu);
@@ -45,15 +45,15 @@ struct ImuAttitudeService::Impl {
     }
 };
 
-ImuAttitudeService::ImuAttitudeService(TeensyManager& teensy)
-    : impl_(std::make_unique<Impl>(teensy)) {
-    impl_->sub    = teensy.imu_bus().subscribe(4096);
+ImuAttitudeService::ImuAttitudeService(SyncControllerManager& controller)
+    : impl_(std::make_unique<Impl>(controller)) {
+    impl_->sub    = controller.imu_bus().subscribe(4096);
     impl_->worker = std::thread([this] { impl_->run(); });
 }
 
 ImuAttitudeService::~ImuAttitudeService() {
     impl_->stop.store(true, std::memory_order_release);
-    impl_->teensy.imu_bus().unsubscribe(impl_->sub);  // wakes wait_pop
+    impl_->controller.imu_bus().unsubscribe(impl_->sub);  // wakes wait_pop
     if (impl_->worker.joinable()) impl_->worker.join();
 }
 

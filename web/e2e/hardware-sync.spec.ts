@@ -12,7 +12,7 @@ test.describe('Hardware sync (mocked)', () => {
     await json(page, '**/api/cameras', [])
 
     await page.goto('/hardware-sync')
-    await expect(page.getByText('Teensy connected')).toBeVisible()
+    await expect(page.getByText('sync controller connected')).toBeVisible()
     await expect(page.getByText('Armed')).toBeVisible()
     await expect(page.getByText('123,456 pulses')).toBeVisible()
     await expect(page.getByRole('row', { name: /stereo-pair/ })).toBeVisible()

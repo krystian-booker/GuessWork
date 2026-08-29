@@ -13,7 +13,7 @@ export interface ImportResult {
 }
 
 // Full robot-identity snapshot (cameras incl. calibration blobs, layouts,
-// trigger groups, imu/vio/can/fusion configs). Returned as a Blob so the
+// trigger groups and IMU/VIO/network/fusion configs). Returned as a Blob so the
 // caller can trigger a browser download.
 export async function exportConfig(): Promise<{ blob: Blob; filename: string }> {
   const res = await fetch('/api/config/export')
@@ -27,7 +27,7 @@ export async function exportConfig(): Promise<{ blob: Blob; filename: string }> 
 }
 
 // Non-destructive merge (cameras matched by serial, groups/layouts by name);
-// server propagates to apriltag/vio/fusion and re-pushes CAN mode after.
+// server propagates changes to AprilTag/VIO/fusion and trigger state.
 export async function importConfig(snapshot: unknown): Promise<ImportResult> {
   return sendJson<ImportResult>('/api/config/import', 'POST', snapshot)
 }

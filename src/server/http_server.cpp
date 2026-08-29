@@ -32,7 +32,7 @@ struct HttpServer::Impl {
          CameraRepository&                     cameras,
          CalibrationSupervisor&                calibration,
          TriggerGroupRepository&               trigger_groups,
-         TeensyManager&                        teensy,
+         SyncControllerManager&                        controller,
          ImuConfigRepository&                  imu_config,
          FieldLayoutRepository&                field_layouts,
          ApriltagSupervisor&                   apriltag,
@@ -50,12 +50,12 @@ struct HttpServer::Impl {
         register_stream_routes(app, supervisor);
         register_camera_routes(app, cameras, supervisor);
         register_calibration_routes(app, cameras, calibration, supervisor);
-        register_hardware_sync_routes(app, trigger_groups, teensy);
-        register_imu_routes(app, imu_config, teensy, apriltag, fusion, allan,
+        register_hardware_sync_routes(app, trigger_groups, controller);
+        register_imu_routes(app, imu_config, controller, apriltag, fusion, allan,
                             attitude);
         register_apriltag_routes(app, field_layouts, apriltag, supervisor);
         register_vio_routes(app, vio, vio_config);
-        register_robot_routes(app, net_config, robot, teensy);
+        register_robot_routes(app, net_config, robot, controller);
         register_fusion_routes(app, fusion, fusion_config);
         register_config_routes(app, cameras, trigger_groups, field_layouts,
                                imu_config, vio_config, net_config,
@@ -70,7 +70,7 @@ HttpServer::HttpServer(uint16_t                              port,
                        CameraRepository&                     cameras,
                        CalibrationSupervisor&                calibration,
                        TriggerGroupRepository&               trigger_groups,
-                       TeensyManager&                        teensy,
+                       SyncControllerManager&                        controller,
                        ImuConfigRepository&                  imu_config,
                        FieldLayoutRepository&                field_layouts,
                        ApriltagSupervisor&                   apriltag,
@@ -84,7 +84,7 @@ HttpServer::HttpServer(uint16_t                              port,
                        ImuAttitudeService&                   attitude,
                        std::chrono::steady_clock::time_point started_at)
     : impl_(std::make_unique<Impl>(port, supervisor, cameras, calibration,
-                                   trigger_groups, teensy, imu_config,
+                                   trigger_groups, controller, imu_config,
                                    field_layouts, apriltag, vio, vio_config,
                                    net_config, robot, fusion, fusion_config,
                                    allan, attitude, started_at)) {}
@@ -107,7 +107,7 @@ void HttpServer::run() {
         // the port. Without this catch the exception escapes via terminate()
         // and looks like a crash inside asio/detail/throw_exception.hpp under
         // a debugger. Rethrown as a plain runtime_error so main() can print
-        // it and unwind normally (camera/Teensy teardown must run in order).
+        // it and unwind normally (camera/sync controller teardown must run in order).
         throw std::runtime_error(
             "failed to start HTTP server on port " + std::to_string(impl_->port) +
             ": " + e.what() +

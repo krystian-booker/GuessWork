@@ -1,7 +1,7 @@
 import { asJson, readError } from './http'
 
-// One named, FPS-configured trigger group on the Teensy. `output_pins` are
-// the physical Teensy outputs (1..6) that fire in lockstep for this group.
+// One named, FPS-configured trigger group on the sync controller. `output_pins` are
+// the physical sync controller outputs (1..6) that fire in lockstep for this group.
 export interface TriggerGroup {
   id: number
   name: string
@@ -10,7 +10,7 @@ export interface TriggerGroup {
   created_at: number
 }
 
-// Snapshot of the Teensy connection + arm state. The host re-pushes the
+// Snapshot of the sync controller connection + arm state. The host re-pushes the
 // most-recent armed config on every reconnect, so `armed` reflects intent
 // as well as current device state.
 export interface HardwareSyncStatus {
@@ -20,6 +20,12 @@ export interface HardwareSyncStatus {
   last_pulse_age_ms: number | null
   total_pulses: number
   last_error: string | null
+  board?: string | null
+  firmware_version?: number | null
+  protocol_version?: number | null
+  reset_reason: number
+  trigger_drops: number
+  usb_errors: number
 }
 
 export async function getStatus(): Promise<HardwareSyncStatus> {
@@ -67,5 +73,14 @@ export async function arm(): Promise<void> {
 
 export async function stopOutputs(): Promise<void> {
   const res = await fetch('/api/hardware-sync/stop', { method: 'POST' })
+  if (!res.ok) throw new Error(await readError(res))
+}
+
+export async function testOutput(outputPin: number): Promise<void> {
+  const res = await fetch('/api/hardware-sync/test-output', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ output_pin: outputPin }),
+  })
   if (!res.ok) throw new Error(await readError(res))
 }

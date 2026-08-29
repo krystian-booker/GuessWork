@@ -8,7 +8,7 @@
 #include "net/udp_payloads.h"
 #include "server/net_config_repository.hpp"
 #include "server/route_helpers.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 namespace gw::server {
 
@@ -50,7 +50,7 @@ const char* mode_name(uint8_t mode) {
 void register_robot_routes(crow::SimpleApp&     app,
                            NetConfigRepository& net_config,
                            gw::net::RobotLink&  robot,
-                           TeensyManager&       teensy) {
+                           SyncControllerManager& controller) {
     CROW_ROUTE(app, "/api/robot/config").methods("GET"_method)
     ([&net_config] {
         try {
@@ -117,9 +117,9 @@ void register_robot_routes(crow::SimpleApp&     app,
     });
 
     CROW_ROUTE(app, "/api/robot/status").methods("GET"_method)
-    ([&robot, &teensy] {
+    ([&robot, &controller] {
         const auto st = robot.status();
-        const auto ts = teensy.status();
+        const auto ts = controller.status();
 
         crow::json::wvalue j;
         j["running"]   = st.running;
@@ -163,24 +163,24 @@ void register_robot_routes(crow::SimpleApp&     app,
         rio_host["samples"]   = st.sync_samples;
         rio_host["resets"]    = st.sync_resets;
 
-        crow::json::wvalue host_teensy;
-        host_teensy["healthy"]   = ts.sync_healthy;
-        host_teensy["offset_us"] = ts.sync_offset_us;
-        host_teensy["drift_ppm"] = ts.sync_drift_ppm;
-        host_teensy["samples"]   = ts.sync_samples;
-        host_teensy["resets"]    = ts.sync_resets;
+        crow::json::wvalue host_controller;
+        host_controller["healthy"]   = ts.sync_healthy;
+        host_controller["offset_us"] = ts.sync_offset_us;
+        host_controller["drift_ppm"] = ts.sync_drift_ppm;
+        host_controller["samples"]   = ts.sync_samples;
+        host_controller["resets"]    = ts.sync_resets;
 
         crow::json::wvalue sync;
         sync["healthy"]     = st.sync_healthy && ts.sync_healthy;
         sync["rio_host"]    = std::move(rio_host);
-        sync["host_teensy"] = std::move(host_teensy);
+        sync["host_sync_controller"] = std::move(host_controller);
         j["clock_sync"] = std::move(sync);
 
         return json_response(200, std::move(j));
     });
 
     CROW_ROUTE(app, "/api/robot/pose").methods("POST"_method)
-    ([&robot, &teensy](const crow::request& req) {
+    ([&robot, &controller](const crow::request& req) {
         const auto body = crow::json::load(req.body);
         if (!body) return error_response(400, "invalid JSON body");
         for (const char* f : {"x", "y", "theta"}) {
@@ -204,9 +204,9 @@ void register_robot_routes(crow::SimpleApp&     app,
             }
             pose.quality = static_cast<uint8_t>(q);
         }
-        // Bench poses have no fusion timestamp; use Teensy-now via the
-        // host↔Teensy mapping so the RIO stamp on the wire is sane.
-        pose.t_ns = teensy.host_to_teensy_ns(gw::Clock::now_ns()).value_or(0);
+        // Bench poses have no fusion timestamp; use sync controller-now via the
+        // host↔sync controller mapping so the RIO stamp on the wire is sane.
+        pose.t_ns = controller.host_to_controller_ns(gw::Clock::now_ns()).value_or(0);
 
         if (!robot.send_pose(pose)) {
             return error_response(503,

@@ -11,9 +11,9 @@ namespace gw::server {
 
 class Database;
 
-// Persistent record for one Teensy trigger group. `output_pins` is the
+// Persistent record for one sync controller trigger group. `output_pins` is the
 // expanded representation of the DB-side bitmask: each entry is a 1..6
-// physical output pin on the Teensy and entries are sorted ascending.
+// physical output pin on the sync controller and entries are sorted ascending.
 struct TriggerGroup {
     int64_t              id          = 0;
     std::string          name;
@@ -38,7 +38,7 @@ public:
         : std::runtime_error("trigger group name already exists: " + name) {}
 };
 
-// Thrown when a write would claim a Teensy output that another group already
+// Thrown when a write would claim a sync controller output that another group already
 // owns. Maps to HTTP 409 Conflict.
 class TriggerOutputPinConflictError : public std::runtime_error {
 public:
@@ -80,7 +80,7 @@ public:
     // Desired armed state (single-row sync_config table). This is operator
     // intent, not device state: the arm/stop routes set it BEFORE pushing so
     // a failed push (or a robot power-cycle) still converges — main.cpp
-    // seeds TeensyManager's desired config from it at boot and the
+    // seeds SyncControllerManager's desired config from it at boot and the
     // reconnect/retry resync delivers it.
     bool armed();
     void set_armed(bool armed);
@@ -89,7 +89,7 @@ private:
     Database& db_;
 };
 
-// Helpers shared with the route layer / TeensyManager.
+// Helpers shared with the route layer / SyncControllerManager.
 // Returns a sorted, deduplicated, range-checked copy of `pins`. Throws
 // InvalidTriggerOutputsError on any failure.
 std::vector<uint8_t> normalize_output_pins(const std::vector<uint8_t>& pins);

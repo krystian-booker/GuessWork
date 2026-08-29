@@ -15,7 +15,7 @@
 
 // Stereo frame synchronization for VIO.
 //
-// The two VIO cameras share one Teensy trigger group, so a stereo pair has
+// The two VIO cameras share one sync controller trigger group, so a stereo pair has
 // IDENTICAL camera_ts_ns pulse stamps — pairing is exact-equality matching,
 // not nearest-neighbour. Frames whose camera_ts_ns is 0 (no pulse matched —
 // the producer's fallback path) are dropped: they can't be paired and their
@@ -32,7 +32,7 @@
 namespace gw::vio {
 
 struct SideFrame {
-    int64_t              t_ns   = 0;  // Teensy pulse stamp
+    int64_t              t_ns   = 0;  // sync controller pulse stamp
     uint32_t             width  = 0;
     uint32_t             height = 0;
     std::vector<uint8_t> pixels;      // tightly packed Mono8
@@ -65,7 +65,7 @@ public:
 
     struct Counters {
         uint64_t paired             = 0;
-        uint64_t dropped_zero_ts    = 0;  // no Teensy pulse matched the frame
+        uint64_t dropped_zero_ts    = 0;  // no sync controller pulse matched the frame
         uint64_t dropped_unmatched  = 0;  // evicted before a partner arrived
         uint64_t dropped_pair_queue = 0;  // consumer too slow, oldest pair lost
     };

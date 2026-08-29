@@ -217,7 +217,7 @@ export default function CameraDetailPage() {
           <SectionCard title="Hardware sync">
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <p className="text-sm">Teensy-triggered capture</p>
+                <p className="text-sm">sync controller-triggered capture</p>
                 <Switch
                   checked={cam.hardware_sync_enabled}
                   onCheckedChange={(enabled) => {

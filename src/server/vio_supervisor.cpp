@@ -7,7 +7,7 @@
 #include "consumer/consumer.hpp"
 #include "server/camera_repository.hpp"
 #include "server/imu_config_repository.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 #include "server/vio_config_repository.hpp"
 #include "vio/vio_config_builder.hpp"
 
@@ -50,11 +50,11 @@ std::optional<std::string> load_vio_camera(const Camera& row, VioCameraRow& out)
 VioSupervisor::VioSupervisor(CameraRepository&    cameras,
                              ImuConfigRepository& imu_config,
                              VioConfigRepository& vio_config,
-                             TeensyManager&       teensy)
+                             SyncControllerManager&       controller)
     : cameras_(cameras),
       imu_config_(imu_config),
       vio_config_(vio_config),
-      teensy_(teensy),
+      controller_(controller),
       bus_(std::make_shared<gw::vio::VioBus>()),
       pairer_(std::make_shared<gw::vio::StereoSyncPairer>()),
       epoch_(std::make_shared<std::atomic<uint64_t>>(0)) {}
@@ -212,7 +212,7 @@ void VioSupervisor::ensure_runner_locked() {
 
     try {
         runner_ = std::make_unique<gw::vio::OpenVinsRunner>(
-            runner_cfg, policy, pairer_, teensy_.imu_bus(), bus_, epoch_);
+            runner_cfg, policy, pairer_, controller_.imu_bus(), bus_, epoch_);
         fingerprint_ = fp;
     } catch (const std::exception& e) {
         reason_ = std::string("runner construction failed: ") + e.what();
@@ -256,7 +256,7 @@ VioStatus VioSupervisor::status() {
     try {
         st.enabled = vio_config_.get().enabled;
     } catch (...) {}
-    st.imu_rate_hz = teensy_.status().imu_rate_hz;
+    st.imu_rate_hz = controller_.status().imu_rate_hz;
 
     for (const auto& row : cameras_.list_all()) {
         if (!row.role || (*row.role != "vio_left" && *row.role != "vio_right")) {

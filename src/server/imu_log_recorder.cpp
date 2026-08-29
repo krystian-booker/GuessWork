@@ -8,7 +8,7 @@
 
 #include "core/imu_types.hpp"
 #include "core/measurement_bus.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 namespace gw::server {
 
@@ -44,8 +44,8 @@ struct ImuLogRecorder::Impl {
     double                                rate_hz      = 0.0;
 };
 
-ImuLogRecorder::ImuLogRecorder(TeensyManager& teensy, std::filesystem::path dir)
-    : impl_(std::make_unique<Impl>()), teensy_(teensy), dir_(std::move(dir)) {}
+ImuLogRecorder::ImuLogRecorder(SyncControllerManager& controller, std::filesystem::path dir)
+    : impl_(std::make_unique<Impl>()), controller_(controller), dir_(std::move(dir)) {}
 
 ImuLogRecorder::~ImuLogRecorder() { stop(); }
 
@@ -96,7 +96,7 @@ bool ImuLogRecorder::start(int64_t duration_s, std::string& err) {
     impl_->duration_s   = duration_s;
     impl_->window_count = 0;
     impl_->rate_hz      = 0.0;
-    impl_->sub          = teensy_.imu_bus().subscribe(4096);
+    impl_->sub          = controller_.imu_bus().subscribe(4096);
 
     // The thread gets value copies of the handle and span — it never reads
     // impl_->sub (stop() mutates that shared_ptr; concurrent access to the
@@ -106,7 +106,7 @@ bool ImuLogRecorder::start(int64_t duration_s, std::string& err) {
     auto sub = impl_->sub;
     impl_->thread = std::thread([this, out, sub, span_ns] {
         gw::ImuSample s;
-        while (teensy_.imu_bus().wait_pop(sub, s)) {
+        while (controller_.imu_bus().wait_pop(sub, s)) {
             uint8_t rec[kRecordBytes];
             encode_record(s, rec);
             out->write(reinterpret_cast<const char*>(rec), kRecordBytes);
@@ -135,7 +135,7 @@ bool ImuLogRecorder::start(int64_t duration_s, std::string& err) {
         out->flush();
         std::lock_guard lk(impl_->mu);
         if (impl_->sub) {
-            teensy_.imu_bus().unsubscribe(impl_->sub);
+            controller_.imu_bus().unsubscribe(impl_->sub);
             impl_->sub.reset();
         }
         impl_->recording = false;
@@ -153,7 +153,7 @@ bool ImuLogRecorder::stop() {
         if (!was_recording && !impl_->thread.joinable()) return false;
         if (impl_->sub) {
             // Wakes the blocked wait_pop; the drain thread finishes the file.
-            teensy_.imu_bus().unsubscribe(impl_->sub);
+            controller_.imu_bus().unsubscribe(impl_->sub);
             impl_->sub.reset();
         }
         // Move the handle out so the join happens unlocked (the drain

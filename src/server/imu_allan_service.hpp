@@ -13,7 +13,7 @@
 namespace gw::server {
 
 class ImuConfigRepository;
-class TeensyManager;
+class SyncControllerManager;
 
 // Fully integrated Allan-variance IMU noise refinement: record a long static
 // IMU log (ImuLogRecorder), analyze it server-side (gw::compute_allan per
@@ -21,7 +21,7 @@ class TeensyManager;
 // imu_config. Driven by the /api/imu/allan/* routes.
 class ImuAllanService {
 public:
-    ImuAllanService(TeensyManager& teensy, ImuConfigRepository& imu_config,
+    ImuAllanService(SyncControllerManager& controller, ImuConfigRepository& imu_config,
                     std::filesystem::path log_dir);
 
     bool start_recording(int64_t duration_s, std::string& err);
@@ -60,7 +60,7 @@ public:
     bool apply(std::string& err);
 
 private:
-    TeensyManager&       teensy_;
+    SyncControllerManager&       controller_;
     ImuConfigRepository& imu_config_;
     ImuLogRecorder       recorder_;
 

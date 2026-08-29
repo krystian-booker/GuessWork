@@ -30,7 +30,7 @@ function KV({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
-// One hop of the rio↔host↔teensy timestamp chain.
+// One hop of the rio↔host↔controller timestamp chain.
 function SyncHopRow({ label, hop }: { label: string; hop: ClockSyncHop | undefined }) {
   return (
     <div className="rounded-md border px-3 py-2">
@@ -295,10 +295,10 @@ export default function RobotPage() {
             <CardContent className="space-y-2 px-4">
               <p className="text-xs text-muted-foreground">
                 Timestamp chain: RIO sample stamps map to the host clock over UDP, then to the
-                Teensy clock over USB. Both hops must be healthy for fused timestamps.
+                sync controller clock over USB. Both hops must be healthy for fused timestamps.
               </p>
               <SyncHopRow label="RIO ↔ host" hop={s?.clock_sync.rio_host} />
-              <SyncHopRow label="Host ↔ Teensy" hop={s?.clock_sync.host_teensy} />
+              <SyncHopRow label="Host ↔ sync controller" hop={s?.clock_sync.host_sync_controller} />
             </CardContent>
           </Card>
 

@@ -20,7 +20,7 @@ namespace gw::server {
 
 class CameraSupervisor;
 class CameraRepository;
-class TeensyManager;
+class SyncControllerManager;
 class ImuConfigRepository;
 class KalibrJob;
 class KalibrImuJob;
@@ -89,7 +89,7 @@ public:
 // Owns calibration recording sessions and Kalibr job lifecycles:
 //   - per-camera intrinsics sessions (single image topic bag), and
 //   - at most ONE extrinsics session system-wide (N cameras + /imu0 into a
-//     single bag, Teensy-clock timestamps) — it owns the IMU stream and the
+//     single bag, sync controller-clock timestamps) — it owns the IMU stream and the
 //     operator is physically exciting the rig, so concurrency is meaningless.
 // Each session writes under <root>/<session_id>/.
 //
@@ -102,11 +102,11 @@ public:
     // are created (typically ~/.guesswork/calibrations). The repository is
     // consulted at session start to read the camera's focal_length_mm, which
     // drives the Kalibr focal-length hint and the camera model selection.
-    // teensy provides the IMU sample bus + health gating for extrinsics
+    // controller provides the IMU sample bus + health gating for extrinsics
     // sessions; imu_config provides the noise model for imu.yaml.
     CalibrationSupervisor(CameraSupervisor&     cameras,
                           CameraRepository&     repository,
-                          TeensyManager&        teensy,
+                          SyncControllerManager&        controller,
                           ImuConfigRepository&  imu_config,
                           std::filesystem::path calibrations_root);
     ~CalibrationSupervisor();
@@ -134,7 +134,7 @@ public:
     // before any side effect:
     //   - 1..2 unique camera ids, no intrinsics session on any of them,
     //   - each camera online with hardware_sync_enabled,
-    //   - Teensy connected + armed + telemetry + IMU healthy,
+    //   - sync controller connected + armed + telemetry + IMU healthy,
     //   - single-camera flow: stored intrinsics exist, parse, and match the
     //     camera's current mode resolution,
     //   - pair flow: both cameras derive the same Kalibr model.
@@ -226,7 +226,7 @@ private:
 
     CameraSupervisor&                 cameras_;
     CameraRepository&                 repository_;
-    TeensyManager&                    teensy_;
+    SyncControllerManager&                    controller_;
     ImuConfigRepository&              imu_config_;
     std::filesystem::path             root_;
     std::mutex                        mu_;

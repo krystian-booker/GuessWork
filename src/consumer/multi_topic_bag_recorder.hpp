@@ -24,10 +24,10 @@ namespace gw {
 // intrinsics workflow; this class is not an IConsumer because that
 // interface is structurally one-FrameChannel.
 //
-// Timestamps: images are stamped with Frame::camera_ts_ns — the Teensy
+// Timestamps: images are stamped with Frame::camera_ts_ns — the sync controller
 // pulse clock — which is the same domain as ImuSample::t_ns, so Kalibr sees
 // a shared timeline by construction (the whole point of this recorder).
-// Frames whose camera_ts_ns is 0 (no Teensy pulse matched — fallback path)
+// Frames whose camera_ts_ns is 0 (no sync controller pulse matched — fallback path)
 // are dropped and counted: a 1970-epoch stamp would break the bag's
 // per-connection time monotonicity.
 //
@@ -48,7 +48,7 @@ struct CameraInputSpec {
 class MultiTopicBagRecorder {
 public:
     // imu_bus may be null (no /imu0 connection is registered then) — used by
-    // unit tests; production always passes the Teensy bus.
+    // unit tests; production always passes the sync controller bus.
     MultiTopicBagRecorder(std::filesystem::path        session_root,
                           std::filesystem::path        target_yaml_source,
                           std::vector<CameraInputSpec> cameras,

@@ -19,7 +19,7 @@ export interface RobotConfigPutResult extends RobotConfig {
   restart_error: string | null
 }
 
-// One hop of the timestamp chain (rio↔host over UDP, host↔teensy over USB).
+// One hop of the timestamp chain (rio↔host over UDP, host↔controller over USB).
 export interface ClockSyncHop {
   healthy: boolean
   offset_us: number
@@ -57,7 +57,7 @@ export interface RobotStatus {
     // Chain healthy = both hops healthy.
     healthy: boolean
     rio_host: ClockSyncHop
-    host_teensy: ClockSyncHop
+    host_sync_controller: ClockSyncHop
   }
 }
 

@@ -56,7 +56,7 @@ struct FusionParams {
 // Engine → supervisor snapshot, refreshed after every smoother update.
 struct FusedState {
     bool    initialized = false;
-    int64_t t_ns        = 0;  // newest state time, Teensy clock
+    int64_t t_ns        = 0;  // newest state time, sync controller clock
 
     gw::apriltag::Mat4     T_field_robot = gw::apriltag::mat4_identity();
     std::array<double, 36> cov{};  // newest-key marginal
@@ -73,7 +73,7 @@ struct FusedState {
 struct FusionCounters {
     uint64_t tag_accepted       = 0;
     uint64_t tag_rejected_gate  = 0;
-    uint64_t tag_rejected_clock = 0;  // clock_source != kTeensy
+    uint64_t tag_rejected_clock = 0;  // clock_source != kSyncController
     uint64_t tag_rejected_stale = 0;  // older than the in-lag state deque
 
     uint64_t vio_fused_intervals  = 0;

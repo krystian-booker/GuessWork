@@ -29,9 +29,9 @@ struct Camera {
     std::optional<int64_t>     calibrated_at;
     // Hardware-trigger ("slave") mode. When true, the producer configures the
     // camera to fire on a rising edge on Line0 / OPTO_IN and routes its frame
-    // timestamps from the matching Teensy output's pulse stream.
+    // timestamps from the matching sync controller output's pulse stream.
     bool                       hardware_sync_enabled = false;
-    // Physical Teensy output the camera is wired to (1..6). Required when
+    // Physical sync controller output the camera is wired to (1..6). Required when
     // hardware_sync_enabled is true; ignored otherwise. Unique across cameras.
     std::optional<int64_t>     trigger_output_pin;
     // Pipeline role: 'apriltag' | 'vio_left' | 'vio_right'. Unset = camera is

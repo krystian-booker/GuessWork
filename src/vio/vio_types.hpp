@@ -17,7 +17,7 @@ namespace gw::vio {
 // with EQUAL epoch; never difference across epochs, and never fuse an
 // absolute VIO pose (VIO drifts).
 struct VioOdometry {
-    int64_t  t_ns  = 0;        // Teensy clock — the stereo pair's pulse stamp
+    int64_t  t_ns  = 0;        // sync controller clock — the stereo pair's pulse stamp
     uint64_t epoch = 0;        // odom-frame session; ++ on every (re)init
     bool     initialized = false;
 

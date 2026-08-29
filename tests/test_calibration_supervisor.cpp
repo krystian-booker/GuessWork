@@ -7,11 +7,11 @@
 #include "server/camera_supervisor.hpp"
 #include "server/database.hpp"
 #include "server/imu_config_repository.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 // Validation-gauntlet tests. The CameraSupervisor is never start()ed (in
 // GW_STUB_SPINNAKER builds it couldn't produce a camera anyway) and the
-// TeensyManager is never start()ed — every camera is offline and the Teensy
+// SyncControllerManager is never start()ed — every camera is offline and the sync controller
 // is disconnected, which is exactly the state the pre-flight gates exist to
 // reject. The happy path (attach → record → Kalibr) is hardware/e2e turf.
 
@@ -31,7 +31,7 @@ protected:
         sup_     = std::make_unique<CameraSupervisor>(
             *cameras_, StreamParams{1280, 720, 30, 4'000'000}, nullptr);
         calib_ = std::make_unique<CalibrationSupervisor>(
-            *sup_, *cameras_, teensy_, *imu_cfg_, dir_ / "sessions");
+            *sup_, *cameras_, controller_, *imu_cfg_, dir_ / "sessions");
     }
     void TearDown() override {
         calib_.reset();
@@ -54,7 +54,7 @@ protected:
     std::unique_ptr<Database>              db_;
     std::unique_ptr<CameraRepository>      cameras_;
     std::unique_ptr<ImuConfigRepository>   imu_cfg_;
-    TeensyManager                          teensy_;  // never start()ed
+    SyncControllerManager                          controller_;  // never start()ed
     std::unique_ptr<CameraSupervisor>      sup_;     // never start()ed
     std::unique_ptr<CalibrationSupervisor> calib_;
 };
@@ -101,12 +101,12 @@ TEST_F(CalibrationSupervisorTest, ExtrinsicsRejectsDuplicateIds) {
                              "duplicate");
 }
 
-TEST_F(CalibrationSupervisorTest, ExtrinsicsRejectsWithoutTeensy) {
-    // The Teensy gates run before any camera validation — extrinsics bags
+TEST_F(CalibrationSupervisorTest, ExtrinsicsRejectsWithoutSyncController) {
+    // The sync controller gates run before any camera validation — extrinsics bags
     // are meaningless without the shared clock.
     const auto id = add_camera("cam-sync", "SER-3", 6.0, /*hw_sync=*/true);
     expect_calibration_error([&] { calib_->start_extrinsics({id}); },
-                             "Teensy not connected");
+                             "sync controller not connected");
 }
 
 TEST_F(CalibrationSupervisorTest, StatusEmptyWhenNoSessions) {

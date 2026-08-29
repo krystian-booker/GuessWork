@@ -18,7 +18,7 @@ namespace gw {
 // Optional hardware-trigger ("slave") configuration. When enabled the
 // producer configures the camera to fire on a rising edge on Line0 / OPTO_IN
 // and re-stamps every frame's camera_ts_ns from `stamper` instead of the
-// camera's own clock. `trigger_output_pin` is the Teensy output pin (1..6)
+// camera's own clock. `trigger_output_pin` is the sync controller output pin (1..6)
 // the camera is wired to; the stamper uses it to route the right pulse
 // stream to this producer.
 struct HardwareSyncConfig {

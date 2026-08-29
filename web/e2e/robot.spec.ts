@@ -29,7 +29,7 @@ test.describe('Robot page (mocked)', () => {
     const sync = page.getByTestId('clock-sync-card')
     await expect(sync).toContainText('chain healthy')
     await expect(sync).toContainText('RIO ↔ host')
-    await expect(sync).toContainText('Host ↔ Teensy')
+    await expect(sync).toContainText('Host ↔ sync controller')
     await expect(sync).toContainText('offset 120 µs')
     await expect(sync).toContainText('drift 4.2 ppm')
     await expect(sync).toContainText('offset -80 µs')

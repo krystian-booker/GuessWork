@@ -1,20 +1,20 @@
 # GuessWork — Implementation Status & Hardware Bring-Up Plan
 
-*Last updated: 2026-06-11 (Phases 1–7 complete — the full software roadmap)*
+*Last updated: 2026-08-29 (MicoAir F405 V2 replacement implemented; physical acceptance pending)*
 
 GuessWork is the onboard pose-estimation system for an FRC robot: a Mac Mini M4
 runs 6 hardware-synced FLIR Chameleon3 cameras (4 AprilTag + 2 stereo VIO), a
-BMI088 IMU, and a Teensy 4.1 that drives the camera triggers (the timestamp
-ground truth). The robot controller (RoboRIO today, SystemCore next season)
+BMI088 IMU integrated on a MicoAir F405 V2 that drives the camera triggers
+(the timestamp ground truth). The robot controller (RoboRIO today, SystemCore next season)
 talks to the Mac **directly over UDP on the robot LAN** — chassis speeds in,
 fused pose out (`docs/ethernet-protocol.md`). AprilTag poses, OpenVINS
 visual-inertial odometry, and controller chassis speeds fuse in a GTSAM
 factor graph (Phase 6).
 
 ```
-                  Teensy 4.1 (clock master, fw=4)
+             MicoAir F405 V2 (clock master, protocol 1)
 trigger pulses ──► 6× Chameleon3 ──► FrameChannel per camera
-BMI088 @400 Hz ──► binary USB telemetry ──► ImuBus (+host↔Teensy ClockSync)
+onboard BMI088 @400 Hz ──► binary USB CDC ──► ImuBus (+host↔controller ClockSync)
 controller chassis speeds ──UDP :5809──► RobotLink ──► OdomBus (+RIO↔host ClockSync)
                                                   │
 4× apriltag cams ──► AprilTagConsumer ──► TagPoseBus ──┤
@@ -24,9 +24,10 @@ controller chassis speeds ──UDP :5809──► RobotLink ──► OdomBus (
 ```
 
 **Single time domain:** every measurement (frames, IMU samples, chassis
-speeds) carries a Teensy-clock nanosecond timestamp. Frames are re-stamped
-from trigger pulses; the IMU is stamped on the Teensy before transit; chassis
-speeds carry the controller's FPGA sample time, mapped RIO→host→Teensy by
+speeds) carries a sync-controller-clock nanosecond timestamp. Frames are
+re-stamped from trigger pulses; the IMU is stamped on the controller before
+transit; chassis speeds carry the robot controller's FPGA sample time, mapped
+RIO→host→sync controller by
 the two-hop `ClockSync` chain (arrival fallback while the RIO hop warms up).
 No raw host clocks are ever used for estimation math.
 
@@ -34,20 +35,20 @@ No raw host clocks are ever used for estimation math.
 
 ## 1. What's implemented
 
-### Phase 1 — Teensy timebase, binary telemetry, BMI088 IMU
+### Phase 1 — MicoAir timebase, binary USB, onboard BMI088
 | Piece | Status |
 |---|---|
-| 64-bit wrap-extended `micros()` timebase (fixes the ~71.6 min wrap bug); TRIG protocol fw=2 with u64 stamps | ✅ firmware builds; host parse unit-tested |
-| Dual USB-CDC (`-DUSB_DUAL_SERIAL`): ASCII commands on `Serial`, framed binary telemetry (CRC16) on `SerialUSB1` | ✅ decoder golden-byte tested (CRC fail, truncation, resync) |
-| BMI088 streamer: gyro-DRDY interrupt timestamping, 400 Hz, 4-sample batches, heartbeat with drop counters | ✅ firmware builds; **never run on real hardware** |
-| Host: `TelemetryDecoder`, `MeasurementBus<ImuSample>`, dual-port `TeensyManager` (PING-probe classification), `imu_config` table, `/api/imu/*` | ✅ unit-tested + live-server verified (no Teensy attached) |
+| TIM2 1 MHz wrap-extended 64-bit timebase shared by triggers and IMU | ✅ firmware builds; host parse unit-tested |
+| One bidirectional USB CDC stream with versioned frames, request IDs, lengths, and CRC16 | ✅ decoder golden-byte tested (CRC fail, fragmentation, resync) |
+| Onboard BMI088: 400 Hz scheduled SPI reads, board-frame rotation, heartbeat/drop counters | ✅ firmware builds; **first board validation pending** |
+| Host: `SyncProtocolDecoder`, `MeasurementBus<ImuSample>`, single-port `SyncControllerManager`, reconnect/config replay, `/api/imu/*` | ✅ unit and PTY integration tested |
 
 ### Phase 2 — Calibration: multi-topic bags, camera-IMU extrinsics
 | Piece | Status |
 |---|---|
 | Multi-connection `RosbagWriter` + `sensor_msgs/Imu` | ✅ validated against real `rosbag info` + genpy deserialization in the Kalibr container |
-| `MultiTopicBagRecorder` (N cams + `/imu0`, Teensy-clock stamps, zero-stamp drop) | ✅ unit-tested with synthetic frames/IMU |
-| Extrinsics sessions in `CalibrationSupervisor` (validation gates: hw-sync, Teensy armed, IMU healthy) + `calibrate_imu.sh` (single-cam + stereo-pair Kalibr flows) + `KalibrImuJob` per-camera result fan-out | ✅ code + failure paths live-verified; **end-to-end Kalibr run needs the IMU** |
+| `MultiTopicBagRecorder` (N cams + `/imu0`, sync-controller stamps, zero-stamp drop) | ✅ unit-tested with synthetic frames/IMU |
+| Extrinsics sessions in `CalibrationSupervisor` (validation gates: hw-sync controller armed, IMU healthy) + `calibrate_imu.sh` (single-cam + stereo-pair Kalibr flows) + `KalibrImuJob` per-camera result fan-out | ✅ code + failure paths live-verified; **end-to-end run on the new board pending** |
 | Typed `CalibrationStore` (camchain parse/serialize), `cameras.role`, `imu_extrinsics_json` | ✅ unit-tested round-trips |
 | Single-camera intrinsics flow (Phase 0 era) | ✅ live-verified end-to-end with the real camera |
 
@@ -69,15 +70,14 @@ No raw host clocks are ever used for estimation math.
 
 ### Phase 5 — Robot link (controller ↔ Mac over UDP)
 
-*(Reworked 2026-07: the Teensy CAN bridge was retired in favor of direct
-UDP — lower complexity, richer payloads, no transceiver hardware. fw=4
-drops CAN entirely; the Teensy keeps triggers + IMU.)*
+*(Reworked 2026-07: the microcontroller CAN bridge was retired in favor of
+direct UDP. The MicoAir board only owns triggers, IMU, and their clock.)*
 
 | Piece | Status |
 |---|---|
 | `RobotLink` (src/net): UDP RX thread, address learning, chassis-speeds decode → OdomBus; POSE downlink (x/y/θ + quality + mode + planar covariance + rolling counter) at `output_hz` | ✅ unit-tested end-to-end over localhost UDP (`test_robot_link`) |
 | Wire contract `src/net/udp_payloads.h` (32-byte CHASSIS_SPEEDS, 64-byte POSE, full 64-bit FPGA timestamps — no wrap handling anywhere) | ✅ golden-byte unit-tested (`test_udp_payloads`) |
-| Two-hop clock sync `gw::ClockSync` — RIO↔host (fed by UDP arrivals, in RobotLink) and host↔Teensy (fed by IMU/TRIG arrivals, in TeensyManager); chassis speeds mapped RIO→host→Teensy | ✅ unit-tested (fit/drift/reset suite + loopback chain test) |
+| Two-hop clock sync `gw::ClockSync` — RIO↔host (fed by UDP arrivals, in RobotLink) and host↔sync controller (fed by multiplexed IMU/TRIG arrivals, in `SyncControllerManager`); chassis speeds mapped RIO→host→controller | ✅ unit-tested (fit/drift/reset suite + loopback chain test) |
 | `net_config` table, `/api/robot/*` routes (status incl. both sync hops, config incl. rebind, bench pose) | ✅ unit-tested (repo) + route layer |
 | Chassis speeds at 100 Hz from a real controller, two-hop sync quality on real crystals, pose downlink visible in robot code, field-network behavior | ⬜ **hardware-pending** (needs a RoboRIO + robot LAN — Stage 6) |
 
@@ -89,23 +89,23 @@ time-sync scheme, controller-side WPILib reference class).
 |---|---|
 | `gw_fusion`: IncrementalFixedLagSmoother (GTSAM 4.3a1 from source, Boost-free) fusing tag priors (Mahalanobis-gated + Huber), VIO equal-epoch deltas (robot-frame conjugation + Adjoint cov transport, lazily attached to in-lag keys), chassis-speeds twist betweens (Cauchy, slip-robust, soft planarity) | ✅ **hardware-free simulation suite**: figure-8 truth, clean-run RMSE < 5 cm / < 2°, 10 % outlier tags rejected, collision detect+recover, VIO death degradation, epoch-reset safety, tag drought > lag, std-explosion reinit |
 | Medoid init, collision monitor (gate-open + noise inflation), auto-reinit (pos-std / solver throw / NaN / unresolved collision), connectivity bridge factors, solve-time p95 tracking | ✅ unit-tested via the same suite |
-| `FusionSupervisor` (3 bus drainers → engine thread → output thread), `TeensyNowEstimator`, planar extrapolation → `TeensyManager::send_pose` at `output_hz` | ✅ unit-tested (estimator, extrapolation) + live-server verified (boot gating, config round-trip incl. `restarted` semantics, reset, clean SIGINT joins) |
+| `FusionSupervisor` (3 bus drainers → engine thread → output thread), `SyncClockNowEstimator`, planar extrapolation → `RobotLink::send_pose` at `output_hz` | ✅ unit-tested (estimator, extrapolation) + live-server verified |
 | Fused pose accuracy on a real field course; solve-time budget under real measurement rates; VIO-kill / collision behavior on hardware | ⬜ **hardware-pending** (Stage 7 — needs the full rig) |
 
 ### Phase 7 — Hardening & ops
 | Piece | Status |
 |---|---|
-| Per-stage latency instrumentation in `/api/fusion/status` (`tag_pulse_to_fusion`, `queue_wait`, `solve`, **`pose_staleness`** — the trigger-pulse→pose-on-the-wire headline, target p95 < 50 ms) + degraded-mode `mode` string; teensy_now now also tag-fed (survives odom death) | ✅ unit-tested (`LatencyStats`, `derive_fusion_mode`) + threaded supervisor integration test + live-server verified |
+| Per-stage latency instrumentation in `/api/fusion/status` (`tag_pulse_to_fusion`, `queue_wait`, `solve`, **`pose_staleness`** — target p95 < 50 ms) + degraded-mode `mode`; controller-now estimate is also tag-fed | ✅ unit-tested (`LatencyStats`, `derive_fusion_mode`) + threaded supervisor integration test + live-server verified |
 | Degraded-modes matrix (docs/pose_pipeline.md §6) + new engine sim cases (odom death, tags-only) | ✅ simulation-tested; matrix rows mirror the mode unit tests 1:1 |
 | Allan-variance IMU refinement, fully API-integrated: `POST /api/imu/allan/recording` → binary log in `~/.guesswork/imu_logs/` → `analyze` (overlapping ADEV, N/K fits, static-ness warnings) → `apply` into imu_config | ✅ math unit-tested (synthetic white noise + random walk recovered ±10–25%); recorder bit-exact-tested; **real overnight BMI088 recording pending (Stage 8 prep)** |
 | Config snapshot export/import (`/api/config/export\|import`): cameras incl. calibration blobs, trigger groups, field layouts, all tunables; non-destructive merge with per-section error reporting | ✅ round-trip + conflict-case unit tests + live verified |
 | `scripts/soak_check.sh` + threaded `test_fusion_supervisor` (the TSAN target) + `docs/pose_pipeline.md` | ✅ in repo; sanitizer soak itself is Stage 8 |
 
-**Test totals:** 288/288 passing. The software roadmap is complete — what
-remains is hardware execution (Stages 0–8) and data-driven tuning. (2026-07
-addendum: the CAN bridge was replaced by the UDP robot link — Phase 5 above —
-and the audit-driven fixes/test backfill landed; Stage 6 is now an Ethernet
-bench.)
+**Test inventory:** 292 tests are discovered. The 18 protocol, decoder,
+controller-manager, and controller-clock replacement tests pass; the full
+suite additionally needs normal macOS media-service access and free robot-link
+UDP ports. What remains for this replacement is hardware execution (Stages
+0–8) and data-driven tuning.
 
 ---
 
@@ -114,12 +114,12 @@ bench.)
 Nothing below can be validated in software — each item exercises a physical
 interface or a real-world signal path:
 
-1. **BMI088 wiring + firmware flash** — the fw=4 firmware has never run on
-   the Teensy; the IMU has never produced a real sample.
-2. **IMU rate/health + timestamp soak** — 400 Hz delivery, DRDY jitter, and
-   the >75-minute wrap-fix soak.
-3. **Trigger-pulse regression under fw=2** — hardware-synced frames must
-   still get pulse stamps after the protocol change.
+1. **Board power + firmware flash** — verify whether USB energizes the 5V
+   pad, then flash the MicoAir build through STM32 DFU.
+2. **IMU rate/health + timestamp soak** — validate 400 Hz scheduled reads,
+   board-axis rotation, and a >90-minute wrap-crossing soak.
+3. **Trigger polarity and mapping** — scope LOW idle / 100 µs HIGH windows
+   on M1–M6 and verify falling-edge Line0 capture on every logical output.
 4. **Camera-IMU extrinsics end-to-end** — record a real extrinsics bag, run
    `kalibr_calibrate_imu_camera`, verify the result lands in the DB. The
    reported `timeshift_cam_imu` doubles as a whole-system clock check.
@@ -140,10 +140,12 @@ interface or a real-world signal path:
 
 ### Equipment checklist
 
-Full wiring reference (every pin, with electrical notes): **`docs/teensy-pinout.md`**.
+Full wiring and acceptance reference: **`docs/micoair-f405-v2.md`**.
 
-- [ ] Teensy 4.1 on USB, outputs 1–6 (pins 2–7) wired to camera opto-isolated trigger inputs (Line0)
-- [ ] BMI088 breakout: SPI0 (MOSI=11, MISO=12, SCK=13), **CS accel=10, CS gyro=9, gyro INT3→pin 8**, 3V3 + GND
+- [ ] MicoAir F405 V2 **BMI088/SPL06 variant** on USB
+- [ ] M1–M6 wired to camera opto-isolated Line0 returns; regulated 5 V to
+      camera OPTO_IN; external 5 V fallback available if USB does not power
+      the board's 5V rail
 - [ ] At least 2 (ideally all 6) Chameleon3 cameras + lenses; the stereo pair rigidly mounted at the chosen baseline with the BMI088 hard-mounted next to the left camera
 - [ ] Printed 36h11 AprilTag, **black square exactly 6.5 in / 165.1 mm — verify with a ruler, printer scaling is the classic 2 % error**
 - [ ] The Kalibr AprilGrid target (printed from `data/kalibr/aprilgrid_6x6.yaml` geometry, tags 88 mm), rigid backing
@@ -165,16 +167,17 @@ with `./build/guesswork` (default port 8080; substitute below).
 
 ### Stage 0 — Flash & smoke (≈ 30 min)
 
-1. Wire the BMI088 per the checklist. Flash the firmware:
-   `cd firmware && pio run -e teensy41 -t upload`.
-2. Plug the Teensy in. The Mac should enumerate **two** `cu.usbmodem*`
-   interfaces (dual-CDC).
-3. `GET /api/imu/status` → expect `teensy_connected: true`,
-   `telemetry_connected: true`, `fw_version: 4`, `imu_ok: true`,
+1. With camera wiring disconnected, power by USB and measure the 5V pad;
+   follow the fallback rule in `docs/micoair-f405-v2.md`.
+2. Enter DFU mode and flash:
+   `cd firmware && pio run -e micoair_f405_v2 -t upload`.
+3. Reconnect normally. The Mac should enumerate **one** `cu.usbmodem*`
+   interface.
+4. `GET /api/imu/status` → expect `controller_connected: true`,
+   `board: "micoair_f405_v2"`, `protocol_version: 1`, `imu_ok: true`,
    `rate_hz ≈ 400`, `crc_errors: 0`.
-   - `imu_ok: false` ⇒ wiring/CS-pin problem (heartbeat distinguishes "no
-     IMU" from "no Teensy").
-4. Shake the board; sanity-check accel/gyro magnitudes move (watch
+   - `imu_ok: false` indicates an onboard SPI/identity/configuration problem.
+5. Shake the board; sanity-check accel/gyro magnitudes move (watch
    `last_sample_age_ms` stay near 0).
 
 **Pass:** 400 ±5 Hz sustained, zero CRC errors over 5 minutes.
@@ -185,12 +188,12 @@ with `./build/guesswork` (default port 8080; substitute below).
    via `POST /api/hardware-sync/groups`, then `POST /api/hardware-sync/arm`.
 2. Set each camera `hardware_sync_enabled: true` + its `trigger_output_pin`.
 3. `GET /api/status` → camera `fps_1s` matches the group fps (trigger-driven,
-   not freerun) — confirms fw=2 TRIG parsing + pulse re-stamping.
-4. **Soak:** leave everything running > 75 minutes (past the old `micros()`
+   not freerun) — confirms binary TRIGGER parsing + pulse re-stamping.
+4. **Soak:** leave everything running > 90 minutes (past the old `micros()`
    wrap), then confirm frames and IMU are still flowing and an extrinsics
    recording started after the soak doesn't error on non-monotonic stamps.
 
-**Pass:** synced fps correct; no stamp anomalies after 75+ min.
+**Pass:** synced fps correct; no stamp anomalies after 90+ min.
 
 ### Stage 2 — Calibration (one camera first) (≈ 1 h)
 
@@ -199,7 +202,7 @@ with `./build/guesswork` (default port 8080; substitute below).
    stop — the Kalibr job auto-runs (watch the SSE log at
    `…/calibration/job/log`). Target reprojection error < 0.3 px.
 2. **Camera-IMU extrinsics** (the Phase 2 marquee test):
-   - Prereqs auto-checked by the API: hw-sync on, Teensy armed, IMU healthy,
+   - Prereqs auto-checked by the API: hw-sync on, sync controller armed, IMU healthy,
      stored intrinsics matching the live mode.
    - `POST /api/calibration/extrinsics/recording {"camera_ids": [<id>]}`.
    - **Motion recipe (Kalibr needs excitation):** grid fixed and well-lit,
@@ -211,7 +214,7 @@ with `./build/guesswork` (default port 8080; substitute below).
      camera in `imu_extrinsics_json`.
 3. **Acceptance:** in the stored YAML (`GET /api/cameras/<id>/extrinsics`):
    - `timeshift_cam_imu` **≪ 1 ms** — this single number validates the whole
-     shared-Teensy-clock design end-to-end. If it's large, the pulse
+     shared sync-controller clock design end-to-end. If it's large, the pulse
      re-stamping path is broken: stop and debug before anything else.
    - `T_cam_imu` translation matches the tape measure to ~1 cm.
    - `guesswork_meta.reprojection_error_std_px < 1.0` (the VIO gate).
@@ -284,7 +287,7 @@ Controller-side test program: the `GuessWorkLink` reference class in
    `odom.last` carries the commanded speeds.
 3. **Clock sync (both hops):**
    `clock_sync.rio_host.healthy: true` within ~2 s of RIO packets;
-   `clock_sync.host_teensy.healthy: true` within ~2 s of the Teensy
+   `clock_sync.host_sync_controller.healthy: true` within ~2 s of the sync-controller
    telemetry (IMU or armed triggers); `|drift_ppm| < 100` on both;
    `offset_us` stable to ±0.5 ms over 10 min. Record both hops' numbers —
    they are the headline metrics for this stage.
@@ -411,7 +414,11 @@ The software roadmap (Phases 1–7) is complete. What remains is data-driven:
 
 ## 5. Bench results log
 
-### 2026-07-03 — Stage 0 + Stage 1 (first hardware contact)
+### 2026-07-03 — legacy Teensy Stage 0 + Stage 1 baseline
+
+These retained results establish the performance and low-side wiring that
+the MicoAir replacement must meet; they do not constitute acceptance of the
+new board.
 
 Setup: 1× CM3-U3-31S4M (serial 17301963, 6 mm lens), Teensy 4.1 + BMI088,
 fw=4, M4 Mac. Trigger wire: output 1 (pin 2), low-side (see below).
@@ -422,15 +429,23 @@ fw=4, M4 Mac. Trigger wire: output 1 (pin 2), low-side (see below).
   samples. Host↔Teensy clock sync healthy, drift fit **≈1–2 ppm**.
   Spinnaker runtime needs Homebrew `libusb` (added to install.sh).
 - **Stage 1 PASS (fps-lock)** — camera slaved to the 30 fps trigger group:
-  **30.02–30.04 fps** (freerun is ~55), 0 dropped / 0 incomplete. The
-  75-minute stamp soak is still to run.
+  **30.02–30.04 fps** (freerun is ~55), 0 dropped / 0 incomplete.
+- **Stage 1 soak PASS (83 min, past the old 71.6-min wrap point)** —
+  136,507 frames at 29.93 fps locked, 0 dropped / 0 incomplete; 146,671
+  pulses (30/s throughout); IMU 400.4 Hz, 1.92 M samples, **0 CRC errors**;
+  host↔Teensy clock fit healthy at 1.5 ppm over 30 k samples; RSS flat at
+  ~98 MB. (`fw_drops`/sync-reset counters are cumulative from the earlier
+  bench debugging — verified static during the soak.) One item rolls into
+  Stage 2: the post-soak extrinsics-recording stamp check is gated on
+  stored intrinsics.
 - **Finding 1 (wiring, fixed):** the CM3 opto input does NOT register a
   3.3 V high-side drive. Working scheme: OPTO_IN (pin 9, yellow) → Teensy
   VIN 5 V; OPTO_GND (pin 7, brown) → trigger pin (low-side switch);
-  producer uses TriggerActivation=FallingEdge. docs/teensy-pinout.md
+  producer uses TriggerActivation=FallingEdge. docs/micoair-f405-v2.md
   §1 rewritten; earlier revisions also had OPTO_IN/OPTO_GND wire colors
-  swapped. New firmware `TEST_PIN pin=<1..6> level=<0|1>` command holds an
-  output steady for multimeter / LineStatusAll verification.
+  swapped. The legacy firmware's `TEST_PIN pin=<1..6> level=<0|1>` command
+  held an output steady for multimeter / LineStatusAll verification; the
+  MicoAir firmware replaces it with the bounded `TEST_OUTPUT` pulse.
 - **Finding 2 (clock sync, fixed):** feeding the host↔Teensy ClockSync from
   both IMU (telemetry CDC, up to ~15 ms batch lag) and TRIG (command CDC,
   ~1 ms) interleaved non-monotonic stamps and reset-thrashed the

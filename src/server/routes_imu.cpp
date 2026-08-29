@@ -12,7 +12,7 @@
 #include "server/imu_allan_service.hpp"
 #include "server/imu_config_repository.hpp"
 #include "server/route_helpers.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 
 namespace gw::server {
 
@@ -56,7 +56,7 @@ bool parse_positive_number(const crow::json::rvalue& body, const char* field,
 
 void register_imu_routes(crow::SimpleApp&     app,
                          ImuConfigRepository& imu_config,
-                         TeensyManager&       teensy,
+                         SyncControllerManager& controller,
                          ApriltagSupervisor&  apriltag,
                          FusionSupervisor&    fusion,
                          ImuAllanService&     allan,
@@ -97,18 +97,20 @@ void register_imu_routes(crow::SimpleApp&     app,
     });
 
     CROW_ROUTE(app, "/api/imu/status").methods("GET"_method)
-    ([&teensy] {
-        const auto s = teensy.status();
+    ([&controller] {
+        const auto s = controller.status();
         crow::json::wvalue j;
-        j["teensy_connected"]    = s.connected;
-        j["telemetry_connected"] = s.telemetry_connected;
-        j["imu_ok"]              = s.imu_ok;
-        j["rate_hz"]             = s.imu_rate_hz;
-        j["samples"]             = s.imu_samples;
-        j["fw_drops"]            = s.imu_fw_drops;
-        j["crc_errors"]          = s.imu_crc_errors;
+        j["controller_connected"] = s.connected;
+        j["imu_ok"]               = s.imu_ok;
+        j["rate_hz"]              = s.imu_rate_hz;
+        j["samples"]              = s.imu_samples;
+        j["fw_drops"]             = s.imu_fw_drops;
+        j["crc_errors"]           = s.imu_crc_errors;
+        j["usb_errors"]           = s.usb_errors;
         put_opt(j, "last_sample_age_ms", s.imu_last_sample_age_ms);
-        put_opt(j, "fw_version",         s.fw_version);
+        put_opt(j, "firmware_version",   s.firmware_version);
+        put_opt(j, "protocol_version",   s.protocol_version);
+        put_opt(j, "board",              s.board);
         return json_response(200, std::move(j));
     });
 

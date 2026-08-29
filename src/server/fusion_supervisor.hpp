@@ -40,8 +40,8 @@ struct FusionStatus {
     // Per-stage latency (docs/pose_pipeline.md § latency stages):
     //   tag_pulse_to_fusion — trigger pulse → tag measurement entering fusion
     //   queue_wait          — internal queue dwell (drainer push → engine pop)
-    //   pose_staleness      — teensy_now − newest state at each CAN send;
-    //                         the headline trigger-pulse→pose-on-CAN number
+    //   pose_staleness      — sync_clock_now − newest state at each UDP send;
+    //                         the headline trigger-pulse→pose-on-wire number
     //                         (target p95 < 50 ms). Solve time lives in
     //                         counters.solve_ms_*.
     struct LatencyEntry {
@@ -53,8 +53,8 @@ struct FusionStatus {
 
     double lag_s = 0.0;  // active engine lag (config copy)
 
-    bool   teensy_now_healthy = false;
-    double teensy_now_offset_ms = 0.0;
+    bool   sync_clock_now_healthy = false;
+    double sync_clock_now_offset_ms = 0.0;
 
     uint64_t output_sent        = 0;
     uint64_t output_send_errors = 0;
@@ -63,11 +63,11 @@ struct FusionStatus {
 
 // Owns the fusion engine and its threads:
 //   - 3 bus drainers (TagPoseBus, VioBus, OdomBus) push measurements into a
-//     bounded internal queue (the odom drainer also feeds the Teensy-now
+//     bounded internal queue (the odom drainer also feeds the sync controller-now
 //     clock estimator),
 //   - 1 engine thread drains the queue into the single-threaded
 //     gw::fusion::FusionEngine and publishes a snapshot,
-//   - 1 output thread extrapolates the snapshot to Teensy-now at output_hz
+//   - 1 output thread extrapolates the snapshot to sync controller-now at output_hz
 //     and ships it via RobotLink::send_pose (UDP to the controller).
 //
 // Construct after ApriltagSupervisor / VioSupervisor / RobotLink and

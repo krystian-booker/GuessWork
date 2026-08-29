@@ -1,154 +1,206 @@
-#include "trigger_engine.h"
+#include "trigger_engine.hpp"
 
-#include <string.h>
+#include <Arduino.h>
 
-#include "time64.h"
+#include "board.hpp"
+#include "timebase.hpp"
 
 namespace gw_fw {
+namespace {
 
-TriggerEngine* TriggerEngine::s_self_ = nullptr;
+constexpr uint32_t kPulseWidthUs = 100;
+constexpr size_t kQueueSize = 64;
 
-void TriggerEngine::isr_0() { if (s_self_) s_self_->on_group_fire(0); }
-void TriggerEngine::isr_1() { if (s_self_) s_self_->on_group_fire(1); }
-void TriggerEngine::isr_2() { if (s_self_) s_self_->on_group_fire(2); }
-void TriggerEngine::isr_3() { if (s_self_) s_self_->on_group_fire(3); }
+struct Group {
+    bool configured = false;
+    bool pulse_high = false;
+    uint8_t slot = 0;
+    uint8_t pin_mask = 0;
+    uint32_t period_us = 0;
+    uint32_t remainder = 0;
+    uint32_t remainder_accum = 0;
+    uint32_t rate_millihz = 0;
+    uint32_t next_start = 0;
+    uint32_t pulse_end = 0;
+    uint32_t index = 0;
+};
 
-void TriggerEngine::begin() {
-    s_self_ = this;
-    for (int i = 0; i < kMaxOutputs; ++i) {
-        pinMode(kOutputPins[i], OUTPUT);
-        digitalWriteFast(kOutputPins[i], LOW);
+Group g_groups[gw_sync::kMaxGroups];
+volatile bool g_armed = false;
+volatile TriggerQueueEvent g_queue[kQueueSize];
+volatile uint8_t g_head = 0;
+volatile uint8_t g_tail = 0;
+volatile uint32_t g_drops = 0;
+
+bool due(uint32_t now, uint32_t deadline) {
+    return static_cast<int32_t>(now - deadline) >= 0;
+}
+
+void enqueue(uint8_t slot, uint32_t index, uint64_t t_us) {
+    const uint8_t next = static_cast<uint8_t>((g_head + 1u) % kQueueSize);
+    if (next == g_tail) {
+        ++g_drops;
+        return;
+    }
+    g_queue[g_head].slot = slot;
+    g_queue[g_head].index = index;
+    g_queue[g_head].t_us = t_us;
+    __DMB();
+    g_head = next;
+}
+
+void advance(Group& group) {
+    group.next_start += group.period_us;
+    group.remainder_accum += group.remainder;
+    if (group.remainder_accum >= group.rate_millihz) {
+        group.remainder_accum -= group.rate_millihz;
+        ++group.next_start;
     }
 }
 
-int TriggerEngine::find_group_by_name(const char* name) const {
-    for (int i = 0; i < n_groups_; ++i) {
-        if (strncmp(groups_[i].name, name, kMaxGroupNameLen + 1) == 0) return i;
+void schedule_next(uint32_t now) {
+    if (!g_armed) {
+        timebase::disable_compare();
+        return;
     }
-    return -1;
-}
-
-bool TriggerEngine::set_config(const char* name, float fps, uint8_t pin_mask,
-                               const char*& err) {
-    if (!name || !name[0]) { err = "missing name";          return false; }
-    if (strlen(name) > kMaxGroupNameLen) { err = "name too long"; return false; }
-    if (!(fps > 0.0f) || fps > 10000.0f) { err = "fps out of range"; return false; }
-    if (pin_mask == 0 || (pin_mask & ~0x3F)) { err = "pin_mask invalid"; return false; }
-
-    // Updating an armed group is unsafe (the IntervalTimer is running). Force
-    // the host to STOP first.
-    if (armed_) { err = "stop before reconfiguring"; return false; }
-
-    int idx = find_group_by_name(name);
-    if (idx < 0) {
-        if (n_groups_ >= kMaxGroups) { err = "group table full"; return false; }
-        idx = n_groups_++;
-    }
-    Group& g = groups_[idx];
-    strncpy(g.name, name, kMaxGroupNameLen);
-    g.name[kMaxGroupNameLen] = '\0';
-    g.fps       = fps;
-    g.pin_mask  = pin_mask;
-    g.pulse_idx = 0;
-    g.head      = g.tail = 0;
-    return true;
-}
-
-void TriggerEngine::clear_config() {
-    stop();
-    for (int i = 0; i < n_groups_; ++i) {
-        groups_[i].name[0]  = '\0';
-        groups_[i].fps      = 0.0f;
-        groups_[i].pin_mask = 0;
-        groups_[i].pulse_idx = 0;
-        groups_[i].head = groups_[i].tail = 0;
-    }
-    n_groups_ = 0;
-}
-
-bool TriggerEngine::arm(const char*& err) {
-    if (n_groups_ == 0) { err = "no groups configured"; return false; }
-    if (armed_) return true;
-
-    static constexpr void (*kTrampolines[kMaxGroups])() = {
-        &TriggerEngine::isr_0, &TriggerEngine::isr_1,
-        &TriggerEngine::isr_2, &TriggerEngine::isr_3,
-    };
-
-    for (int i = 0; i < n_groups_; ++i) {
-        Group& g = groups_[i];
-        g.pulse_idx = 0;
-        g.head = g.tail = 0;
-        const uint32_t period_us = static_cast<uint32_t>(1'000'000.0f / g.fps + 0.5f);
-        if (!g.timer.begin(kTrampolines[i], period_us)) {
-            err = "IntervalTimer::begin failed";
-            // Roll back any timers we already started.
-            for (int j = 0; j < i; ++j) groups_[j].timer.end();
-            return false;
+    uint32_t best = now + 0x7FFFFFFFu;
+    int32_t best_delta = 0x7FFFFFFF;
+    for (const auto& group : g_groups) {
+        if (!group.configured) continue;
+        const uint32_t deadline = group.pulse_high ? group.pulse_end
+                                                   : group.next_start;
+        int32_t delta = static_cast<int32_t>(deadline - now);
+        if (delta < 2) delta = 2;
+        if (delta < best_delta) {
+            best_delta = delta;
+            best = now + static_cast<uint32_t>(delta);
         }
     }
-    armed_ = true;
-    return true;
+    timebase::set_compare(best);
 }
 
-void TriggerEngine::stop() {
-    for (int i = 0; i < n_groups_; ++i) groups_[i].timer.end();
-    for (int i = 0; i < kMaxOutputs; ++i) digitalWriteFast(kOutputPins[i], LOW);
-    armed_ = false;
+}  // namespace
+
+void trigger_begin() {
+    board::initialise_outputs_idle();
+    timebase::begin();
 }
 
-bool TriggerEngine::test_drive(int output_1_based, bool high, const char*& err) {
-    if (armed_) {
-        err = "disarm first (STOP) before TEST_PIN";
-        return false;
+gw_sync::AckStatus trigger_set_config(const gw_sync::GroupConfig* groups,
+                                      uint8_t count) {
+    if (count > gw_sync::kMaxGroups || (count && !groups)) {
+        return gw_sync::AckStatus::BadConfig;
     }
-    if (output_1_based < 1 || output_1_based > kMaxOutputs) {
-        err = "pin must be 1..6";
-        return false;
+    Group candidate[gw_sync::kMaxGroups]{};
+    uint8_t used_pins = 0;
+    uint8_t used_slots = 0;
+    for (uint8_t i = 0; i < count; ++i) {
+        const auto& wire = groups[i];
+        if (wire.slot >= gw_sync::kMaxGroups ||
+            (used_slots & (1u << wire.slot)) || wire.pin_mask == 0 ||
+            (wire.pin_mask & ~0x3Fu) || (wire.pin_mask & used_pins) ||
+            wire.rate_millihz == 0 ||
+            wire.rate_millihz > gw_sync::kMaxRateMilliHz) {
+            return gw_sync::AckStatus::BadConfig;
+        }
+        used_slots |= static_cast<uint8_t>(1u << wire.slot);
+        used_pins |= wire.pin_mask;
+        Group& group = candidate[wire.slot];
+        group.configured = true;
+        group.slot = wire.slot;
+        group.pin_mask = wire.pin_mask;
+        group.rate_millihz = wire.rate_millihz;
+        group.period_us = 1'000'000'000u / wire.rate_millihz;
+        group.remainder = 1'000'000'000u % wire.rate_millihz;
+        if (group.period_us <= kPulseWidthUs) return gw_sync::AckStatus::BadConfig;
     }
-    digitalWriteFast(kOutputPins[output_1_based - 1], high ? HIGH : LOW);
-    return true;
+
+    noInterrupts();
+    g_armed = false;
+    timebase::disable_compare();
+    board::set_output_mask_low(0x3F);
+    for (size_t i = 0; i < gw_sync::kMaxGroups; ++i) g_groups[i] = candidate[i];
+    interrupts();
+    return gw_sync::AckStatus::Ok;
 }
 
-void TriggerEngine::on_group_fire(int i) {
-    Group& g = groups_[i];
-
-    // Latch the timestamp BEFORE driving the pins so we report what the
-    // host actually saw arrive at the camera, not the time after the spin.
-    const uint64_t t_us = now_us64();
-    const uint32_t idx  = ++g.pulse_idx;
-
-    // Rising edge — drive every pin in the mask HIGH simultaneously, hold
-    // for kPulseWidthUs, then back to LOW. delayMicroseconds() is a busy
-    // spin; 100 µs at 600 MHz is ~60k cycles, comfortable inside an ISR.
-    const uint8_t mask = g.pin_mask;
-    for (int p = 0; p < kMaxOutputs; ++p) {
-        if (mask & (1u << p)) digitalWriteFast(kOutputPins[p], HIGH);
+gw_sync::AckStatus trigger_arm() {
+    // A lost ACK may make the host repeat ARM. Preserve the existing phase and
+    // event indices so that retrying the command cannot create a trigger gap.
+    if (g_armed) return gw_sync::AckStatus::Ok;
+    bool any = false;
+    const uint32_t now = timebase::now_us32();
+    noInterrupts();
+    for (auto& group : g_groups) {
+        if (!group.configured) continue;
+        any = true;
+        group.pulse_high = false;
+        group.remainder_accum = 0;
+        group.index = 0;
+        group.next_start = now + group.period_us;
     }
+    if (any) {
+        g_armed = true;
+        schedule_next(now);
+    }
+    interrupts();
+    return any ? gw_sync::AckStatus::Ok : gw_sync::AckStatus::NoConfig;
+}
+
+void trigger_stop() {
+    noInterrupts();
+    g_armed = false;
+    timebase::disable_compare();
+    board::set_output_mask_low(0x3F);
+    for (auto& group : g_groups) group.pulse_high = false;
+    interrupts();
+}
+
+gw_sync::AckStatus trigger_test_output(uint8_t logical_output) {
+    if (logical_output < 1 || logical_output > gw_sync::kOutputCount || g_armed) {
+        return logical_output < 1 || logical_output > gw_sync::kOutputCount
+            ? gw_sync::AckStatus::BadConfig : gw_sync::AckStatus::Busy;
+    }
+    const uint8_t mask = static_cast<uint8_t>(1u << (logical_output - 1));
+    board::set_output_mask_high(mask);
     delayMicroseconds(kPulseWidthUs);
-    for (int p = 0; p < kMaxOutputs; ++p) {
-        if (mask & (1u << p)) digitalWriteFast(kOutputPins[p], LOW);
-    }
-
-    // SPSC enqueue. If the host is too slow to drain the ring we drop the
-    // event silently (host will see a gap in `idx`, which is the same signal
-    // a missed-trigger would produce on the camera side).
-    const uint32_t head = g.head;
-    const uint32_t next = (head + 1) & (kPulseRingSize - 1);
-    if (next != g.tail) {
-        g.ring[head] = PulseEvent{idx, t_us};
-        g.head       = next;
-    }
+    board::set_output_mask_low(mask);
+    return gw_sync::AckStatus::Ok;
 }
 
-bool TriggerEngine::drain_event(int i, PulseEvent& out) {
-    if (i < 0 || i >= n_groups_) return false;
-    Group& g = groups_[i];
-    const uint32_t tail = g.tail;
-    if (tail == g.head) return false;
-    out      = g.ring[tail];
-    g.tail   = (tail + 1) & (kPulseRingSize - 1);
+bool trigger_pop(TriggerQueueEvent& event) {
+    if (g_tail == g_head) return false;
+    event.slot = g_queue[g_tail].slot;
+    event.index = g_queue[g_tail].index;
+    event.t_us = g_queue[g_tail].t_us;
+    __DMB();
+    g_tail = static_cast<uint8_t>((g_tail + 1u) % kQueueSize);
     return true;
+}
+
+bool trigger_is_armed() { return g_armed; }
+uint32_t trigger_drop_count() { return g_drops; }
+
+void trigger_timer_isr() {
+    const uint32_t now = timebase::now_us32();
+    const uint64_t now64 = timebase::now_us();
+    for (auto& group : g_groups) {
+        if (!group.configured) continue;
+        if (group.pulse_high && due(now, group.pulse_end)) {
+            board::set_output_mask_low(group.pin_mask);
+            group.pulse_high = false;
+        }
+        if (!group.pulse_high && due(now, group.next_start)) {
+            board::set_output_mask_high(group.pin_mask);
+            group.pulse_high = true;
+            group.pulse_end = now + kPulseWidthUs;
+            enqueue(group.slot, group.index++, now64);
+            do {
+                advance(group);
+            } while (due(now, group.next_start));
+        }
+    }
+    schedule_next(now);
 }
 
 }  // namespace gw_fw

@@ -16,21 +16,21 @@
 #include "server/imu_config_repository.hpp"
 #include "server/routes_apriltag.hpp"
 #include "net/robot_link.hpp"
-#include "server/teensy_manager.hpp"
+#include "server/sync_controller_manager.hpp"
 #include "server/vio_config_repository.hpp"
 #include "server/vio_supervisor.hpp"
 
 // Threaded integration test for the fusion supervisor stack — the primary
 // TSAN target: three producer threads hammer the real measurement buses
 // while pollers hit status()/reload()/reset(), with no hardware anywhere
-// (TeensyManager is constructed but never start()ed — the buses don't need
+// (SyncControllerManager is constructed but never start()ed — the buses don't need
 // its I/O thread).
 
 namespace gw::server {
 
 namespace {
 
-constexpr int64_t kBaseNs = 5'000'000'000'000ll;  // synthetic Teensy epoch
+constexpr int64_t kBaseNs = 5'000'000'000'000ll;  // synthetic sync controller epoch
 
 int64_t steady_ns() {
     return std::chrono::steady_clock::now().time_since_epoch().count();
@@ -63,20 +63,20 @@ TEST_F(FusionSupervisorTest, ConcurrentFeedStatusReloadIsClean) {
     FusionConfigRepository fusion_cfg(*db_);
     seed_default_field_layout(layouts);
 
-    TeensyManager      teensy;  // not start()ed — no serial probing in tests
+    SyncControllerManager      controller;  // not start()ed — no serial probing in tests
     // Never start()ed either — the odom bus works without a socket; send_pose
     // fails cleanly (fd < 0), exercising the output error path.
-    gw::net::RobotLink robot(gw::net::RobotLink::TeensyClockView{
+    gw::net::RobotLink robot(gw::net::RobotLink::SyncClockView{
         [](uint64_t host_ns) { return std::optional<uint64_t>(host_ns); },
-        [](uint64_t teensy_ns) { return std::optional<uint64_t>(teensy_ns); }});
+        [](uint64_t controller_ns) { return std::optional<uint64_t>(controller_ns); }});
     ApriltagSupervisor apriltag(cameras, layouts, imu_cfg);
-    VioSupervisor      vio(cameras, imu_cfg, vio_cfg, teensy);
+    VioSupervisor      vio(cameras, imu_cfg, vio_cfg, controller);
     FusionSupervisor   fusion(fusion_cfg, imu_cfg, apriltag, vio, robot);
 
     std::atomic<bool> stop{false};
     const int64_t     t0 = steady_ns();
-    // Synthetic Teensy time tracks wall time so the TeensyNowEstimator's
-    // host↔Teensy mapping is self-consistent.
+    // Synthetic sync controller time tracks wall time so the SyncClockNowEstimator's
+    // host↔sync controller mapping is self-consistent.
     const auto t_now = [&] { return kBaseNs + (steady_ns() - t0); };
 
     std::thread tag_producer([&] {
@@ -84,7 +84,7 @@ TEST_F(FusionSupervisorTest, ConcurrentFeedStatusReloadIsClean) {
         while (!stop.load(std::memory_order_acquire)) {
             gw::apriltag::TagPoseMeasurement m;
             m.t_ns         = t_now();
-            m.clock_source = gw::apriltag::TagPoseMeasurement::Clock::kTeensy;
+            m.clock_source = gw::apriltag::TagPoseMeasurement::Clock::kSyncController;
             m.n_tags       = 2;
             m.T_field_robot = gw::apriltag::mat4_identity();
             for (int i = 0; i < 3; ++i) m.cov[i * 6 + i] = 1e-4;
@@ -162,7 +162,7 @@ TEST_F(FusionSupervisorTest, ConcurrentFeedStatusReloadIsClean) {
     EXPECT_TRUE(st.enabled);
     EXPECT_GT(st.tag.rate_hz, 50.0);   // 100 Hz nominal, generous floor
     EXPECT_GT(st.odom.rate_hz, 100.0);
-    EXPECT_TRUE(st.teensy_now_healthy);
+    EXPECT_TRUE(st.sync_clock_now_healthy);
     EXPECT_GT(st.lat_tag_pulse_to_fusion.count, 0u);
     EXPECT_GT(st.lat_queue_wait.count, 0u);
     EXPECT_EQ(st.counters.update_exceptions, 0u);
@@ -170,7 +170,7 @@ TEST_F(FusionSupervisorTest, ConcurrentFeedStatusReloadIsClean) {
     if (st.state.initialized) {
         EXPECT_TRUE(st.mode == "no_vio" || st.mode == "nominal") << st.mode;
     }
-    // Destruction order (fusion → vio/apriltag/teensy) exercises the join
+    // Destruction order (fusion → vio/apriltag/controller) exercises the join
     // paths; reaching the end without deadlock/race is the real assertion.
 }
 

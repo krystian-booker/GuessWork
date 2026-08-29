@@ -277,7 +277,7 @@ void import_trigger_groups(const crow::json::rvalue& snap,
     if (!snap.has("trigger_groups")) return;
     const auto& arr = snap["trigger_groups"];
 
-    // Group identity is purely {name, fps, pins} (TeensyManager re-pushes by
+    // Group identity is purely {name, fps, pins} (SyncControllerManager re-pushes by
     // value), and pins can't be staged through an empty set — so matched
     // names are removed first, then everything recreated.
     std::unordered_set<std::string> existing_names;

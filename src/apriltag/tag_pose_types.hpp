@@ -13,11 +13,11 @@ namespace gw::apriltag {
 // in a single camera frame. Published on the TagPoseBus and consumed by the
 // fusion layer (Phase 6).
 struct TagPoseMeasurement {
-    // Frame timestamp. kTeensy = camera_ts_ns (the hardware-sync pulse clock
+    // Frame timestamp. kSyncController = camera_ts_ns (the hardware-sync pulse clock
     // shared with the IMU); kHost = mach_absolute_time fallback when no
     // pulse matched — fusion should reject these when mixing with
-    // Teensy-clock sources.
-    enum class Clock : uint8_t { kTeensy, kHost };
+    // sync controller-clock sources.
+    enum class Clock : uint8_t { kSyncController, kHost };
     int64_t t_ns         = 0;
     Clock   clock_source = Clock::kHost;
 

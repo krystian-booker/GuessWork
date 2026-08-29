@@ -157,7 +157,7 @@ export default function ExtrinsicsPage() {
     <div>
       <PageHeader
         title="Camera–IMU extrinsics"
-        description="Records the selected cameras + IMU into one bag on the Teensy clock, then runs kalibr_calibrate_imu_camera."
+        description="Records the selected cameras + IMU into one bag on the sync controller clock, then runs kalibr_calibrate_imu_camera."
       />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -175,7 +175,7 @@ export default function ExtrinsicsPage() {
               <PreflightRow
                 ok={hwSync.data?.armed ?? false}
                 label="Hardware sync armed"
-                detail="cameras must be pulsed on the Teensy clock"
+                detail="cameras must be pulsed on the sync controller clock"
               />
               <PreflightRow ok={hwSyncOk} label="Selected cameras have hw-sync enabled" />
             </CardContent>

@@ -22,7 +22,7 @@ namespace gw::server {
 class CameraRepository;
 class ImuConfigRepository;
 class VioConfigRepository;
-class TeensyManager;
+class SyncControllerManager;
 struct Camera;
 
 struct VioStatus {
@@ -43,7 +43,7 @@ struct VioStatus {
     uint64_t frames_fed      = 0;
     uint64_t imu_fed         = 0;
     uint64_t imu_bus_dropped = 0;
-    double   imu_rate_hz     = 0.0;  // from TeensyManager
+    double   imu_rate_hz     = 0.0;  // from SyncControllerManager
 
     struct CameraEntry {
         int64_t                    camera_id = 0;
@@ -73,7 +73,7 @@ public:
     VioSupervisor(CameraRepository&    cameras,
                   ImuConfigRepository& imu_config,
                   VioConfigRepository& vio_config,
-                  TeensyManager&       teensy);
+                  SyncControllerManager&       controller);
     ~VioSupervisor();
 
     // ConsumerFactory body: returns a VioFeederConsumer for vio_left /
@@ -105,7 +105,7 @@ private:
     CameraRepository&    cameras_;
     ImuConfigRepository& imu_config_;
     VioConfigRepository& vio_config_;
-    TeensyManager&       teensy_;
+    SyncControllerManager&       controller_;
 
     std::shared_ptr<gw::vio::VioBus>           bus_;
     std::shared_ptr<gw::vio::StereoSyncPairer> pairer_;
